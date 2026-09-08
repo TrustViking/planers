@@ -1,0 +1,109 @@
+
+########################################
+# Environment files
+########################################
+.env
+.env.*
+
+########################################
+# Secrets folder - track only the example and README
+########################################
+secrets/*
+!secrets/.env.example
+!secrets/README.txt
+# Explicit ignores below are redundant under secrets/* but kept as documentation of intent:
+secrets/.env
+secrets/token.json
+secrets/credentials.json
+secrets/service_account.json
+secrets/cookies.txt
+
+########################################
+# Google OAuth / API
+########################################
+credentials*.json
+credentials_bot.json
+.credentials_bot.json
+client_secret*.json
+*oauth*.json
+*service_account*.json
+*service-account*.json
+
+########################################
+# Keys / certs
+########################################
+*.pem
+*.key
+*.p12
+
+########################################
+# Local helper materials
+########################################
+_HELP/
+
+########################################
+# Python / caches
+########################################
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+########################################
+# Virtual environments
+########################################
+.venv/
+venv/
+ENV/
+.venv_*/
+.venv-*/
+.poetry/
+
+########################################
+# Logs / temp / outputs
+########################################
+*.log
+logs/
+tmp/
+temp/
+out/
+output/
+outputs/
+downloads/
+data/
+docs/
+image/
+state/
+tools/
+
+########################################
+# IDE / OS / local workspace stuff
+########################################
+.vscode/
+*.code-workspace
+
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+########################################
+# Claude Code local session state
+########################################
+.claude/
