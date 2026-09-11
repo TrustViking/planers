@@ -29,7 +29,7 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def setup_logging(logs_dir: Path, debug: bool) -> Path:
-    """Файл — всегда DEBUG; консоль — INFO (DEBUG при --debug). Возвращает путь файла лога."""
+    """Файл — всегда DEBUG; консоль — WARNING (DEBUG при --debug): владелец видит отчёт и предупреждения."""
     close_logging()
     root_logger: logging.Logger = logging.getLogger(ROOT_LOGGER_NAME)
     root_logger.setLevel(logging.DEBUG)
@@ -41,7 +41,7 @@ def setup_logging(logs_dir: Path, debug: bool) -> Path:
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     console_handler: logging.StreamHandler = logging.StreamHandler(sys.stderr)
-    console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+    console_handler.setLevel(logging.DEBUG if debug else logging.WARNING)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)

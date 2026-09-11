@@ -9,6 +9,7 @@ import pytest
 
 from app.main import run_cli
 from app.paths import ROOT_ENV_VAR
+from app.ui import messages_ru as msg
 
 CONFIG_YAML: str = """owner: "Тест"
 channels:
@@ -38,8 +39,15 @@ def _write_config(root: Path) -> None:
     (root / "config" / "planer.yaml").write_text(CONFIG_YAML, encoding="utf-8")
 
 
-def test_missing_config_copies_example_and_exits_2(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_full_run_is_not_available_before_stage_3(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_config(planer_root)
     assert run_cli([]) == 2
+    assert msg.FULL_RUN_NOT_AVAILABLE_YET in capsys.readouterr().out
+    assert not (planer_root / "state" / "registry.json").exists()
+
+
+def test_missing_config_copies_example_and_exits_2(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert run_cli(["--dry-run"]) == 2
     config_dir: Path = planer_root / "config"
     assert (config_dir / "planer.yaml").read_bytes() == (config_dir / "planer.example.yaml").read_bytes()
     assert "Создан" in capsys.readouterr().out
@@ -47,17 +55,17 @@ def test_missing_config_copies_example_and_exits_2(planer_root: Path, capsys: py
 
 def test_bad_config_exits_2(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (planer_root / "config" / "planer.yaml").write_text("owner: \"\"\nchannels: []\n", encoding="utf-8")
-    assert run_cli([]) == 2
+    assert run_cli(["--dry-run"]) == 2
     assert "Ошибка в конфиге" in capsys.readouterr().out
 
 
 def test_empty_inbox_exits_3(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write_config(planer_root)
-    assert run_cli([]) == 3
+    assert run_cli(["--dry-run"]) == 3
     assert "нет пакетов" in capsys.readouterr().out
 
 
-def test_valid_package_exits_0_and_writes_report(
+def test_dry_run_on_valid_package(
     planer_root: Path,
     make_package: PackageFactory,
     make_slot: SlotFactory,
@@ -69,14 +77,17 @@ def test_valid_package_exits_0_and_writes_report(
         slots=[make_slot("01-01-2099", "19:00", "uk"), make_slot("01-01-2099", "19:00", "en")],
     )
     assert run_cli(["--dry-run"]) == 0
-    out: str = capsys.readouterr().out
-    assert "## Пакеты" in out
-    assert f"{path.name} — принят, слотов 2, из них под мои языки 2" in out
-    assert "- 01-01-2099 19:00 en → Test RU (yt_ru)" in out
-    assert "- 01-01-2099 19:00 uk → Test UA (yt_ua)" in out
+    captured = capsys.readouterr()
+    assert msg.NOTICE_FAKE_PLATFORM in captured.out
+    assert f"{path.name} — принят, слотов 2, из них под мои языки 2" in captured.out
+    assert "- 01-01-2099 19:00 en → Test RU — эфира нет, будет создан — не выполнено (dry-run)" in captured.out
+    assert "- 01-01-2099 19:00 uk → Test UA — эфира нет, будет создан — не выполнено (dry-run)" in captured.out
+    assert "run_started" not in captured.err
     [report] = list((planer_root / "reports").glob("report_*.md"))
     assert "## Пакеты" in report.read_text(encoding="utf-8")
     assert path.exists()
+    assert not (planer_root / "state" / "registry.json").exists()
+    assert not (planer_root / "out" / "keys.txt").exists()
 
 
 def test_damaged_package_next_to_valid_exits_1(
@@ -92,28 +103,27 @@ def test_damaged_package_next_to_valid_exits_1(
     assert "broken.bcast — пакет повреждён: не ZIP-архив" in capsys.readouterr().out
 
 
-def test_all_past_package_is_archived_only_without_dry_run(
-    planer_root: Path,
-    make_package: PackageFactory,
-    make_slot: SlotFactory,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_status_writes_keys_file(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write_config(planer_root)
-    path: Path = make_package(planer_root / "inbox", slots=[make_slot("01-01-2020", "19:00", "uk")])
-    assert run_cli(["--dry-run"]) == 0
-    assert path.exists()
-    assert "все слоты в прошлом (dry-run: не перенесён)" in capsys.readouterr().out
-    assert run_cli([]) == 0
-    assert not path.exists()
-    assert (planer_root / "inbox" / "archive" / path.name).exists()
-    assert "все слоты в прошлом, перенесён в inbox\\archive" in capsys.readouterr().out
+    assert run_cli(["--status"]) == 0
+    keys_file: Path = planer_root / "out" / "keys.txt"
+    lines: list[str] = keys_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2 and all(line.startswith("# ") for line in lines)
+    out: str = capsys.readouterr().out
+    assert "## Запланировано на каналах (0)" in out
+    assert "Файл ключей: out" in out
 
 
-@pytest.mark.parametrize(
-    ("argv", "mode"),
-    [(["--status"], "--status"), (["--check"], "--check"), (["--auth", "yt_ua"], "--auth")],
-)
-def test_modes_of_later_stages_exit_2(
+def test_unreadable_registry_exits_2(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_config(planer_root)
+    (planer_root / "state").mkdir(parents=True, exist_ok=True)
+    (planer_root / "state" / "registry.json").write_text("{broken", encoding="utf-8")
+    assert run_cli(["--status"]) == 2
+    assert "не читается" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("argv", "mode"), [(["--check"], "--check"), (["--auth", "yt_ua"], "--auth")])
+def test_modes_of_stage_3_exit_2(
     planer_root: Path,
     capsys: pytest.CaptureFixture[str],
     argv: list[str],

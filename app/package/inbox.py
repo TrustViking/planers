@@ -38,6 +38,7 @@ class InboxScan:
     slot_map: dict[str, Slot]                   # будущие слоты всех пакетов, новее побеждает
     past_slots: tuple[Slot, ...]                # из той же карты, start <= now
     all_past_packages: tuple[Package, ...]      # у пакета нет ни одного будущего слота
+    slot_sources: dict[str, Package]            # slot_id → пакет-победитель (превью, package_id)
 
     @property
     def is_empty(self) -> bool:
@@ -53,7 +54,7 @@ def scan_inbox(paths: PlanerPaths, now: datetime) -> InboxScan:
     """Читает все пакеты, сливает слоты по slot_id (новее побеждает), отделяет прошлое."""
     packages, problems = _read_packages(list_package_files(paths))
     packages.sort(key=lambda package: (package.generated_at, package.path.name))
-    merged: dict[str, Slot] = _merge_slots(packages)
+    merged, slot_sources = _merge_slots(packages)
     stats: tuple[AcceptedPackage, ...] = tuple(_package_stats(package, now) for package in packages)
     scan: InboxScan = InboxScan(
         packages=stats,
@@ -61,6 +62,7 @@ def scan_inbox(paths: PlanerPaths, now: datetime) -> InboxScan:
         slot_map={slot_id: slot for slot_id, slot in merged.items() if slot.start > now},
         past_slots=tuple(sorted((slot for slot in merged.values() if slot.start <= now), key=slot_order_key)),
         all_past_packages=tuple(item.package for item in stats if item.slots_active == 0),
+        slot_sources=slot_sources,
     )
     LOGGER.info(
         "inbox_scanned packages=%d problems=%d active_slots=%d past_slots=%d all_past_packages=%d",
@@ -90,8 +92,11 @@ def _read_packages(files: list[Path]) -> tuple[list[Package], list[PackageProble
     return packages, problems
 
 
-def _merge_slots(packages: list[Package]) -> dict[str, Slot]:
-    """packages — от старого к новому; тот же slot_id из более нового пакета заменяет старый."""
+def _merge_slots(packages: list[Package]) -> tuple[dict[str, Slot], dict[str, Package]]:
+    """packages — от старого к новому; тот же slot_id из более нового пакета заменяет старый.
+
+    Возвращает карту слотов и пакет-победитель каждого slot_id.
+    """
     merged: dict[str, Slot] = {}
     source_by_slot: dict[str, Package] = {}
     for package in packages:
@@ -106,7 +111,7 @@ def _merge_slots(packages: list[Package]) -> dict[str, Slot]:
                 )
             merged[slot.slot_id] = slot
             source_by_slot[slot.slot_id] = package
-    return merged
+    return merged, source_by_slot
 
 
 def _package_stats(package: Package, now: datetime) -> AcceptedPackage:
@@ -119,20 +124,24 @@ def _package_stats(package: Package, now: datetime) -> AcceptedPackage:
     )
 
 
-def archive_package(paths: PlanerPaths, package: Package) -> Path:
+def archive_package(paths: PlanerPaths, package: Package, moved_at: datetime | None = None) -> Path:
     """В inbox\\archive\\ — все слоты пакета в прошлом."""
-    return _move_package(package.path, paths.inbox_archive_dir)
+    return _move_package(package.path, paths.inbox_archive_dir, moved_at)
 
 
-def finish_package(paths: PlanerPaths, package: Package) -> Path:
+def finish_package(paths: PlanerPaths, package: Package, moved_at: datetime | None = None) -> Path:
     """В inbox\\done\\ — все слоты пакета под мои языки в терминальном состоянии."""
-    return _move_package(package.path, paths.inbox_done_dir)
+    return _move_package(package.path, paths.inbox_done_dir, moved_at)
 
 
-def _move_package(source: Path, target_dir: Path) -> Path:
+def _move_package(source: Path, target_dir: Path, moved_at: datetime | None) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
     target: Path = target_dir / source.name
     os.replace(source, target)
+    # os.replace сохраняет mtime, а cleanup_expired считает возраст по mtime:
+    # срок inbox_keep_days должен идти от переноса, а не от скачивания пакета.
+    # moved_at — «сейчас» запуска (тот же источник, что у cleanup_expired); None — часы системы.
+    os.utime(target, None if moved_at is None else (moved_at.timestamp(), moved_at.timestamp()))
     LOGGER.info("package_moved file=%s to=%s", source.name, target_dir)
     return target
 

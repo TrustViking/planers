@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -118,3 +119,29 @@ def test_cleanup_removes_only_expired_files(planer_paths: PlanerPaths, now: date
     assert sorted(path.name for path in removed) == ["old_archive.bcast", "old_done.bcast"]
     assert (planer_paths.inbox_archive_dir / "fresh_archive.bcast").exists()
     assert (planer_paths.inbox_dir / "in_root.bcast").exists()
+
+
+def test_slot_sources_point_to_the_winning_package(
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    now: datetime,
+) -> None:
+    old: Path = make_package(
+        planer_paths.inbox_dir,
+        generated_at="13-09-2026 10:15",
+        file_name="old.bcast",
+        slots=[make_slot("17-03-2027"), make_slot("18-03-2027")],
+    )
+    new: Path = make_package(planer_paths.inbox_dir, generated_at="14-09-2026 09:00", file_name="new.bcast", slots=[make_slot("17-03-2027")])
+    scan: InboxScan = scan_inbox(planer_paths, now)
+    assert scan.slot_sources["17-03-2027_1900_uk"].path == new
+    assert scan.slot_sources["18-03-2027_1900_uk"].path == old
+
+
+def test_moved_package_gets_fresh_mtime(planer_paths: PlanerPaths, make_package: PackageFactory) -> None:
+    path: Path = make_package(planer_paths.inbox_dir)
+    month_ago: float = time.time() - 30 * 86400
+    os.utime(path, (month_ago, month_ago))
+    target: Path = archive_package(planer_paths, read_package(path))
+    assert target.stat().st_mtime >= time.time() - 1

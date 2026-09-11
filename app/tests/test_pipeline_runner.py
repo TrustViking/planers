@@ -1,0 +1,276 @@
+from __future__ import annotations
+
+import random
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from app.config.loader import PlanerConfig
+from app.output.report import FormState, OutcomeKind, PackageLineStatus
+from app.paths import PlanerPaths
+from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
+from app.platforms.base import PlatformError, UpcomingBroadcast
+from app.platforms.fake import FakePlatform
+from app.state.registry import FormStatus, Registration, Registry
+from app.tests.conftest import FORM_SPEC, FakeFormSender
+
+PackageFactory = Callable[..., Path]
+SlotFactory = Callable[..., dict[str, Any]]
+ConfigFactory = Callable[..., PlanerConfig]
+UK_SLOT: str = "17-03-2027_1900_uk"
+UK_KEY: str = f"{UK_SLOT}|yt_ua"
+UK_START: datetime = datetime.fromisoformat("2027-03-17T19:00:00+02:00")
+
+
+def _run(
+    mode: RunMode,
+    paths: PlanerPaths,
+    config: PlanerConfig,
+    platform: FakePlatform,
+    sender: FakeFormSender,
+    now: datetime,
+    rng: random.Random,
+) -> RunOutcome:
+    return run(mode, config, paths, platform, sender, now, rng)
+
+
+def _registration(**overrides: Any) -> Registration:
+    values: dict[str, Any] = dict(
+        slot_id=UK_SLOT,
+        channel_id="yt_ua",
+        account_name="Account yt_ua",
+        language="uk",
+        date="17-03-2027",
+        time="19:00",
+        broadcast_id="oldbc",
+        broadcast_url="https://www.youtube.com/watch?v=oldbc",
+        stream_url="rtmp://a.rtmp.youtube.com/live2",
+        stream_key="oldk-oldk-oldk-oldk-oldk",
+        package_id="pkg-old",
+        created_at=datetime(2027, 3, 10, 9, 0),
+        form_status=FormStatus.SENT,
+        form_sent_at=datetime(2027, 3, 10, 9, 0),
+        previous_broadcast_ids=[],
+        last_error=None,
+    )
+    values.update(overrides)
+    return Registration(**values)
+
+
+def _save_registry(paths: PlanerPaths, *registrations: Registration) -> None:
+    registry: Registry = Registry()
+    for registration in registrations:
+        registry.upsert(registration)
+    registry.save(paths.registry_file)
+
+
+def _loaded(paths: PlanerPaths, key: str) -> Registration | None:
+    return Registry.load(paths.registry_file).get(key)
+
+
+def test_full_create_registers_and_confirms_form(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.inbox_dir, slots=[make_slot("17-03-2027", "19:00", "uk", previews=2)])
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.OK
+    registration: Registration | None = _loaded(planer_paths, UK_KEY)
+    assert registration is not None
+    assert registration.form_status is FormStatus.SENT
+    assert registration.stream_key == "fake-0001-0000-0000-0000"
+    assert registration.package_id == "pkg-13-09-2026 10:15"
+    [created] = fake_platform.created
+    assert created.preview == b"x"
+    [form_call] = form_sender.calls
+    assert (form_call.slot_id, form_call.channel_id, form_call.form_url) == (UK_SLOT, "yt_ua", FORM_SPEC["url"])
+    keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
+    assert "fake-0001-0000-0000-0000" in keys_text and "форма ✅" in keys_text
+    assert outcome.report is not None
+    [pair_outcome] = outcome.report.outcomes
+    assert (pair_outcome.kind, pair_outcome.form) == (OutcomeKind.CREATED, FormState.SENT)
+    assert outcome.report_text is not None and "эфир создан, ключ получен, форма ✅" in outcome.report_text
+    assert outcome.report_path is not None and outcome.report_path.exists()
+    assert "pkg-13-09-2026 10:15" in Registry.load(planer_paths.registry_file).packages
+
+
+def test_full_create_failure_leaves_no_registration(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.inbox_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    fake_platform.fail_create[UK_SLOT] = PlatformError("liveStreamingNotEnabled", "на канале не включены трансляции")
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.ERRORS
+    assert _loaded(planer_paths, UK_KEY) is None
+    assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.ERROR
+    assert "YouTube: liveStreamingNotEnabled (на канале не включены трансляции)" in (outcome.report_text or "")
+    assert form_sender.calls == []
+
+
+def test_form_failure_is_remembered_for_next_run(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.inbox_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    sender: FakeFormSender = FakeFormSender(confirmed=False, error="ошибка сети")
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    registration: Registration | None = _loaded(planer_paths, UK_KEY)
+    assert registration is not None
+    assert (registration.form_status, registration.last_error) == (FormStatus.PENDING, "ошибка сети")
+    assert outcome.report is not None and outcome.report.outcomes[0].form is FormState.FAILED
+    assert "форма ❌ ошибка сети" in planer_paths.keys_file.read_text(encoding="utf-8")
+
+
+def test_package_with_terminal_slots_moves_to_done(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    path: Path = make_package(
+        planer_paths.inbox_dir,
+        slots=[make_slot("15-03-2027", "19:00", "uk"), make_slot("17-03-2027", "19:00", "hu"), make_slot("17-03-2027", "19:00", "uk")],
+    )
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert not path.exists()
+    assert (planer_paths.inbox_done_dir / path.name).exists()
+    assert outcome.report is not None and outcome.report.packages[0].status is PackageLineStatus.FINISHED
+
+
+def test_too_late_slot_keeps_package_in_inbox(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    path: Path = make_package(
+        planer_paths.inbox_dir,
+        slots=[make_slot("16-03-2027", "12:30", "uk"), make_slot("17-03-2027", "19:00", "uk")],
+    )
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert path.exists()
+    assert outcome.report is not None
+    assert "- 16-03-2027 12:30 uk — до старта меньше 60 минут" in outcome.report.skipped
+
+
+def test_recreate_keeps_previous_broadcast_id(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.inbox_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    _save_registry(planer_paths, _registration())
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    registration: Registration | None = _loaded(planer_paths, UK_KEY)
+    assert registration is not None
+    assert registration.previous_broadcast_ids == ["oldbc"]
+    assert registration.broadcast_id == "fakebc00001"
+    assert registration.form_status is FormStatus.SENT
+    assert outcome.report is not None and outcome.report.outcomes[0].recreated is True
+
+
+def test_rebind_rewrites_registry_and_sends_form(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.inbox_dir, slots=[spec])
+    found: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT, stream_key="abcd-abcd-abcd-abcd-abcd"
+    )
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    registration: Registration | None = _loaded(planer_paths, UK_KEY)
+    assert registration is not None
+    assert (registration.broadcast_id, registration.stream_key) == (found.broadcast_id, "abcd-abcd-abcd-abcd-abcd")
+    assert registration.form_status is FormStatus.SENT
+    assert fake_platform.created == []
+    assert outcome.report is not None
+    [pair_outcome] = outcome.report.outcomes
+    assert (pair_outcome.kind, pair_outcome.rebind, pair_outcome.form) == (OutcomeKind.MATCHED, True, FormState.SENT)
+
+
+def test_pending_form_is_resent_for_confirmed_broadcast(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.inbox_dir, slots=[spec])
+    found: UpcomingBroadcast = fake_platform.seed_broadcast("yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT)
+    _save_registry(planer_paths, _registration(broadcast_id=found.broadcast_id, form_status=FormStatus.PENDING, form_sent_at=None))
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert len(form_sender.calls) == 1
+    registration: Registration | None = _loaded(planer_paths, UK_KEY)
+    assert registration is not None and registration.form_status is FormStatus.SENT
+    assert outcome.report is not None
+    assert (outcome.report.outcomes[0].kind, outcome.report.outcomes[0].form) == (OutcomeKind.MATCHED, FormState.SENT)
+
+
+def test_all_past_package_is_archived_only_in_full_run(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    path: Path = make_package(planer_paths.inbox_dir, slots=[make_slot("14-03-2027", "19:00", "uk")])
+    dry: RunOutcome = _run(RunMode.DRY_RUN, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert path.exists()
+    assert dry.report is not None and dry.report.packages[0].status is PackageLineStatus.ALL_PAST_KEPT
+    full: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert not path.exists()
+    assert (planer_paths.inbox_archive_dir / path.name).exists()
+    assert full.report is not None and full.report.packages[0].status is PackageLineStatus.ALL_PAST_ARCHIVED
+
+
+def test_dry_run_changes_nothing(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    path: Path = make_package(planer_paths.inbox_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    outcome: RunOutcome = _run(RunMode.DRY_RUN, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.OK
+    assert path.exists()
+    assert not planer_paths.registry_file.exists()
+    assert not planer_paths.keys_file.exists()
+    assert fake_platform.created == [] and form_sender.calls == []
+    assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.CREATED
+    assert "эфира нет, будет создан — не выполнено (dry-run)" in (outcome.report_text or "")
+
+
+def test_status_lists_marked_broadcasts_into_keys_file(
+    planer_paths: PlanerPaths, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    fake_platform.seed_broadcast("yt_ua", UK_START, "Эфир", "", marker=UK_SLOT, stream_key="aaaa-aaaa-aaaa-aaaa-aaaa")
+    fake_platform.seed_broadcast(
+        "yt_ru",
+        datetime.fromisoformat("2027-03-18T20:00:00+02:00"),
+        "Эфир",
+        "",
+        marker="18-03-2027_2000_en",
+        stream_key="bbbb-bbbb-bbbb-bbbb-bbbb",
+    )
+    fake_platform.seed_broadcast("yt_ru", UK_START, "Ручной", "")
+    _save_registry(planer_paths, _registration(form_sent_at=datetime(2027, 3, 15, 10, 0)))
+    registry_before: bytes = planer_paths.registry_file.read_bytes()
+    outcome: RunOutcome = _run(RunMode.STATUS, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.OK
+    lines: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 4
+    assert "форма ✅ 15-03-2027 10:00" in lines[2] and "aaaa-aaaa-aaaa-aaaa-aaaa" in lines[2]
+    assert "форма — не отправлялась" in lines[3] and "bbbb-bbbb-bbbb-bbbb-bbbb" in lines[3]
+    assert outcome.report is not None
+    assert [item.kind for item in outcome.report.outcomes] == [OutcomeKind.MATCHED, OutcomeKind.MATCHED]
+    assert planer_paths.registry_file.read_bytes() == registry_before
+
+
+def test_unreadable_registry_stops_the_run(
+    planer_paths: PlanerPaths, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    planer_paths.registry_file.write_text("{broken", encoding="utf-8")
+    outcome: RunOutcome = _run(RunMode.DRY_RUN, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert (outcome.exit_code, outcome.problem) == (ExitCode.CONFIG, RunProblem.REGISTRY_UNREADABLE)
+    assert outcome.report is None
+
+
+def test_empty_inbox_exits_3(
+    planer_paths: PlanerPaths, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    outcome: RunOutcome = _run(RunMode.DRY_RUN, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert (outcome.exit_code, outcome.problem) == (ExitCode.INBOX_EMPTY, RunProblem.INBOX_EMPTY)

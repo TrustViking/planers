@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import copy
 import json
+import random
 import zipfile
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -12,8 +14,12 @@ from typing import Any
 import pytest
 
 from app.config.loader import ChannelConfig, Platform, PlanerConfig, Privacy
-from app.core.dates import build_slot_id, parse_date, parse_time
+from app.core.dates import build_slot_id, format_date, format_time, parse_date, parse_time
+from app.form.base import FormSendResult
+from app.package.model import FormSpec, Slot
 from app.paths import PlanerPaths, build_paths, ensure_dirs
+from app.platforms.fake import FakePlatform
+from app.state.registry import Registration
 
 KYIV_WINTER: timezone = timezone(timedelta(hours=2))
 FIXED_NOW: datetime = datetime(2027, 3, 16, 12, 0, tzinfo=KYIV_WINTER)
@@ -88,9 +94,74 @@ def build_config(
     )
 
 
+def build_slot(
+    start: datetime,
+    language: str,
+    *,
+    title: str = "Эфир",
+    description: str = "Описание эфира",
+) -> Slot:
+    """Слот в памяти (для сверки без пакета); дата и время — по Киеву (+02:00)."""
+    local: datetime = start.astimezone(KYIV_WINTER)
+    date_text: str = format_date(local.date())
+    time_text: str = format_time(local.time())
+    return Slot(
+        slot_id=build_slot_id(date_text, time_text, language),
+        date=date_text,
+        time=time_text,
+        start=local,
+        language=language,
+        title=title,
+        description=description,
+        previews=(),
+        sources=(),
+    )
+
+
+@dataclass(frozen=True)
+class FormCall:
+    slot_id: str
+    channel_id: str
+    stream_key: str | None
+    form_url: str
+
+
+class FakeFormSender:
+    """Отправитель формы для тестов: подтверждает (или возвращает ошибку) и записывает вызовы."""
+
+    def __init__(self, *, confirmed: bool = True, error: str | None = None) -> None:
+        self.confirmed: bool = confirmed
+        self.error: str | None = error
+        self.calls: list[FormCall] = []
+
+    def send(self, registration: Registration, slot: Slot, channel: ChannelConfig, form: FormSpec) -> FormSendResult:
+        self.calls.append(FormCall(registration.slot_id, channel.id, registration.stream_key, form.url))
+        return FormSendResult(confirmed=self.confirmed, error=self.error)
+
+
 @pytest.fixture
 def now() -> datetime:
     return FIXED_NOW
+
+
+@pytest.fixture
+def rng() -> random.Random:
+    return random.Random(0)
+
+
+@pytest.fixture
+def fake_platform() -> FakePlatform:
+    return FakePlatform()
+
+
+@pytest.fixture
+def form_sender() -> FakeFormSender:
+    return FakeFormSender()
+
+
+@pytest.fixture
+def make_slot_object() -> Callable[..., Slot]:
+    return build_slot
 
 
 @pytest.fixture

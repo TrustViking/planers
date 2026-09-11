@@ -7,11 +7,18 @@ from typing import Any
 
 from app.config.loader import PlanerConfig
 from app.output.report import (
-    ArchiveOutcome,
+    FormState,
+    MoveOutcome,
+    OrphanLine,
+    OutcomeError,
+    OutcomeKind,
     PackageLineStatus,
+    PairOutcome,
     ReportPackageLine,
+    RunMode,
     RunReport,
-    build_run_report,
+    build_package_lines,
+    build_skipped_lines,
     render_report,
     write_report,
 )
@@ -64,9 +71,46 @@ EMPTY_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, влад�
 Итог: создано 0, исправлено 0, копий 0, пропущено 0, ошибок 0.
 """
 
+DRY_RUN_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, владелец: Тест (dry-run)
+⚠ Площадка — заглушка
+
+## Пакеты
+
+## Создано (1)
+- 17-03-2027 19:00 uk → Test UA — эфира нет, будет создан — не выполнено (dry-run)
+
+## Исправлено (0)
+
+## Уже запланировано, совпадает (0)
+
+## Пропущено
+
+## Ошибки
+
+Итог: создано 1, исправлено 0, копий 0, пропущено 0, ошибок 0.
+"""
+
+STATUS_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, владелец: Тест
+
+## Запланировано на каналах (1)
+- 17-03-2027 19:00 uk → Test UA — https://www.youtube.com/watch?v=abc
+
+## Ошибки
+- Test RU — YouTube: quotaExceeded (квота исчерпана)
+
+Итог: запланировано 1, ошибок 1. Файл ключей: out\\keys.txt
+"""
+
+
+def _slot_outcome(kind: OutcomeKind, **overrides: Any) -> PairOutcome:
+    values: dict[str, Any] = dict(account_name="Test UA", date="17-03-2027", time="19:00", language="uk")
+    values.update(overrides)
+    return PairOutcome(kind, **values)
+
 
 def test_render_matches_tz_structure() -> None:
     report: RunReport = RunReport(
+        mode=RunMode.FULL,
         generated_at_text="13-09-2026 12:00",
         owner="Иван",
         packages=[
@@ -78,50 +122,106 @@ def test_render_matches_tz_structure() -> None:
             ),
             ReportPackageLine("plan_07-09-2026_11-09-2026_gen06-09-2026-1000.bcast", PackageLineStatus.ALL_PAST_ARCHIVED),
         ],
-        created=[
-            "- 16-09-2026 19:00 uk → Іван UA — эфир создан, ключ получен, форма ✅",
-            "- 18-09-2026 19:00 uk → Іван UA — эфир создан, ключ получен, форма ❌ (повторю в следующий запуск)",
+        outcomes=[
+            PairOutcome(OutcomeKind.CREATED, "Іван UA", "16-09-2026", "19:00", "uk", form=FormState.SENT),
+            PairOutcome(OutcomeKind.CREATED, "Іван UA", "18-09-2026", "19:00", "uk", form=FormState.FAILED),
+            PairOutcome(OutcomeKind.FIXED, "Іван UA", "17-09-2026", "19:00", "uk", changed_fields=("description",)),
+            PairOutcome(
+                OutcomeKind.MATCHED,
+                "Иван RU",
+                "16-09-2026",
+                "21:00",
+                "ru",
+                broadcast_url="https://www.youtube.com/watch?v=def456",
+            ),
+            PairOutcome(
+                OutcomeKind.ERROR,
+                "Іван UA",
+                "19-09-2026",
+                "19:00",
+                "uk",
+                error=OutcomeError("youtube", "liveStreamingNotEnabled", "на канале не включены трансляции"),
+            ),
         ],
-        fixed=[
-            "- 17-09-2026 19:00 uk → Іван UA — на YouTube было другое описание; обновлено. "
-            "Ключ и ссылка прежние, форма не переотправлялась"
-        ],
-        matched=["- 16-09-2026 21:00 ru → Иван RU — https://www.youtube.com/watch?v=def456"],
         skipped=[
             "- 14-09-2026 19:00 uk — уже прошло",
             "- 15-09-2026 19:00 en — нет канала для языка en",
             "- 13-09-2026 12:30 uk — до старта меньше 60 минут",
         ],
-        errors=["- 19-09-2026 19:00 uk → Іван UA — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)"],
         keys_file_path="out\\keys.txt",
     )
     assert render_report(report) == TZ_SAMPLE_REPORT
 
 
 def test_empty_sections_render_with_zero() -> None:
-    report: RunReport = RunReport("16-03-2027 12:00", "Тест", [], [], [], [], [], [])
-    assert render_report(report) == EMPTY_REPORT
+    assert render_report(RunReport(RunMode.FULL, "16-03-2027 12:00", "Тест")) == EMPTY_REPORT
 
 
-def test_pending_pairs_add_temporary_section_and_total() -> None:
+def test_dry_run_marks_title_and_every_outcome() -> None:
     report: RunReport = RunReport(
+        RunMode.DRY_RUN,
         "16-03-2027 12:00",
         "Тест",
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
-        pairs_to_reconcile=["- 17-03-2027 19:00 uk → Test UA (yt_ua)"],
+        outcomes=[_slot_outcome(OutcomeKind.CREATED)],
+        notice="Площадка — заглушка",
+    )
+    assert render_report(report) == DRY_RUN_REPORT
+
+
+def test_status_report_structure() -> None:
+    report: RunReport = RunReport(
+        RunMode.STATUS,
+        "16-03-2027 12:00",
+        "Тест",
+        outcomes=[
+            _slot_outcome(OutcomeKind.MATCHED, broadcast_url="https://www.youtube.com/watch?v=abc"),
+            PairOutcome(OutcomeKind.ERROR, "Test RU", error=OutcomeError("youtube", "quotaExceeded", "квота исчерпана")),
+        ],
+        keys_file_path="out\\keys.txt",
+    )
+    assert render_report(report) == STATUS_REPORT
+
+
+def test_orphans_section_appears_after_matched() -> None:
+    report: RunReport = RunReport(
+        RunMode.FULL,
+        "16-03-2027 12:00",
+        "Тест",
+        orphans=[OrphanLine("19-03-2027", "12:00", "uk", "Test UA", "https://www.youtube.com/watch?v=old")],
     )
     text: str = render_report(report)
-    assert "## К сверке с YouTube (1)" in text
-    assert "- 17-03-2027 19:00 uk → Test UA (yt_ua)\n" in text
-    assert text.endswith("ошибок 0; к сверке: 1 пар.\n")
+    assert (
+        "## Уже запланировано, совпадает (0)\n\n"
+        "## Перенесён или отменён? (1)\n"
+        "- 19-03-2027 12:00 uk → Test UA — https://www.youtube.com/watch?v=old — эфир не удалён\n"
+    ) in text
 
 
-def test_build_run_report_from_scan_and_selection(
+def test_rebind_resend_ambiguous_and_planer_error_texts() -> None:
+    report: RunReport = RunReport(
+        RunMode.FULL,
+        "16-03-2027 12:00",
+        "Тест",
+        outcomes=[
+            _slot_outcome(OutcomeKind.MATCHED, broadcast_url="u1", rebind=True, form=FormState.WAITING),
+            _slot_outcome(OutcomeKind.MATCHED, broadcast_url="u2", form=FormState.SENT),
+            _slot_outcome(OutcomeKind.FIXED, changed_fields=("title", "description"), rebind=True, form=FormState.SENT),
+            _slot_outcome(OutcomeKind.CREATED, recreated=True, form=FormState.SENT),
+            _slot_outcome(OutcomeKind.AMBIGUOUS),
+            _slot_outcome(OutcomeKind.ERROR, error=OutcomeError("planer", "noBoundStream")),
+        ],
+    )
+    text: str = render_report(report)
+    assert "— u1; эфира не было в журнале — ключ взят с площадки, форма ⏳ отправка появится на этапе 4\n" in text
+    assert "— u2; форма ✅ (повторная отправка)\n" in text
+    assert "другое название и описание; обновлено. Эфира не было в журнале — ключ взят с площадки, форма ✅" in text
+    assert "эфира на YouTube не было (удалён?), создан заново, ключ получен, форма ✅" in text
+    assert "несколько эфиров на эту минуту без маркера планера" in text
+    assert "у найденного эфира нет привязанного потока" in text
+    assert text.endswith("ошибок 2.\n")
+
+
+def test_package_and_skipped_lines_from_scan_and_selection(
     planer_paths: PlanerPaths,
     make_package: Callable[..., Path],
     make_slot: Callable[..., dict[str, Any]],
@@ -142,20 +242,14 @@ def test_build_run_report_from_scan_and_selection(
     config: PlanerConfig = make_config()
     scan: InboxScan = scan_inbox(planer_paths, now)
     selection: Selection = select_pairs(scan.slot_map, config, now)
-    report: RunReport = build_run_report(
-        scan=scan,
-        selection=selection,
-        config=config,
-        archive_outcome=ArchiveOutcome(),
-        generated_at_text="16-03-2027 12:00",
-    )
-    assert report.packages == [ReportPackageLine("plan.bcast", PackageLineStatus.ACCEPTED, slots_total=5, slots_mine=3)]
-    assert report.skipped == [
+    assert build_package_lines(scan, config, MoveOutcome()) == [
+        ReportPackageLine("plan.bcast", PackageLineStatus.ACCEPTED, slots_total=5, slots_mine=3)
+    ]
+    assert build_skipped_lines(scan, selection, config) == [
         "- 15-03-2027 19:00 uk — уже прошло",
         "- 16-03-2027 12:30 ru — до старта меньше 60 минут",
         "- 17-03-2027 19:00 hu — нет канала для языка hu",
     ]
-    assert report.pairs_to_reconcile == ["- 17-03-2027 19:00 uk → Account yt_ua (yt_ua)"]
 
 
 def test_write_report_uses_stamped_name(planer_paths: PlanerPaths) -> None:

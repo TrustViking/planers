@@ -39,9 +39,9 @@ app\
   config\loader.py        planer.yaml → PlanerConfig/ChannelConfig
   observability\          logging_setup.py
   package\                model.py, reader.py (zip→manifest), inbox.py (§7.1)
-  platforms\              base.py (Protocol), youtube.py, facebook.py (этап 6)
+  platforms\              base.py (Protocol), fake.py, youtube.py, facebook.py (этап 6)
   google\                 auth.py, api_retry.py (из broadcaster)
-  form\                   discovery.py (§7.5 п.1–3), submitter.py (§7.5 п.4–5)
+  form\                   base.py (Protocol FormSender, NoopFormSender), discovery.py (§7.5 п.1–3), submitter.py (§7.5 п.4–5)
   state\                  registry.py (§5.4), channels.py
   output\                 keys_file.py (§5.5), report.py (§5.6)
   pipeline\               selection.py (§7.2), reconciler.py (§7.3), runner.py (§4)
@@ -104,5 +104,6 @@ config\ secrets\ inbox\{done,archive}\ state\ out\ reports\ logs\ scripts\
 - Этап 0 (ТЗ §11): ТЗ 0.4, `CLAUDE.md` и `plan.md` есть; тренировочная форма «Test Регистрация стрима (Stream registration)» создана 11-09-2026 (ссылки — инвариант 11).
 - Этап 1: экспортер пакета (ТЗ §8) сделан **не здесь**, а в `D:\_projects\restreamer` (коммит `7d7afeb`), и доработан по ТЗ §12 п.7 — тексты слота в пакете = тексты анонса. Перенос в broadcaster — только после завершения планера (этап 5).
 - restreamer переключён на тренировочную форму и отдаёт в пакете `form.values` / `form.date_format` (конфиг `planer.form_values` / `planer.form_date_format`; ветка `feature/restreamer`, коммит `2a6e3fa`).
-- Открытые решения — ТЗ §12 п.3–4; п.2 закрыт 11-09-2026: форма не меняется, планер подстраивается под существующую.
+- Этап 2 (ТЗ §11): 2a сделано (коммит `f434db5`): paths, dates, config, package, selection, registry, logging, messages_ru, report-скелет, main с кодами выхода; 2b — сверка на фейке, runner, keys.txt, --status — в работе.
+- Решения ТЗ §12: п.2 закрыт 11-09-2026 — форма не меняется, планер подстраивается под существующую; п.3–4 приняты 11-09-2026 по инварианту 7.
 - Открытые проверки помечены в ТЗ как **[ПРОВЕРИТЬ]** (квота и стоимость вызовов YouTube API, поведение `liveBroadcasts.update`, нормализация описания на YouTube, парсинг `FB_PUBLIC_LOAD_DATA_` и маркер подтверждения формы, структура разделов и переходов в `FB_PUBLIC_LOAD_DATA_`, лимит 100 пользователей для неверифицированного OAuth-приложения, `pageHistory` при отправке многостраничной формы). Каждая проверка закрывается экспериментом до реализации соответствующего модуля, результат — строкой в `plan.md`.
