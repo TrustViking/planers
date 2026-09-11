@@ -35,6 +35,7 @@
 app\
   main.py                 argparse → pipeline.runner; коды выхода 0/1/2/3 (ТЗ §5.6, §7.6)
   paths.py                корень рядом с exe (frozen) или репо (dev)
+  core\dates.py           форматы дат и времени — единый источник
   config\loader.py        planer.yaml → PlanerConfig/ChannelConfig
   observability\          logging_setup.py
   package\                model.py, reader.py (zip→manifest), inbox.py (§7.1)
@@ -43,7 +44,7 @@ app\
   form\                   discovery.py (§7.5 п.1–3), submitter.py (§7.5 п.4–5)
   state\                  registry.py (§5.4), channels.py
   output\                 keys_file.py (§5.5), report.py (§5.6)
-  pipeline\               reconciler.py (§7.3), runner.py (§4)
+  pipeline\               selection.py (§7.2), reconciler.py (§7.3), runner.py (§4)
   ui\messages_ru.py       все строки консоли/отчёта
   tests\
 config\ secrets\ inbox\{done,archive}\ state\ out\ reports\ logs\ scripts\

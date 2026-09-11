@@ -6,17 +6,16 @@
 .env.*
 
 ########################################
-# Secrets folder - track only the example and README
+# Secrets folder - nothing from it is tracked
 ########################################
-secrets/*
-!secrets/.env.example
-!secrets/README.txt
-# Explicit ignores below are redundant under secrets/* but kept as documentation of intent:
-secrets/.env
-secrets/token.json
-secrets/credentials.json
-secrets/service_account.json
-secrets/cookies.txt
+secrets/
+
+########################################
+# Planer runtime data (folders are created by app/paths.py)
+########################################
+config/planer.yaml
+/inbox/
+/reports/
 
 ########################################
 # Google OAuth / API
@@ -83,14 +82,15 @@ ENV/
 logs/
 tmp/
 temp/
-out/
-output/
-outputs/
+# anchored to the repo root: app/output/ and app/state/ are source packages
+/out/
+/output/
+/outputs/
 downloads/
 data/
 docs/
 image/
-state/
+/state/
 tools/
 
 ########################################

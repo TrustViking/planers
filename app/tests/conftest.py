@@ -1,0 +1,181 @@
+"""Общие фикстуры: фиксированное «сейчас», папки планера в tmp_path, фабрика пакетов."""
+from __future__ import annotations
+
+import copy
+import json
+import zipfile
+from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from app.config.loader import ChannelConfig, Platform, PlanerConfig, Privacy
+from app.core.dates import build_slot_id, parse_date, parse_time
+from app.paths import PlanerPaths, build_paths, ensure_dirs
+
+KYIV_WINTER: timezone = timezone(timedelta(hours=2))
+FIXED_NOW: datetime = datetime(2027, 3, 16, 12, 0, tzinfo=KYIV_WINTER)
+REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+FORM_SPEC: dict[str, Any] = {
+    "url": "https://forms.gle/UjVo2gftZdHsEdpZ7",
+    "fields": {
+        "language": "Язык стрима ( Language of stream)",
+        "account_name": "Название канала ( Channel name)",
+        "date": "Время стрима ( Stream time )",
+        "platform": "Платформа (Platform)",
+        "stream_key": "You Tube Stream Key",
+        "stream_url": "Stream-URL (YT)",
+        "time": None,
+        "broadcast_url": None,
+        "slot_id": None,
+    },
+    "values": {
+        "language": {"uk": "Украинский ( Ukranian)", "ru": "Русский ( Russian)", "en": "Английский ( English)"},
+        "platform": {"youtube": "You Tube", "facebook": "Facebook", "rumble": "Rumble"},
+    },
+    "date_format": "%d.%m.%Y",
+}
+
+
+def build_slot_spec(
+    date_text: str = "17-03-2027",
+    time_text: str = "19:00",
+    language: str = "uk",
+    *,
+    previews: int = 1,
+    title: str | None = None,
+) -> dict[str, Any]:
+    """Слот манифеста §5.1; start — те же дата и время по Киеву (зимнее смещение +02:00)."""
+    slot_id: str = build_slot_id(date_text, time_text, language)
+    start: datetime = datetime.combine(parse_date(date_text), parse_time(time_text), tzinfo=KYIV_WINTER)
+    return {
+        "slot_id": slot_id,
+        "broadcaster_slot_key": slot_id,
+        "date": date_text,
+        "time": time_text,
+        "start": start.isoformat(),
+        "language": language,
+        "title": title or f"Эфир {slot_id}",
+        "description": "Описание эфира",
+        "previews": [f"previews/{slot_id}_{index}.jpg" for index in range(1, previews + 1)],
+        "sources": ["https://www.youtube.com/watch?v=abcdefghijk"],
+    }
+
+
+def build_config(
+    channels: Iterable[tuple[str, list[str]]] = (("yt_ua", ["uk"]), ("yt_ru", ["ru", "en"])),
+    *,
+    min_lead_minutes: int = 60,
+) -> PlanerConfig:
+    return PlanerConfig(
+        owner="Тест",
+        min_lead_minutes=min_lead_minutes,
+        inbox_keep_days=14,
+        channels=tuple(
+            ChannelConfig(
+                id=channel_id,
+                platform=Platform.YOUTUBE,
+                account_name=f"Account {channel_id}",
+                languages=tuple(languages),
+                privacy=Privacy.PUBLIC,
+                auto_start=True,
+                set_thumbnail=True,
+            )
+            for channel_id, languages in channels
+        ),
+    )
+
+
+@pytest.fixture
+def now() -> datetime:
+    return FIXED_NOW
+
+
+@pytest.fixture
+def repo_config_example() -> Path:
+    return REPO_ROOT / "config" / "planer.example.yaml"
+
+
+@pytest.fixture
+def planer_paths(tmp_path: Path) -> PlanerPaths:
+    paths: PlanerPaths = build_paths(tmp_path / "planer")
+    ensure_dirs(paths)
+    return paths
+
+
+@pytest.fixture
+def make_slot() -> Callable[..., dict[str, Any]]:
+    return build_slot_spec
+
+
+@pytest.fixture
+def make_config() -> Callable[..., PlanerConfig]:
+    return build_config
+
+
+@pytest.fixture
+def make_package(tmp_path: Path) -> Callable[..., Path]:
+    """Единственный способ собрать .bcast в тестах: manifest.json + previews/*.jpg по 1 байту."""
+
+    def _make(
+        directory: Path | None = None,
+        *,
+        generated_at: str = "13-09-2026 10:15",
+        slots: list[dict[str, Any]] | None = None,
+        form: dict[str, Any] | None = None,
+        file_name: str | None = None,
+        schema_version: int = 1,
+        manifest_edit: Callable[[dict[str, Any]], object] | None = None,
+        include_manifest: bool = True,
+        omit_previews: Iterable[str] = (),
+    ) -> Path:
+        target_dir: Path = directory or (tmp_path / "packages")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        slot_list: list[dict[str, Any]] = slots if slots is not None else [build_slot_spec()]
+        manifest: dict[str, Any] = _manifest(generated_at, slot_list, form, schema_version)
+        if manifest_edit is not None:
+            manifest_edit(manifest)
+        path: Path = target_dir / (file_name or f"plan_gen{generated_at.replace(' ', '-').replace(':', '')}.bcast")
+        _write_archive(path, manifest if include_manifest else None, slot_list, set(omit_previews))
+        return path
+
+    return _make
+
+
+def _manifest(
+    generated_at: str,
+    slots: list[dict[str, Any]],
+    form: dict[str, Any] | None,
+    schema_version: int,
+) -> dict[str, Any]:
+    dates: list[str] = sorted((slot["date"] for slot in slots), key=parse_date) or [generated_at.split(" ")[0]]
+    return {
+        "schema_version": schema_version,
+        "package_id": f"pkg-{generated_at}",
+        "generated_at": generated_at,
+        "generator": {"project": "pipeline", "version": "1.0.0", "run_id": "run"},
+        "timezone": "Europe/Kyiv",
+        "period": {"from": dates[0], "to": dates[-1]},
+        "form": copy.deepcopy(form or FORM_SPEC),
+        "slots": copy.deepcopy(slots),
+    }
+
+
+def _write_archive(
+    path: Path,
+    manifest: dict[str, Any] | None,
+    slots: list[dict[str, Any]],
+    omit_previews: set[str],
+) -> None:
+    written: set[str] = set()
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        if manifest is not None:
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
+        for slot in slots:
+            for preview in slot["previews"]:
+                if preview in omit_previews or preview in written:
+                    continue
+                archive.writestr(preview, b"x")
+                written.add(preview)
