@@ -14,8 +14,8 @@ secrets/
 # Planer runtime data (folders are created by app/paths.py)
 ########################################
 config/planer.yaml
-/inbox/
-/reports/
+config/channels.yaml
+/promo/
 
 ########################################
 # Google OAuth / API
@@ -84,6 +84,7 @@ tmp/
 temp/
 # anchored to the repo root: app/output/ and app/state/ are source packages
 /out/
+/keystreams/
 /output/
 /outputs/
 downloads/

@@ -68,6 +68,7 @@ class _ManifestParser:
     def parse(self, manifest: dict[str, Any]) -> Package:
         self._check_schema(manifest)
         period: dict[str, Any] = self._mapping(manifest, "period", where="period")
+        form: FormSpec = self._form(self._mapping(manifest, "form", where="form"))
         return Package(
             path=self._path,
             package_id=self._text(manifest, "package_id", where="package_id"),
@@ -76,8 +77,8 @@ class _ManifestParser:
             timezone=self._text(manifest, "timezone", where="timezone"),
             period_from=self._date_text(period, "from", where="period.from"),
             period_to=self._date_text(period, "to", where="period.to"),
-            form=self._form(self._mapping(manifest, "form", where="form")),
-            slots=self._slots(self._require(manifest, "slots", where="slots")),
+            form=form,
+            slots=self._slots(self._require(manifest, "slots", where="slots"), form),
         )
 
     @staticmethod
@@ -160,20 +161,20 @@ class _ManifestParser:
             values[str(field_name)] = dict(options)
         return values
 
-    def _slots(self, raw: Any) -> tuple[Slot, ...]:
+    def _slots(self, raw: Any, form: FormSpec) -> tuple[Slot, ...]:
         if not isinstance(raw, list):
             raise PackageError(PackageErrorReason.BAD_VALUE, "slots is not a list")
         slots: list[Slot] = []
         seen_ids: set[str] = set()
         for index, raw_slot in enumerate(raw):
-            slot: Slot = self._slot(raw_slot, where=f"slots[{index}]")
+            slot: Slot = self._slot(raw_slot, form, where=f"slots[{index}]")
             if slot.slot_id in seen_ids:
                 raise PackageError(PackageErrorReason.DUPLICATE_SLOT, slot.slot_id)
             seen_ids.add(slot.slot_id)
             slots.append(slot)
         return tuple(slots)
 
-    def _slot(self, raw: Any, *, where: str) -> Slot:
+    def _slot(self, raw: Any, form: FormSpec, *, where: str) -> Slot:
         if not isinstance(raw, dict):
             raise PackageError(PackageErrorReason.BAD_VALUE, f"{where} is not an object")
         date_text: str = self._text(raw, "date", where=f"{where}.date")
@@ -191,6 +192,7 @@ class _ManifestParser:
             description=self._text(raw, "description", where=f"{where}.description", allow_empty=True),
             previews=self._previews(raw, where=where),
             sources=self._string_list(raw, "sources", where=f"{where}.sources"),
+            form=form,
         )
 
     @staticmethod

@@ -1,17 +1,5 @@
 owner: "Иван"                      # как подписывать отчёты
 min_lead_minutes: 60               # слоты, до старта которых меньше — не планировать
-inbox_keep_days: 14                # сколько дней держать отработанные пакеты в inbox\done
+keep_days: 30                      # сколько дней хранить пакеты в promo\ и файлы в logs\
 
-channels:
-  - id: yt_ua                      # короткий ключ, латиница; имя файла токена
-    platform: youtube
-    account_name: "Іван UA"        # ровно так, как должно попасть в форму
-    languages: [uk]
-    privacy: public                # public | unlisted
-    auto_start: true               # эфир стартует сам, когда стример начнёт слать поток
-    set_thumbnail: true            # ставить превью из пакета (нужен подтверждённый канал)
-
-  - id: yt_ru
-    platform: youtube
-    account_name: "Иван RU"
-    languages: [ru, en]
+# Каналы — в соседнем файле channels.yaml

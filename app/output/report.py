@@ -1,4 +1,4 @@
-"""Отчёт запуска (ТЗ §5.6): данные исходов, текст, файл reports\\report_*.md.
+"""Отчёт запуска (ТЗ §5.6): данные исходов, текст, файл logs\\{дата}_{время}_report.md.
 
 Исходы хранятся как статус + данные; текст — только при рендере, из messages_ru.
 RunMode живёт здесь, а не в runner.py: отчёт зависит от режима, а runner собирает
@@ -13,15 +13,15 @@ from pathlib import Path
 from typing import Final
 
 from app.config.loader import PlanerConfig
-from app.core.dates import REPORT_STAMP_FORMAT
-from app.package.inbox import AcceptedPackage, InboxScan, PackageProblem
+from app.core.dates import FILE_STAMP_FORMAT
+from app.package.promo import AcceptedPackage, PromoScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
 from app.paths import PlanerPaths
 from app.pipeline.selection import Selection, SkippedSlot, SkipReason
 from app.ui import messages_ru as msg
 
-REPORT_FILE_TEMPLATE: Final[str] = "report_{stamp}.md"
+REPORT_FILE_TEMPLATE: Final[str] = "{stamp}_report.md"
 REPORT_ENCODING: Final[str] = "utf-8"
 MISSING_VALUE: Final[str] = "-"
 
@@ -36,11 +36,7 @@ class PackageLineStatus(str, Enum):
     ACCEPTED = "accepted"
     DAMAGED = "damaged"
     UNSUPPORTED_SCHEMA = "unsupported_schema"
-    ALL_PAST_ARCHIVED = "all_past_archived"
-    ALL_PAST_KEPT = "all_past_kept"      # dry-run: не перенесён
-    ARCHIVE_FAILED = "archive_failed"
-    FINISHED = "finished"                # все слоты терминальны — перенесён в inbox\done
-    FINISH_FAILED = "finish_failed"
+    ALL_PAST = "all_past"                # у пакета нет ни одного будущего слота
 
 
 class OutcomeKind(str, Enum):
@@ -64,11 +60,7 @@ _PACKAGE_TEMPLATES: Final[dict[PackageLineStatus, str]] = {
     PackageLineStatus.ACCEPTED: msg.PACKAGE_ACCEPTED,
     PackageLineStatus.DAMAGED: msg.PACKAGE_DAMAGED,
     PackageLineStatus.UNSUPPORTED_SCHEMA: msg.PACKAGE_UNSUPPORTED_SCHEMA,
-    PackageLineStatus.ALL_PAST_ARCHIVED: msg.PACKAGE_ALL_PAST_ARCHIVED,
-    PackageLineStatus.ALL_PAST_KEPT: msg.PACKAGE_ALL_PAST_KEPT,
-    PackageLineStatus.ARCHIVE_FAILED: msg.PACKAGE_ARCHIVE_FAILED,
-    PackageLineStatus.FINISHED: msg.PACKAGE_FINISHED,
-    PackageLineStatus.FINISH_FAILED: msg.PACKAGE_FINISH_FAILED,
+    PackageLineStatus.ALL_PAST: msg.PACKAGE_ALL_PAST,
 }
 _FORM_MARKS: Final[dict[FormState, str]] = {
     FormState.SENT: msg.FORM_MARK_SENT,
@@ -130,15 +122,6 @@ class RunReport:
     notice: str | None = None
 
 
-@dataclass(frozen=True)
-class MoveOutcome:
-    """Переносы пакетов (§7.1 п.4): в archive\\, в done\\, неудачи с причиной."""
-
-    archived: frozenset[Path] = frozenset()
-    finished: frozenset[Path] = frozenset()
-    failed: dict[Path, str] = field(default_factory=dict)
-
-
 def render_report(report: RunReport) -> str:
     """Структура ТЗ §5.6; пустой раздел — заголовок без строк."""
     lines: list[str] = _header_lines(report)
@@ -150,25 +133,25 @@ def render_report(report: RunReport) -> str:
 
 
 def write_report(paths: PlanerPaths, text: str, now_local: datetime) -> Path:
-    report_path: Path = paths.reports_dir / REPORT_FILE_TEMPLATE.format(
-        stamp=now_local.strftime(REPORT_STAMP_FORMAT)
+    report_path: Path = paths.logs_dir / REPORT_FILE_TEMPLATE.format(
+        stamp=now_local.strftime(FILE_STAMP_FORMAT)
     )
-    paths.reports_dir.mkdir(parents=True, exist_ok=True)
+    paths.logs_dir.mkdir(parents=True, exist_ok=True)
     report_path.write_text(text, encoding=REPORT_ENCODING)
     return report_path
 
 
-def build_package_lines(scan: InboxScan, config: PlanerConfig, move: MoveOutcome) -> list[ReportPackageLine]:
+def build_package_lines(scan: PromoScan, config: PlanerConfig) -> list[ReportPackageLine]:
     all_past: set[Path] = {package.path for package in scan.all_past_packages}
     lines: list[ReportPackageLine] = [
-        _accepted_line(item, config, is_all_past=item.package.path in all_past, move=move)
+        _accepted_line(item, config, is_all_past=item.package.path in all_past)
         for item in scan.packages
     ]
     lines.extend(_problem_line(problem) for problem in scan.problems)
     return lines
 
 
-def build_skipped_lines(scan: InboxScan, selection: Selection, config: PlanerConfig) -> list[str]:
+def build_skipped_lines(scan: PromoScan, selection: Selection, config: PlanerConfig) -> list[str]:
     """«Уже прошло» — только слоты моих языков; плюс too_late / no_channel из отбора (§7.2)."""
     entries: list[tuple[Slot, str]] = [
         (slot, _slot_text(msg.SKIP_PAST, slot))
@@ -358,23 +341,17 @@ def _render_package_line(line: ReportPackageLine) -> str:
     )
 
 
-def _accepted_line(
-    item: AcceptedPackage,
-    config: PlanerConfig,
-    *,
-    is_all_past: bool,
-    move: MoveOutcome,
-) -> ReportPackageLine:
+def _accepted_line(item: AcceptedPackage, config: PlanerConfig, *, is_all_past: bool) -> ReportPackageLine:
     path: Path = item.package.path
-    if path in move.failed:
-        status: PackageLineStatus = PackageLineStatus.ARCHIVE_FAILED if is_all_past else PackageLineStatus.FINISH_FAILED
-        return ReportPackageLine(path.name, status, detail=move.failed[path])
     if is_all_past:
-        status = PackageLineStatus.ALL_PAST_ARCHIVED if path in move.archived else PackageLineStatus.ALL_PAST_KEPT
-        return ReportPackageLine(path.name, status)
+        return ReportPackageLine(path.name, PackageLineStatus.ALL_PAST)
     slots_mine: int = sum(1 for slot in item.package.slots if slot.language in config.served_languages)
-    status = PackageLineStatus.FINISHED if path in move.finished else PackageLineStatus.ACCEPTED
-    return ReportPackageLine(path.name, status, slots_total=item.slots_total, slots_mine=slots_mine)
+    return ReportPackageLine(
+        path.name,
+        PackageLineStatus.ACCEPTED,
+        slots_total=item.slots_total,
+        slots_mine=slots_mine,
+    )
 
 
 def _problem_line(problem: PackageProblem) -> ReportPackageLine:

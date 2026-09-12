@@ -11,12 +11,21 @@ from typing import Final
 
 from app.config.loader import ChannelConfig
 from app.package.model import Slot
-from app.platforms.base import CreatedBroadcast, PlatformError, StreamInfo, UpcomingBroadcast, broadcast_url_for
+from app.platforms.base import (
+    ChannelInfo,
+    CreatedBroadcast,
+    PlatformError,
+    StreamInfo,
+    UpcomingBroadcast,
+    broadcast_url_for,
+)
 
 FAKE_STREAM_URL: Final[str] = "rtmp://a.rtmp.youtube.com/live2"
 FAKE_BROADCAST_ID_TEMPLATE: Final[str] = "fakebc{number:05d}"
 FAKE_STREAM_ID_TEMPLATE: Final[str] = "fakestream{number:04d}"
 FAKE_STREAM_KEY_TEMPLATE: Final[str] = "fake-{number:04d}-0000-0000-0000"
+FAKE_CHANNEL_ID_TEMPLATE: Final[str] = "UCfake{channel_key}"
+FAKE_CHANNEL_TITLE_TEMPLATE: Final[str] = "Fake {channel_key}"
 NOT_FOUND_CODE: Final[str] = "broadcastNotFound"
 
 
@@ -39,6 +48,9 @@ class FakePlatform:
         self.stream_calls: list[tuple[str, str]] = []
         self.fail_list: dict[str, PlatformError] = {}     # channel_id → ошибка list_upcoming
         self.fail_create: dict[str, PlatformError] = {}   # slot_id → ошибка create_broadcast
+        self.fail_describe: dict[str, PlatformError] = {}  # channel_id → ошибка describe_channel
+        self.channel_info: dict[str, ChannelInfo] = {}     # channel_id → ответ describe_channel
+        self.describe_calls: list[str] = []
 
     def seed_broadcast(
         self,
@@ -73,6 +85,21 @@ class FakePlatform:
     def remove_broadcast(self, channel_id: str, broadcast_id: str) -> None:
         """Владелец удалил эфир руками."""
         self._broadcasts.get(channel_id, {}).pop(broadcast_id, None)
+
+    def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
+        """По умолчанию — детерминированный ответ по channel.id; тест может задать свой."""
+        self.describe_calls.append(channel.id)
+        if channel.id in self.fail_describe:
+            raise self.fail_describe[channel.id]
+        return self.channel_info.get(channel.id, self.default_channel_info(channel.id))
+
+    @staticmethod
+    def default_channel_info(channel_key: str) -> ChannelInfo:
+        return ChannelInfo(
+            youtube_channel_id=FAKE_CHANNEL_ID_TEMPLATE.format(channel_key=channel_key),
+            title=FAKE_CHANNEL_TITLE_TEMPLATE.format(channel_key=channel_key),
+            default_language=None,
+        )
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
         self.list_calls.append(channel.id)

@@ -44,6 +44,8 @@ class FormSpec:
 
 @dataclass(frozen=True)
 class Slot:
+    """Один эфир из пакета. Все поля заполняются при разборе манифеста и потом не меняются."""
+
     slot_id: str
     date: str
     time: str
@@ -53,6 +55,7 @@ class Slot:
     description: str
     previews: tuple[str, ...]
     sources: tuple[str, ...]
+    form: FormSpec          # форма своего пакета: куда уйдёт ключ этого слота (ТЗ §7.5)
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,7 @@ from typing import Final
 DATE_FORMAT: Final[str] = "%d-%m-%Y"
 TIME_FORMAT: Final[str] = "%H:%M"
 DATETIME_FORMAT: Final[str] = f"{DATE_FORMAT} {TIME_FORMAT}"
-REPORT_STAMP_FORMAT: Final[str] = "%d-%m-%Y_%H%M%S"
+FILE_STAMP_FORMAT: Final[str] = "%d-%m-%Y_%H%M%S"   # имя файла: дата_время_наименование
 SLOT_TIME_FORMAT: Final[str] = "%H%M"
 SLOT_ID_TEMPLATE: Final[str] = "{date}_{time}_{language}"
 

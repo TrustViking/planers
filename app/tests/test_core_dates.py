@@ -7,7 +7,7 @@ import pytest
 from app.core.dates import (
     DATE_FORMAT,
     DATETIME_FORMAT,
-    REPORT_STAMP_FORMAT,
+    FILE_STAMP_FORMAT,
     SLOT_TIME_FORMAT,
     TIME_FORMAT,
     build_slot_id,
@@ -26,7 +26,7 @@ def test_formats_are_the_documented_ones() -> None:
     assert DATE_FORMAT == "%d-%m-%Y"
     assert TIME_FORMAT == "%H:%M"
     assert DATETIME_FORMAT == "%d-%m-%Y %H:%M"
-    assert REPORT_STAMP_FORMAT == "%d-%m-%Y_%H%M%S"
+    assert FILE_STAMP_FORMAT == "%d-%m-%Y_%H%M%S"
     assert SLOT_TIME_FORMAT == "%H%M"
 
 

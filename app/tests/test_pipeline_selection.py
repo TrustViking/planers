@@ -7,6 +7,7 @@ from app.config.loader import PlanerConfig
 from app.core.dates import build_slot_id, format_date, format_time
 from app.package.model import Slot
 from app.pipeline.selection import Selection, SkipReason, select_pairs
+from app.tests.conftest import build_form_spec
 
 KYIV_WINTER: timezone = timezone(timedelta(hours=2))
 ConfigFactory = Callable[..., PlanerConfig]
@@ -26,6 +27,7 @@ def _slot(now: datetime, *, minutes: int, language: str) -> Slot:
         description="",
         previews=(),
         sources=(),
+        form=build_form_spec(),
     )
 
 

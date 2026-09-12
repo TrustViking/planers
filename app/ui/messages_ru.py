@@ -7,24 +7,18 @@ from typing import Final
 CLI_DESCRIPTION: Final[str] = "Планер: регистрация трансляций по пакетам броадкастера."
 HELP_DRY_RUN: Final[str] = "прочитать пакеты и показать, что было бы сделано; ничего не создавать, не переносить и не удалять"
 HELP_CHECK: Final[str] = "проверить авторизацию и права каждого канала"
-HELP_AUTH: Final[str] = "заново авторизовать канал (id из planer.yaml)"
-HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из inbox"
+HELP_AUTH: Final[str] = "заново авторизовать канал (ключ из channels.yaml) или all — все каналы"
+HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из promo"
 HELP_DEBUG: Final[str] = "подробный лог в консоли"
-MODE_NOT_AVAILABLE_YET: Final[str] = (
-    "Режим {mode} пока не реализован (появится на этапе {stage}). "
-    "Сейчас доступны --dry-run и --status."
-)
 FULL_RUN_NOT_AVAILABLE_YET: Final[str] = (
-    "Полный запуск (создание эфиров) появится на этапе 3; сейчас доступны --dry-run и --status"
-)
-NOTICE_FAKE_PLATFORM: Final[str] = (
-    "Площадка — заглушка до этапа 3: сверка с YouTube не выполнялась, все слоты считаются незапланированными"
+    "Полный запуск (создание эфиров) появится в задаче 3b; "
+    "сейчас доступны --auth, --check, --dry-run и --status"
 )
 REGISTRY_UNREADABLE: Final[str] = "Журнал {path} не читается: {error}. Ничего не делалось."
 
 # --- конфиг (ТЗ §5.2)
 CONFIG_CREATED_FROM_EXAMPLE: Final[str] = (
-    "Создан {path} из примера. Впишите владельца и свои каналы и запустите планер снова."
+    "Создан {path} из примера. Проверьте значения в нём и запустите планер снова."
 )
 CONFIG_ERROR: Final[str] = "Ошибка в конфиге {path}: {key} — {problem}"
 CONFIG_ROOT_KEY: Final[str] = "(корень файла)"
@@ -37,7 +31,7 @@ CONFIG_PROBLEM_NON_EMPTY_STRING: Final[str] = "нужна непустая ст�
 CONFIG_PROBLEM_INT_MIN: Final[str] = "нужно целое число не меньше {minimum}"
 CONFIG_PROBLEM_BOOL: Final[str] = "нужно true или false"
 CONFIG_PROBLEM_CHANNELS_EMPTY: Final[str] = "нужен непустой список каналов"
-CONFIG_PROBLEM_CHANNEL_ID: Final[str] = "только латиница в нижнем регистре, цифры и _, первой — буква"
+CONFIG_PROBLEM_CHANNEL_ID: Final[str] = "только латиница в нижнем регистре, цифры и _"
 CONFIG_PROBLEM_CHANNEL_ID_DUPLICATE: Final[str] = "id «{value}» уже есть у другого канала"
 CONFIG_PROBLEM_PLATFORM_FACEBOOK: Final[str] = "Facebook появится на этапе 6; сейчас поддерживается только youtube"
 CONFIG_PROBLEM_PLATFORM_UNKNOWN: Final[str] = "неизвестная площадка «{value}»; допустимо: {allowed}"
@@ -45,21 +39,70 @@ CONFIG_PROBLEM_LANGUAGES: Final[str] = "нужен непустой список
 CONFIG_PROBLEM_LANGUAGE_DUPLICATE: Final[str] = "язык «{value}» указан дважды"
 CONFIG_PROBLEM_CHOICE: Final[str] = "допустимо: {allowed}"
 
-# --- inbox и пакеты (ТЗ §7.1)
-INBOX_EMPTY: Final[str] = "В {path} нет пакетов *.bcast — сохраните туда пакет от оператора и запустите снова."
+# --- авторизация и каналы (ТЗ §5.3)
+CLIENT_SECRET_MISSING: Final[str] = (
+    "Нет файла {path} — без него планер не может обратиться к YouTube. "
+    "Возьмите его у оператора и положите рядом с программой, в папку secrets."
+)
+CHANNELS_STATE_UNREADABLE: Final[str] = "Файл привязок каналов {path} не читается: {error}. Ничего не делалось."
+AUTH_UNKNOWN_CHANNEL: Final[str] = "В {path} нет канала с ключом «{key}». Известные ключи: {known}."
+AUTH_STARTING: Final[str] = "Канал «{key}» ({account_name}): сейчас откроется браузер."
+AUTH_UNVERIFIED_APP_WARNING: Final[str] = (
+    "Google покажет предупреждение «Google hasn't verified this app» — это ожидаемо, "
+    "приложение ещё не проходило проверку Google. Нажмите Advanced, затем ссылку "
+    "Go to ... (unsafe), затем Continue. На экране согласия должен быть пункт про управление "
+    "вашим аккаунтом YouTube — отметьте его и подтвердите."
+)
+AUTH_CHOOSE_RIGHT_CHANNEL: Final[str] = (
+    "Выбирайте тот аккаунт и тот канал, который в channels.yaml записан как «{account_name}»."
+)
+AUTH_OK: Final[str] = "Канал «{key}» авторизован: {title} (id {youtube_channel_id})."
+AUTH_BINDING_SAVED: Final[str] = "Привязка записана в {path}."
+AUTH_BINDING_UPDATED: Final[str] = "Привязка подтверждена: это тот же канал, что и раньше."
+AUTH_BINDING_MISMATCH: Final[str] = (
+    "Ключ «{key}» уже привязан к каналу {expected_title} (id {expected_id}), "
+    "а токен ведёт на {actual_title} (id {actual_id}). Ничего не переписано. "
+    "Либо авторизуйтесь заново и выберите правильный канал, либо исправьте channels.yaml."
+)
+AUTH_FAILED: Final[str] = "Канал «{key}»: авторизация не удалась — {reason}."
+AUTH_SCOPE_HINT: Final[str] = (
+    "Если на экране согласия не было пункта про управление YouTube-аккаунтом — "
+    "значит скоуп youtube не добавлен в настройках доступа приложения в Google Cloud."
+)
+# ключи — значения AuthErrorReason (app/google/auth.py)
+AUTH_REASON_TEXT: Final[dict[str, str]] = {
+    "client_secret_missing": "нет файла client_secret.json",
+    "token_unreadable": "файл токена не читается; удалите его и повторите --auth",
+    "flow_failed": "браузер не вернул разрешение",
+    "refresh_failed": "не удалось обновить токен (нет связи с Google)",
+}
+
+# --- проверка каналов (--check)
+CHECK_HEADER: Final[str] = "Проверка каналов по {path}:"
+CHECK_CHANNEL_OK: Final[str] = (
+    "- {key}: {title} (id {youtube_channel_id}), язык канала на YouTube: {channel_language}; "
+    "языки стримов из channels.yaml: {languages}; запланированных эфиров: {upcoming}"
+)
+CHECK_CHANNEL_LANGUAGE_UNSET: Final[str] = "не указан"
+CHECK_CHANNEL_LANGUAGE_NOTE: Final[str] = (
+    "Язык канала на YouTube — справочный, на решения планера он не влияет: "
+    "язык стрима задаёт оператор в channels.yaml."
+)
+CHECK_NEEDS_AUTH: Final[str] = "- {key}: нужна авторизация — запустите: planer.bat --auth {key}"
+CHECK_CHANNEL_FAILED: Final[str] = "- {key}: {code} ({message})"
+CHECK_ALL_OK: Final[str] = "Все каналы на месте, трансляции включены."
+CHECK_HAS_PROBLEMS: Final[str] = "Часть каналов не прошла проверку — см. строки выше."
+BINDINGS_NOT_VERIFIED: Final[str] = "Каналы не проверены, ничего не читалось и не записывалось."
+
+# --- promo и пакеты (ТЗ §7.1)
+PROMO_EMPTY: Final[str] = "В {path} нет пакетов *.bcast — сохраните туда пакет от оператора и запустите снова."
 REPORT_WRITTEN: Final[str] = "Отчёт сохранён: {path}"
 PACKAGE_ACCEPTED: Final[str] = "- {file} — принят, слотов {total}, из них под мои языки {mine}"
 PACKAGE_DAMAGED: Final[str] = "- {file} — пакет повреждён: {reason}; файл не тронут"
 PACKAGE_UNSUPPORTED_SCHEMA: Final[str] = (
     "- {file} — версия пакета {version} не поддерживается (нужна {supported}); файл не тронут"
 )
-PACKAGE_ALL_PAST_ARCHIVED: Final[str] = "- {file} — все слоты в прошлом, перенесён в inbox\\archive"
-PACKAGE_ALL_PAST_KEPT: Final[str] = "- {file} — все слоты в прошлом (dry-run: не перенесён)"
-PACKAGE_ARCHIVE_FAILED: Final[str] = "- {file} — все слоты в прошлом, перенести в inbox\\archive не удалось: {error}"
-PACKAGE_FINISHED: Final[str] = (
-    "- {file} — принят, слотов {total}, из них под мои языки {mine}; всё обработано, перенесён в inbox\\done"
-)
-PACKAGE_FINISH_FAILED: Final[str] = "- {file} — всё обработано, перенести в inbox\\done не удалось: {error}"
+PACKAGE_ALL_PAST: Final[str] = "- {file} — все слоты в прошлом, ничего из него не планируется"
 PACKAGE_REASON_WITH_DETAIL: Final[str] = "{reason} ({detail})"
 # ключи — значения PackageErrorReason (app/package/model.py)
 PACKAGE_REASON_TEXT: Final[dict[str, str]] = {

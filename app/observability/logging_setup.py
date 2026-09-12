@@ -1,4 +1,4 @@
-"""Логи планера: файл logs\\planer_*.log (DEBUG) + консоль; маскирование ключей потока.
+"""Логи планера: файл logs\\{дата}_{время}_planer.log (DEBUG) + консоль; маскирование ключей потока.
 
 По образцу broadcaster app/bootstrap/logging_config.py, урезанный. Ключ потока
 попадает в лог только через mask_stream_key (CLAUDE.md, инвариант 6).
@@ -11,11 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final
 
-from app.core.dates import REPORT_STAMP_FORMAT
+from app.core.dates import FILE_STAMP_FORMAT
 
 ROOT_LOGGER_NAME: Final[str] = "planer"
 LOG_FORMAT: Final[str] = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-LOG_FILE_TEMPLATE: Final[str] = "planer_{stamp}.log"
+LOG_FILE_TEMPLATE: Final[str] = "{stamp}_planer.log"
 LOG_ENCODING: Final[str] = "utf-8"
 MASK_PREFIX: Final[str] = "****-"
 MASK_HIDDEN: Final[str] = "****"
@@ -35,7 +35,7 @@ def setup_logging(logs_dir: Path, debug: bool) -> Path:
     root_logger.setLevel(logging.DEBUG)
     root_logger.propagate = False
     formatter: logging.Formatter = logging.Formatter(LOG_FORMAT)
-    stamp: str = datetime.now().astimezone().strftime(REPORT_STAMP_FORMAT)
+    stamp: str = datetime.now().astimezone().strftime(FILE_STAMP_FORMAT)
     log_path: Path = logs_dir / LOG_FILE_TEMPLATE.format(stamp=stamp)
     file_handler: logging.FileHandler = logging.FileHandler(log_path, encoding=LOG_ENCODING)
     file_handler.setLevel(logging.DEBUG)

@@ -1,4 +1,4 @@
-"""Файл ключей out\\keys.txt (ТЗ §5.5): производный, перегенерируется при каждом запуске.
+"""Файл ключей keystreams\\keys.txt (ТЗ §5.5): производный, перегенерируется при каждом запуске.
 
 Проверка формата ключа (§7.4, пометка «формат?») — этап 3.
 """
@@ -108,6 +108,6 @@ def render_keys_file(rows: Iterable[KeyRow], generated_at_text: str) -> str:
 
 
 def write_keys_file(paths: PlanerPaths, text: str) -> Path:
-    paths.out_dir.mkdir(parents=True, exist_ok=True)
+    paths.keystreams_dir.mkdir(parents=True, exist_ok=True)
     paths.keys_file.write_text(text, encoding=KEYS_ENCODING)
     return paths.keys_file

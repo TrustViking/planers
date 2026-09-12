@@ -19,6 +19,15 @@ BROADCAST_URL_TEMPLATES: Final[dict[Platform, str]] = {
 
 
 @dataclass(frozen=True)
+class ChannelInfo:
+    """Кто мы на площадке (ТЗ §5.3): проверка «токен ведёт на тот канал»."""
+
+    youtube_channel_id: str
+    title: str
+    default_language: str | None   # язык канала на площадке; справочный, на решения не влияет
+
+
+@dataclass(frozen=True)
 class UpcomingBroadcast:
     broadcast_id: str
     start_utc: datetime      # aware, UTC
@@ -54,6 +63,10 @@ class PlatformError(Exception):
 
 
 class BroadcastPlatform(Protocol):
+    def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
+        """Канал, на который ведёт токен: id, название, язык канала (ТЗ §5.3)."""
+        ...
+
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
         """Запланированные эфиры канала (§7.3 п.1)."""
         ...

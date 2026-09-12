@@ -1,4 +1,4 @@
-"""Оркестрация запуска (ТЗ §4): inbox → отбор → сверка → действия → журнал → keys.txt → переносы → отчёт.
+"""Оркестрация запуска (ТЗ §4): promo → отбор → сверка → действия → журнал → keys.txt → переносы → отчёт.
 
 main.py только разбирает флаги, строит зависимости и печатает результат.
 Тексты для владельца здесь не собираются: исходы — данными, текст — в output/.
@@ -15,6 +15,7 @@ from typing import Final
 
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import format_datetime_text
+from app.core.retention import cleanup_expired
 from app.form.base import FormSender, FormSendResult
 from app.observability.logging_setup import get_logger, mask_stream_key
 from app.output.keys_file import (
@@ -27,7 +28,6 @@ from app.output.keys_file import (
 from app.output.report import (
     ERROR_OUTCOME_KINDS,
     FormState,
-    MoveOutcome,
     OrphanLine,
     OutcomeError,
     OutcomeKind,
@@ -39,7 +39,7 @@ from app.output.report import (
     render_report,
     write_report,
 )
-from app.package.inbox import InboxScan, archive_package, cleanup_expired, finish_package, scan_inbox
+from app.package.promo import PromoScan, scan_promo
 from app.package.model import Package, PackageError, Slot, read_preview
 from app.paths import PlanerPaths
 from app.pipeline.reconciler import (
@@ -51,7 +51,7 @@ from app.pipeline.reconciler import (
     Reconciliation,
     split_marker,
 )
-from app.pipeline.selection import Selection, SkipReason, select_pairs
+from app.pipeline.selection import Selection, select_pairs
 from app.platforms.base import BroadcastPlatform, PlatformError, broadcast_url_for
 from app.state.registry import FormStatus, Registration, Registry, RegistryError
 
@@ -71,11 +71,11 @@ class ExitCode(IntEnum):
     OK = 0            # всё, что можно было сделать, сделано
     ERRORS = 1        # есть ошибки
     CONFIG = 2        # ошибка конфигурации/авторизации/журнала — ничего не делалось
-    INBOX_EMPTY = 3   # в inbox\ нет пакетов
+    PROMO_EMPTY = 3   # в promo\ нет пакетов
 
 
 class RunProblem(str, Enum):
-    INBOX_EMPTY = "inbox_empty"
+    PROMO_EMPTY = "promo_empty"
     REGISTRY_UNREADABLE = "registry_unreadable"
 
 
@@ -139,13 +139,13 @@ def run(
     context: _RunContext = _RunContext(mode, config, paths, platform, form_sender, now_utc, rng, notice, registry)
     if mode is RunMode.STATUS:
         return _run_status(context)
-    return _run_inbox(context)
+    return _run_promo(context)
 
 
-def _run_inbox(context: _RunContext) -> RunOutcome:
-    scan: InboxScan = scan_inbox(context.paths, context.now_utc)
+def _run_promo(context: _RunContext) -> RunOutcome:
+    scan: PromoScan = scan_promo(context.paths, context.now_utc)
     if scan.is_empty:
-        return RunOutcome(report=None, exit_code=int(ExitCode.INBOX_EMPTY), problem=RunProblem.INBOX_EMPTY)
+        return RunOutcome(report=None, exit_code=int(ExitCode.PROMO_EMPTY), problem=RunProblem.PROMO_EMPTY)
     selection: Selection = select_pairs(scan.slot_map, context.config, context.now_utc)
     reconciliation: Reconciliation = Reconciler(context.platform).reconcile(
         selection.pairs,
@@ -154,43 +154,41 @@ def _run_inbox(context: _RunContext) -> RunOutcome:
         context.config.channels,
     )
     if context.mode is RunMode.FULL:
-        outcomes, move, keys_path = _execute_full(context, scan, selection, reconciliation)
+        outcomes, keys_path = _execute_full(context, scan, reconciliation)
     else:
-        outcomes, move, keys_path = [_planned_outcome(item) for item in reconciliation.pairs], MoveOutcome(), None
+        outcomes, keys_path = [_planned_outcome(item) for item in reconciliation.pairs], None
     report: RunReport = RunReport(
         mode=context.mode,
         generated_at_text=context.generated_at_text,
         owner=context.config.owner,
-        packages=build_package_lines(scan, context.config, move),
+        packages=build_package_lines(scan, context.config),
         outcomes=outcomes,
         orphans=[_orphan_line(orphan) for orphan in reconciliation.orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
         keys_file_path=_display_path(context.paths, keys_path),
         notice=context.notice,
     )
-    has_errors: bool = _has_error_outcomes(outcomes) or bool(scan.problems) or bool(move.failed)
+    has_errors: bool = _has_error_outcomes(outcomes) or bool(scan.problems)
     return _complete(context, report, has_errors=has_errors)
 
 
 def _execute_full(
     context: _RunContext,
-    scan: InboxScan,
-    selection: Selection,
+    scan: PromoScan,
     reconciliation: Reconciliation,
-) -> tuple[list[PairOutcome], MoveOutcome, Path | None]:
+) -> tuple[list[PairOutcome], Path | None]:
+    """Пакеты остаются в promo как есть: планер их только читает (§7.1)."""
     outcomes: list[PairOutcome] = _Executor(context, scan).execute(reconciliation.pairs)
     for item in scan.packages:
         context.registry.note_package(item.package.package_id, item.package.path.name, context.now_naive)
     outcomes.extend(_save_registry(context))
     keys_path, keys_errors = _write_keys(context, _registry_key_rows(context, scan))
     outcomes.extend(keys_errors)
-    move: MoveOutcome = _move_packages(context, scan, selection)
-    cleanup_expired(context.paths, context.config.inbox_keep_days, context.now_utc)
-    return outcomes, move, keys_path
+    return outcomes, keys_path
 
 
 def _run_status(context: _RunContext) -> RunOutcome:
-    """Без inbox: эфиры с маркером планера на каналах → keys.txt и отчёт; журнал не пишется."""
+    """Без promo: эфиры с маркером планера на каналах → keys.txt и отчёт; журнал не пишется."""
     marked: MarkedScan = Reconciler(context.platform).marked_broadcasts(context.config.channels)
     rows: list[KeyRow] = []
     outcomes: list[PairOutcome] = []
@@ -237,6 +235,9 @@ def _run_status(context: _RunContext) -> RunOutcome:
 
 def _complete(context: _RunContext, report: RunReport, *, has_errors: bool) -> RunOutcome:
     text: str = render_report(report)
+    if context.mode is not RunMode.DRY_RUN:
+        # Сначала чистка, потом отчёт: свой же отчёт под неё не попадает (§5.7).
+        cleanup_expired(context.paths, context.config.keep_days, context.now_utc)
     report_path: Path = write_report(context.paths, text, context.now_local)
     exit_code: ExitCode = ExitCode.ERRORS if has_errors else ExitCode.OK
     LOGGER.info("run_report mode=%s outcomes=%d exit_code=%d", report.mode.value, len(report.outcomes), int(exit_code))
@@ -346,7 +347,7 @@ def _write_keys(context: _RunContext, rows: list[KeyRow]) -> tuple[Path | None, 
         return None, [_planer_error_outcome(context.paths.keys_file.name, ERROR_CODE_KEYS_WRITE, error)]
 
 
-def _registry_key_rows(context: _RunContext, scan: InboxScan) -> list[KeyRow]:
+def _registry_key_rows(context: _RunContext, scan: PromoScan) -> list[KeyRow]:
     """Все будущие слоты каналов владельца, для которых в журнале есть ключ (§5.5), включая too_late."""
     rows: list[KeyRow] = []
     for slot in scan.slot_map.values():
@@ -359,54 +360,12 @@ def _registry_key_rows(context: _RunContext, scan: InboxScan) -> list[KeyRow]:
     return rows
 
 
-def _move_packages(context: _RunContext, scan: InboxScan, selection: Selection) -> MoveOutcome:
-    """§7.1 п.4: все слоты в прошлом → archive\\; каждый slot_id пакета терминален → done\\."""
-    archived: set[Path] = set()
-    finished: set[Path] = set()
-    failed: dict[Path, str] = {}
-    all_past: set[Path] = {package.path for package in scan.all_past_packages}
-    too_late: set[str] = {item.slot.slot_id for item in selection.skipped if item.reason is SkipReason.TOO_LATE}
-    for item in scan.packages:
-        package: Package = item.package
-        if package.path in all_past:
-            mover, target = archive_package, archived
-        elif _is_package_terminal(context, scan, package, too_late):
-            mover, target = finish_package, finished
-        else:
-            continue
-        try:
-            mover(context.paths, package, context.now_utc)
-        except OSError as error:
-            LOGGER.error("package_move_failed file=%s reason=%s", package.path.name, error)
-            failed[package.path] = str(error)
-            continue
-        target.add(package.path)
-    return MoveOutcome(archived=frozenset(archived), finished=frozenset(finished), failed=failed)
-
-
-def _is_package_terminal(context: _RunContext, scan: InboxScan, package: Package, too_late: set[str]) -> bool:
-    """По slot_id из слитой карты: прошёл, или язык без канала, или форма SENT на каждом канале языка."""
-    past: set[str] = {slot.slot_id for slot in scan.past_slots}
-    for slot in package.slots:
-        if slot.slot_id in past:
-            continue
-        if slot.slot_id in too_late:
-            return False
-        for channel in context.config.channels:
-            if slot.language not in channel.languages:
-                continue
-            registration: Registration | None = context.registry.get(Registry.key(slot.slot_id, channel.id))
-            if registration is None or registration.form_status is not FormStatus.SENT:
-                return False
-    return True
-
-
 class _Executor:
     """Действия полного запуска по решениям сверки (§7.3, §7.4, §7.5); сбой пары изолирован."""
 
-    def __init__(self, context: _RunContext, scan: InboxScan) -> None:
+    def __init__(self, context: _RunContext, scan: PromoScan) -> None:
         self._context: _RunContext = context
-        self._scan: InboxScan = scan
+        self._scan: PromoScan = scan
         self._registry: Registry = context.registry
         self._platform: BroadcastPlatform = context.platform
 
@@ -560,7 +519,7 @@ class _Executor:
         registration: Registration | None = self._registry.get(key)
         if registration is None:
             raise RegistryError(f"unknown registration key={key}")
-        result: FormSendResult = self._context.form_sender.send(registration, slot, channel, self._source(slot).form)
+        result: FormSendResult = self._context.form_sender.send(registration, slot, channel, slot.form)
         if result.confirmed:
             self._registry.mark_form_sent(key, self._context.now_naive)
             self._set_last_error(key, None)

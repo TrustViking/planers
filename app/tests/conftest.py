@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import random
 import zipfile
 from collections.abc import Callable, Iterable
@@ -74,11 +75,12 @@ def build_config(
     channels: Iterable[tuple[str, list[str]]] = (("yt_ua", ["uk"]), ("yt_ru", ["ru", "en"])),
     *,
     min_lead_minutes: int = 60,
+    keep_days: int = 30,
 ) -> PlanerConfig:
     return PlanerConfig(
         owner="Тест",
         min_lead_minutes=min_lead_minutes,
-        inbox_keep_days=14,
+        keep_days=keep_days,
         channels=tuple(
             ChannelConfig(
                 id=channel_id,
@@ -94,12 +96,23 @@ def build_config(
     )
 
 
+def build_form_spec(url: str = FORM_SPEC["url"]) -> FormSpec:
+    """FormSpec из того же образца, что кладётся в манифест (для слотов без пакета)."""
+    return FormSpec(
+        url=url,
+        fields=dict(FORM_SPEC["fields"]),
+        values={key: dict(options) for key, options in FORM_SPEC["values"].items()},
+        date_format=FORM_SPEC["date_format"],
+    )
+
+
 def build_slot(
     start: datetime,
     language: str,
     *,
     title: str = "Эфир",
     description: str = "Описание эфира",
+    form: FormSpec | None = None,
 ) -> Slot:
     """Слот в памяти (для сверки без пакета); дата и время — по Киеву (+02:00)."""
     local: datetime = start.astimezone(KYIV_WINTER)
@@ -115,6 +128,7 @@ def build_slot(
         description=description,
         previews=(),
         sources=(),
+        form=form or build_form_spec(),
     )
 
 
@@ -170,6 +184,11 @@ def repo_config_example() -> Path:
 
 
 @pytest.fixture
+def repo_channels_example() -> Path:
+    return REPO_ROOT / "config" / "channels.example.yaml"
+
+
+@pytest.fixture
 def planer_paths(tmp_path: Path) -> PlanerPaths:
     paths: PlanerPaths = build_paths(tmp_path / "planer")
     ensure_dirs(paths)
@@ -210,6 +229,8 @@ def make_package(tmp_path: Path) -> Callable[..., Path]:
             manifest_edit(manifest)
         path: Path = target_dir / (file_name or f"plan_gen{generated_at.replace(' ', '-').replace(':', '')}.bcast")
         _write_archive(path, manifest if include_manifest else None, slot_list, set(omit_previews))
+        # Пакет «пришёл сейчас»: чистка старья считает возраст от FIXED_NOW, а не от часов машины.
+        os.utime(path, (FIXED_NOW.timestamp(), FIXED_NOW.timestamp()))
         return path
 
     return _make

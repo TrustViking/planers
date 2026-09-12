@@ -26,16 +26,16 @@ class PlanerPaths:
     config_dir: Path
     config_file: Path
     config_example: Path
+    channels_file: Path          # config\channels.yaml — каналы владельца (ТЗ §5.2)
+    channels_example: Path
     secrets_dir: Path
-    inbox_dir: Path
-    inbox_done_dir: Path
-    inbox_archive_dir: Path
+    client_secret_file: Path     # secrets\client_secret.json — паспорт программы (ТЗ §5.3)
+    promo_dir: Path
     state_dir: Path
     registry_file: Path
-    channels_file: Path
-    out_dir: Path
+    channels_state_file: Path    # state\channels.json — привязки каналов (ТЗ §5.3)
+    keystreams_dir: Path
     keys_file: Path
-    reports_dir: Path
     logs_dir: Path
 
     @property
@@ -43,36 +43,33 @@ class PlanerPaths:
         return (
             self.config_dir,
             self.secrets_dir,
-            self.inbox_dir,
-            self.inbox_done_dir,
-            self.inbox_archive_dir,
+            self.promo_dir,
             self.state_dir,
-            self.out_dir,
-            self.reports_dir,
+            self.keystreams_dir,
             self.logs_dir,
         )
 
 
 def build_paths(root: Path) -> PlanerPaths:
     config_dir: Path = root / "config"
-    inbox_dir: Path = root / "inbox"
+    secrets_dir: Path = root / "secrets"
     state_dir: Path = root / "state"
-    out_dir: Path = root / "out"
+    keystreams_dir: Path = root / "keystreams"
     return PlanerPaths(
         root=root,
         config_dir=config_dir,
         config_file=config_dir / "planer.yaml",
         config_example=config_dir / "planer.example.yaml",
-        secrets_dir=root / "secrets",
-        inbox_dir=inbox_dir,
-        inbox_done_dir=inbox_dir / "done",
-        inbox_archive_dir=inbox_dir / "archive",
+        channels_file=config_dir / "channels.yaml",
+        channels_example=config_dir / "channels.example.yaml",
+        secrets_dir=secrets_dir,
+        client_secret_file=secrets_dir / "client_secret.json",
+        promo_dir=root / "promo",
         state_dir=state_dir,
         registry_file=state_dir / "registry.json",
-        channels_file=state_dir / "channels.json",
-        out_dir=out_dir,
-        keys_file=out_dir / "keys.txt",
-        reports_dir=root / "reports",
+        channels_state_file=state_dir / "channels.json",
+        keystreams_dir=keystreams_dir,
+        keys_file=keystreams_dir / "keys.txt",
         logs_dir=root / "logs",
     )
 

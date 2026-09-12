@@ -8,7 +8,6 @@ from typing import Any
 from app.config.loader import PlanerConfig
 from app.output.report import (
     FormState,
-    MoveOutcome,
     OrphanLine,
     OutcomeError,
     OutcomeKind,
@@ -22,7 +21,7 @@ from app.output.report import (
     render_report,
     write_report,
 )
-from app.package.inbox import InboxScan, scan_inbox
+from app.package.promo import PromoScan, scan_promo
 from app.paths import PlanerPaths
 from app.pipeline.selection import Selection, select_pairs
 
@@ -31,7 +30,7 @@ TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00, вл�
 
 ## Пакеты
 - plan_14-09-2026_25-09-2026_gen13-09-2026-1015.bcast — принят, слотов 24, из них под мои языки 9
-- plan_07-09-2026_11-09-2026_gen06-09-2026-1000.bcast — все слоты в прошлом, перенесён в inbox\\archive
+- plan_07-09-2026_11-09-2026_gen06-09-2026-1000.bcast — все слоты в прошлом, ничего из него не планируется
 
 ## Создано (2)
 - 16-09-2026 19:00 uk → Іван UA — эфир создан, ключ получен, форма ✅
@@ -51,7 +50,7 @@ TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00, вл�
 ## Ошибки
 - 19-09-2026 19:00 uk → Іван UA — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)
 
-Итог: создано 2, исправлено 1, копий 1, пропущено 3, ошибок 1. Файл ключей: out\\keys.txt
+Итог: создано 2, исправлено 1, копий 1, пропущено 3, ошибок 1. Файл ключей: keystreams\\keys.txt
 """
 
 EMPTY_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, владелец: Тест
@@ -98,7 +97,7 @@ STATUS_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, влад
 ## Ошибки
 - Test RU — YouTube: quotaExceeded (квота исчерпана)
 
-Итог: запланировано 1, ошибок 1. Файл ключей: out\\keys.txt
+Итог: запланировано 1, ошибок 1. Файл ключей: keystreams\\keys.txt
 """
 
 
@@ -120,7 +119,10 @@ def test_render_matches_tz_structure() -> None:
                 slots_total=24,
                 slots_mine=9,
             ),
-            ReportPackageLine("plan_07-09-2026_11-09-2026_gen06-09-2026-1000.bcast", PackageLineStatus.ALL_PAST_ARCHIVED),
+            ReportPackageLine(
+                "plan_07-09-2026_11-09-2026_gen06-09-2026-1000.bcast",
+                PackageLineStatus.ALL_PAST,
+            ),
         ],
         outcomes=[
             PairOutcome(OutcomeKind.CREATED, "Іван UA", "16-09-2026", "19:00", "uk", form=FormState.SENT),
@@ -148,7 +150,7 @@ def test_render_matches_tz_structure() -> None:
             "- 15-09-2026 19:00 en — нет канала для языка en",
             "- 13-09-2026 12:30 uk — до старта меньше 60 минут",
         ],
-        keys_file_path="out\\keys.txt",
+        keys_file_path="keystreams\\keys.txt",
     )
     assert render_report(report) == TZ_SAMPLE_REPORT
 
@@ -177,7 +179,7 @@ def test_status_report_structure() -> None:
             _slot_outcome(OutcomeKind.MATCHED, broadcast_url="https://www.youtube.com/watch?v=abc"),
             PairOutcome(OutcomeKind.ERROR, "Test RU", error=OutcomeError("youtube", "quotaExceeded", "квота исчерпана")),
         ],
-        keys_file_path="out\\keys.txt",
+        keys_file_path="keystreams\\keys.txt",
     )
     assert render_report(report) == STATUS_REPORT
 
@@ -229,7 +231,7 @@ def test_package_and_skipped_lines_from_scan_and_selection(
     now: datetime,
 ) -> None:
     make_package(
-        planer_paths.inbox_dir,
+        planer_paths.promo_dir,
         file_name="plan.bcast",
         slots=[
             make_slot("15-03-2027", "19:00", "uk"),
@@ -240,9 +242,9 @@ def test_package_and_skipped_lines_from_scan_and_selection(
         ],
     )
     config: PlanerConfig = make_config()
-    scan: InboxScan = scan_inbox(planer_paths, now)
+    scan: PromoScan = scan_promo(planer_paths, now)
     selection: Selection = select_pairs(scan.slot_map, config, now)
-    assert build_package_lines(scan, config, MoveOutcome()) == [
+    assert build_package_lines(scan, config) == [
         ReportPackageLine("plan.bcast", PackageLineStatus.ACCEPTED, slots_total=5, slots_mine=3)
     ]
     assert build_skipped_lines(scan, selection, config) == [
@@ -254,5 +256,5 @@ def test_package_and_skipped_lines_from_scan_and_selection(
 
 def test_write_report_uses_stamped_name(planer_paths: PlanerPaths) -> None:
     path: Path = write_report(planer_paths, "текст\n", datetime(2027, 3, 16, 12, 0, 5))
-    assert path == planer_paths.reports_dir / "report_16-03-2027_120005.md"
+    assert path == planer_paths.logs_dir / "16-03-2027_120005_report.md"
     assert path.read_text(encoding="utf-8") == "текст\n"
