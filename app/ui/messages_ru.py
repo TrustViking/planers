@@ -155,6 +155,9 @@ MISMATCH_FIELD_MARKER: Final[str] = "маркер потока"
 MISMATCH_FIELD_LANGUAGE: Final[str] = "язык"
 MISMATCH_FIELD_AUDIENCE: Final[str] = "аудитория"
 MISMATCH_FIELD_CATEGORY: Final[str] = "категория"
+WARNING_FORM_DIAGNOSTIC: Final[str] = (
+    "- ответ формы сохранён для разбора: {path}"
+)
 WARNING_LIVE_CHAT: Final[str] = (
     "- у эфиров включён живой чат. Через API он не отключается: если чат не нужен, "
     "выключите его один раз в Студии на весь канал (Settings → Community)."
@@ -180,8 +183,17 @@ OUTCOME_ERROR: Final[str] = "{prefix} — {origin}: {code} ({message})"
 OUTCOME_PLANER_ERROR: Final[str] = "{prefix} — {text}"
 OUTCOME_DRY_RUN_SUFFIX: Final[str] = " — не выполнено (dry-run)"
 FORM_MARK_SENT: Final[str] = "✅"
-FORM_MARK_FAILED: Final[str] = "❌ (повторю в следующий запуск)"
-FORM_MARK_WAITING: Final[str] = "⏳ отправка появится на этапе 4"
+FORM_MARK_FAILED: Final[str] = "❌ {reason}; повторю в следующий запуск"
+FORM_MARK_WAITING: Final[str] = "⏳ отправка не выполнялась"
+# ключи — коды из app/form/base.py
+FORM_REASON_TEXT: Final[dict[str, str]] = {
+    "structureUnreadable": "не удалось прочитать форму ({detail})",
+    "missingOption": "в форме нет нужного варианта ответа ({detail}) — попросите владельца формы добавить его",
+    "requiredMissing": "в форме остались незаполненные обязательные вопросы ({detail})",
+    "transportFailed": "форма недоступна ({detail})",
+    "notConfirmed": "форма не подтвердила запись ответа ({detail})",
+}
+FORM_REASON_UNKNOWN: Final[str] = "отправка не удалась ({detail})"
 # ключи — значения ChangedField (app/pipeline/reconciler.py)
 CHANGED_FIELD_TEXT: Final[dict[str, str]] = {"title": "название", "description": "описание"}
 CHANGED_FIELDS_JOINER: Final[str] = " и "
@@ -230,5 +242,5 @@ KEYS_FILE_COLUMNS: Final[str] = (
 )
 KEY_FORM_SENT: Final[str] = "форма ✅ {sent_at}"
 KEY_FORM_FAILED: Final[str] = "форма ❌ {error}"
-KEY_FORM_WAITING: Final[str] = "форма ⏳ отправка появится на этапе 4"
+KEY_FORM_WAITING: Final[str] = "форма ⏳ отправка не выполнялась"
 KEY_FORM_NEVER_SENT: Final[str] = "форма — не отправлялась"

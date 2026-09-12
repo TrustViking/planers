@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
+import requests
+
 from app.config.loader import (
     ChannelConfig,
     ConfigError,
@@ -22,7 +24,9 @@ from app.config.loader import (
     ensure_configs_exist,
     load_planer_config,
 )
-from app.form.base import FormSender, NoopFormSender
+from app.form.base import FormSender
+from app.form.discovery import FormDiscovery
+from app.form.submitter import GoogleFormSender
 from app.google.auth import AuthError, load_credentials, token_file_for
 from app.observability.logging_setup import close_logging, get_logger, setup_logging
 from app.paths import PlanerPaths, build_paths, ensure_dirs, resolve_root
@@ -61,9 +65,10 @@ def build_platform(paths: PlanerPaths) -> BroadcastPlatform:
     return YouTubePlatform(paths.client_secret_file, paths.secrets_dir)
 
 
-def build_form_sender() -> FormSender:
-    """Этап 4: NoopFormSender → отправитель Google-формы."""
-    return NoopFormSender()
+def build_form_sender(paths: PlanerPaths, now_utc: datetime) -> FormSender:
+    """Отправитель Google-формы; адрес формы приходит в пакете, здесь его нет (ТЗ §7.5)."""
+    session: requests.Session = requests.Session()
+    return GoogleFormSender(session, FormDiscovery(session, paths.logs_dir, now_utc.astimezone()))
 
 
 def run_cli(argv: Sequence[str] | None = None) -> int:
@@ -311,13 +316,14 @@ def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies
     if not _bindings_verified(paths, dependencies):
         _say(msg.BINDINGS_NOT_VERIFIED)
         return int(ExitCode.CONFIG)
+    now_utc: datetime = datetime.now(timezone.utc)
     outcome: RunOutcome = run(
         mode,
         dependencies.config,
         paths,
         dependencies.platform,
-        build_form_sender(),
-        datetime.now(timezone.utc),
+        build_form_sender(paths, now_utc),
+        now_utc,
         random.Random(),
     )
     _print_outcome(outcome, paths)

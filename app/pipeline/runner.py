@@ -125,6 +125,7 @@ class _RunContext:
     rng: random.Random
     notice: str | None
     registry: Registry
+    form_diagnostics: list[str]   # пути сохранённых ответов формы (§7.5)
 
     @property
     def now_local(self) -> datetime:
@@ -165,7 +166,9 @@ def run(
             problem=RunProblem.REGISTRY_UNREADABLE,
             problem_detail=str(error),
         )
-    context: _RunContext = _RunContext(mode, config, paths, platform, form_sender, now_utc, rng, notice, registry)
+    context: _RunContext = _RunContext(
+        mode, config, paths, platform, form_sender, now_utc, rng, notice, registry, []
+    )
     if mode is RunMode.STATUS:
         return _run_status(context)
     return _run_promo(context)
@@ -207,11 +210,13 @@ def _run_promo(context: _RunContext) -> RunOutcome:
         orphans=[_orphan_line(orphan) for orphan in orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
         mismatches=build_mismatch_lines(selection.planned),
-        warnings=build_warning_lines(selection.planned),
+        warnings=build_warning_lines(selection.planned, context.form_diagnostics),
         keys_file_path=_display_path(context.paths, keys_path),
         notice=context.notice,
     )
-    has_errors: bool = _has_error_outcomes(report.outcomes) or bool(scan.problems)
+    # ключ, не дошедший до стримера, — это код выхода 1: молчать об этом нельзя (§7.5)
+    form_pending: bool = context.is_full and any(item.needs_form for item in selection.planned)
+    has_errors: bool = _has_error_outcomes(report.outcomes) or bool(scan.problems) or form_pending
     return _complete(context, report, has_errors=has_errors)
 
 
@@ -231,7 +236,7 @@ def _execute_full(
             context.now_naive,
         )
     outcomes: list[PairOutcome] = _save_registry(context, selection.planned)
-    _send_forms(context, selection.planned)
+    context.form_diagnostics.extend(_send_forms(context, selection.planned))
     outcomes.extend(_save_registry(context, selection.planned))
     keys_path, keys_errors = _write_keys(
         context,
@@ -288,6 +293,13 @@ def _display_path(paths: PlanerPaths, path: Path | None) -> str | None:
         return str(path)
 
 
+def _form_error_text(result: FormSendResult) -> str | None:
+    """Код исхода в журнал: текст для владельца собирает report.py."""
+    if not result.code:
+        return result.error
+    return f"{result.code}: {result.error}" if result.error else result.code
+
+
 def _orphan_line(orphan: OrphanBroadcast) -> OrphanLine:
     parts = split_marker(orphan.marker)
     return OrphanLine(
@@ -319,8 +331,12 @@ def _write_keys(context: _RunContext, rows: list[KeyRow]) -> tuple[Path | None, 
         return None, [planer_error_outcome(context.paths.keys_file.name, ERROR_CODE_KEYS_WRITE, str(error))]
 
 
-def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> None:
-    """Финальный проход (§7.5): решает статус отправки, а не факт создания эфира."""
+def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[str]:
+    """Финальный проход (§7.5): решает статус отправки, а не факт создания эфира.
+
+    Возвращает пути сохранённых диагностических файлов формы — они идут в отчёт.
+    """
+    diagnostics: list[str] = []
     for item in planned:
         if not item.needs_form:
             continue
@@ -329,8 +345,10 @@ def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> No
             item.form_status = FormStatus.SENT
             item.form_sent_at = context.now_naive
             item.last_error = None
-        elif result.error:
-            item.last_error = result.error
+        else:
+            item.last_error = _form_error_text(result)
+        if result.diagnostic_path is not None:
+            diagnostics.append(str(result.diagnostic_path))
         LOGGER.info(
             "form_send slot_id=%s channel=%s confirmed=%s stream_key=%s",
             item.slot_id,
@@ -338,6 +356,7 @@ def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> No
             result.confirmed,
             mask_stream_key(item.stream_key),
         )
+    return diagnostics
 
 
 def _describe_spec(spec: BroadcastSpec | None) -> dict[str, object]:

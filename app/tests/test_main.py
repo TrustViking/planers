@@ -14,6 +14,7 @@ from app.main import run_cli
 from app.paths import ROOT_ENV_VAR
 from app.platforms.base import ChannelInfo, PlatformError
 from app.platforms.fake import FakePlatform
+from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
 
 CONFIG_YAML: str = """owner: "Тест"
@@ -35,9 +36,10 @@ SlotFactory = Callable[..., dict[str, Any]]
 
 @pytest.fixture
 def fake_platform_in_main(monkeypatch: pytest.MonkeyPatch) -> FakePlatform:
-    """Боевая площадка в main подменяется фейком: сеть в тестах запрещена."""
+    """Площадка и отправитель формы в main подменяются фейками: сеть в тестах запрещена."""
     platform: FakePlatform = FakePlatform()
     monkeypatch.setattr(main_module, "build_platform", lambda paths: platform)
+    monkeypatch.setattr(main_module, "build_form_sender", lambda paths, now_utc: FakeFormSender())
     return platform
 
 

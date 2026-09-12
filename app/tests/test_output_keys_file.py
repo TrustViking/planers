@@ -112,7 +112,7 @@ def test_object_without_key_shows_dashes() -> None:
 def test_form_status_texts() -> None:
     assert form_status_text(_registration()) == "форма ✅ 13-09-2026 12:00"
     assert form_status_text(_registration(form_status=FormStatus.PENDING, form_sent_at=None)) == (
-        "форма ⏳ отправка появится на этапе 4"
+        "форма ⏳ отправка не выполнялась"
     )
     assert form_status_text(None) == "форма — не отправлялась"
 

@@ -14,6 +14,7 @@ from app.output.report import FormState, OutcomeKind, PackageLineStatus
 from app.paths import PlanerPaths
 from app.pipeline.plan import PlannedBroadcast
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
+from app.form.base import FORM_CODE_NOT_CONFIRMED, FormSendResult
 from app.platforms.base import BroadcastFacts, PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
 from app.state.registry import FormStatus, Registration, Registry
@@ -26,6 +27,24 @@ UK_SLOT: str = "17-03-2027_1900_uk"
 UK_KEY: str = f"{UK_SLOT}|yt_ua"
 UK_START: datetime = datetime.fromisoformat("2027-03-17T19:00:00+02:00")
 
+
+class _PartialFormSender:
+    """Подтверждает форму одному слоту и не подтверждает другому (§7.5)."""
+
+    def __init__(self, confirmed_slot_id: str) -> None:
+        self._confirmed_slot_id: str = confirmed_slot_id
+        self.calls: list[str] = []
+
+    def send(self, planned: PlannedBroadcast) -> FormSendResult:
+        self.calls.append(planned.slot_id)
+        if planned.slot_id == self._confirmed_slot_id:
+            return FormSendResult(confirmed=True)
+        return FormSendResult(
+            confirmed=False,
+            code=FORM_CODE_NOT_CONFIRMED,
+            error="HTTP 200",
+            diagnostic_path=Path("logs") / "16-03-2027_120000_form_response_abcdef12.html",
+        )
 
 def _run(
     mode: RunMode,
@@ -707,6 +726,28 @@ def test_facts_without_start_give_no_time_mismatch(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None
     assert [line for line in outcome.report.mismatches if "время старта" in line] == []
+
+def test_unconfirmed_form_keeps_pending_and_exits_1(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    """Два объекта: одному форма подтверждена, другому нет — код выхода 1, ключ не потерян."""
+    make_package(
+        planer_paths.promo_dir,
+        slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "ru")],
+    )
+    sender: _PartialFormSender = _PartialFormSender(confirmed_slot_id=UK_SLOT)
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    assert outcome.exit_code == ExitCode.ERRORS
+    confirmed: Registration | None = _loaded(planer_paths, UK_KEY)
+    pending: Registration | None = _loaded(planer_paths, "18-03-2027_1900_ru|yt_ru")
+    assert confirmed is not None and confirmed.form_status is FormStatus.SENT
+    assert pending is not None and pending.form_status is FormStatus.PENDING
+    assert pending.stream_key and pending.last_error
+    text: str = outcome.report_text or ""
+    assert "форма ✅" in text
+    assert "форма не подтвердила запись ответа" in text
+    assert "ответ формы сохранён для разбора" in text
 
 def test_all_past_package_stays_and_is_reported(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
