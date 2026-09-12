@@ -359,7 +359,7 @@ ru | 16-09-2026 | 21:00 | Иван RU | форма ❌ ошибка сети  | 
 
 Истина об эфирах — на YouTube. Журнал планера — только память о ключах и форме. Поэтому перед любым созданием:
 
-1. Для каждого канала запрашивается список запланированных эфиров: `liveBroadcasts.list(mine=true, broadcastStatus=upcoming, part=snippet,contentDetails,status)`, с пагинацией. Для каждого — `snippet.scheduledStartTime` (UTC), `snippet.title`, `snippet.description`, `contentDetails.boundStreamId`.
+1. Для каждого канала запрашивается список запланированных эфиров: `liveBroadcasts.list(broadcastStatus=upcoming, part=snippet,contentDetails,status)`, с пагинацией. Параметр `mine` сюда не добавляется: у `liveBroadcasts.list` фильтры `id` / `mine` / `broadcastStatus` взаимоисключающие, вместе дают 400 `incompatibleParameters` (проверено 12-09-2026); `broadcastStatus` и так возвращает эфиры авторизованного пользователя. Для каждого — `snippet.scheduledStartTime` (UTC), `snippet.title`, `snippet.description`, `contentDetails.boundStreamId`.
 2. Слот считается **совпавшим** с эфиром, если совпадает момент старта с точностью до минуты (`slot.start` и `scheduledStartTime` сравниваются в UTC). Если на канале в одну минуту несколько эфиров (канал обслуживает `[ru, en]`, оба слота на 19:00) — различает **маркер**: планер всегда пишет `slot_id` в название привязанного потока (`liveStreams.snippet.title`, зрителям не видно) и читает его через `liveStreams.list(id=boundStreamId)`. Эфир без маркера (создан руками) при единственном кандидате на эту минуту считается совпавшим, при нескольких — в отчёт «не могу различить, разберитесь вручную», слот не трогается.
 3. По результату сверки для каждой пары (слот, канал):
 

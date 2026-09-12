@@ -177,6 +177,9 @@ def test_list_upcoming_walks_all_pages(platform: YouTubePlatform, monkeypatch: p
     assert [item.broadcast_id for item in broadcasts] == ["B1", "B2"]
     assert broadcasts[0].start_utc == datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)
     assert [call.get("pageToken") for call in service.calls] == [None, "page2"]
+    # фильтры id / mine / broadcastStatus взаимоисключающие: mine отправлять нельзя (400)
+    assert all("mine" not in call for call in service.calls)
+    assert all(call["broadcastStatus"] == "upcoming" for call in service.calls)
 
 
 def test_list_upcoming_accepts_empty_channel(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:

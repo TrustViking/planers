@@ -99,7 +99,12 @@ class YouTubePlatform:
         return info
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
-        """Все страницы; пустой список — нормальный ответ, а не ошибка."""
+        """Все страницы; пустой список — нормальный ответ, а не ошибка.
+
+        broadcastStatus идёт БЕЗ mine: у liveBroadcasts.list фильтры id / mine /
+        broadcastStatus взаимоисключающие (400 incompatibleParameters), а
+        broadcastStatus сам по себе означает эфиры авторизованного пользователя.
+        """
         broadcasts: list[UpcomingBroadcast] = []
         page_token: str | None = None
         while True:
@@ -108,7 +113,6 @@ class YouTubePlatform:
                 "liveBroadcasts.list",
                 lambda service, token=page_token: service.liveBroadcasts().list(
                     part=BROADCAST_PARTS,
-                    mine=True,
                     broadcastStatus=BROADCAST_STATUS_UPCOMING,
                     maxResults=MAX_RESULTS,
                     pageToken=token,
