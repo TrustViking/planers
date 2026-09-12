@@ -8,11 +8,15 @@ from typing import Any
 import pytest
 
 from app.form.base import FORM_CODE_STRUCTURE_UNREADABLE, FORM_CODE_TRANSPORT_FAILED, FormError
-from app.form.discovery import FormDiscovery, FormStructure, QuestionKind
+from app.form.discovery import FormDiscovery, FormStructure, QuestionKind, SectionJump
 
 VIEW_URL: str = "https://docs.google.com/forms/d/e/ABC/viewform"
 SHORT_URL: str = "https://forms.gle/UjVo2gftZdHsEdpZ7"
 FBZX: str = "-1234567890"
+# Идентификаторы разрывов как в тренировочной форме 13-09-2026: большие числа, не номера разделов.
+YOUTUBE_SECTION_ID: int = 1281939289
+FACEBOOK_SECTION_ID: int = 643928232
+SUBMIT_FORM_CODE: int = -3
 
 
 class _FakeResponse:
@@ -46,8 +50,9 @@ def _question(entry_id: int, title: str, type_code: int, options: list[Any] | No
     return [entry_id, title, None, type_code, [[entry_id, options, 1]]]
 
 
-def _page_break(title: str) -> list[Any]:
-    return [999, title, None, 8, None]
+def _page_break(section_id: int, title: str) -> list[Any]:
+    """Разрыв страницы: item[0] — идентификатор раздела, на него ссылаются переходы вариантов."""
+    return [section_id, title, None, 8, None]
 
 
 def build_payload(items: list[Any] | None = None) -> list[Any]:
@@ -65,11 +70,16 @@ def default_items() -> list[Any]:
             2,
             [["17.03.2027 Дата стрима (время стрима указано в объявлении)"], ["18.03.2027 Дата стрима"]],
         ),
-        _question(4, "Платформа (Platform)", 2, [["You Tube", None, 1], ["Facebook", None, 2]]),
-        _page_break("YouTube"),
+        _question(
+            4,
+            "Платформа (Platform)",
+            2,
+            [["You Tube", None, YOUTUBE_SECTION_ID], ["Facebook", None, FACEBOOK_SECTION_ID]],
+        ),
+        _page_break(YOUTUBE_SECTION_ID, "YouTube"),
         _question(5, "You Tube Stream Key", 0),
         _question(6, "Stream-URL (YT)", 2, [["rtmp://a.rtmp.youtube.com/live2/"], ["rtmp://x.rtmp.youtube.com/live2/"]]),
-        _page_break("Facebook"),
+        _page_break(FACEBOOK_SECTION_ID, "Facebook"),
         _question(7, "Facebook Stream Key", 0),
     ]
 
@@ -106,10 +116,84 @@ def test_structure_is_read_from_the_page(tmp_path: Path, now: datetime) -> None:
     assert structure.question_by_title("Facebook Stream Key").page_index == 2   # type: ignore[union-attr]
 
 
+def _read(items: list[Any], tmp_path: Path, now: datetime) -> FormStructure:
+    session: _FakeSession = _FakeSession(_FakeResponse(build_html(build_payload(items))))
+    return _discovery(session, tmp_path, now).structure(SHORT_URL)
+
+
 def test_navigation_map_is_collected(tmp_path: Path, now: datetime) -> None:
     session: _FakeSession = _FakeSession(_FakeResponse(build_html()))
     structure: FormStructure = _discovery(session, tmp_path, now).structure(SHORT_URL)
-    assert structure.navigation["entry.4"] == {"You Tube": 1, "Facebook": 2}
+    assert structure.navigation["entry.4"] == {
+        "You Tube": SectionJump(section_id=YOUTUBE_SECTION_ID, page_index=1),
+        "Facebook": SectionJump(section_id=FACEBOOK_SECTION_ID, page_index=2),
+    }
+
+
+def test_section_id_is_translated_to_page_index(tmp_path: Path, now: datetime) -> None:
+    """Живой прогон 13-09-2026: переход 1281939289 — это идентификатор раздела, номер у него 1."""
+    items: list[Any] = [
+        _question(4, "Платформа (Platform)", 2, [["You Tube", None, YOUTUBE_SECTION_ID]]),
+        _page_break(YOUTUBE_SECTION_ID, "YouTube"),
+        _question(5, "You Tube Stream Key", 0),
+    ]
+    structure: FormStructure = _read(items, tmp_path, now)
+    assert structure.navigation["entry.4"]["You Tube"].page_index == 1
+    assert structure.page_count == 2
+
+
+def test_unknown_section_id_leaves_option_without_target(tmp_path: Path, now: datetime) -> None:
+    items: list[Any] = [
+        _question(4, "Платформа (Platform)", 2, [["You Tube", None, 555]]),
+        _page_break(YOUTUBE_SECTION_ID, "YouTube"),
+        _question(5, "You Tube Stream Key", 0),
+    ]
+    structure: FormStructure = _read(items, tmp_path, now)
+    assert structure.navigation["entry.4"]["You Tube"] == SectionJump(section_id=555, page_index=None)
+
+
+def test_negative_target_is_not_a_jump(tmp_path: Path, now: datetime) -> None:
+    """Отрицательные значения — служебные коды Google (например, «отправить форму»)."""
+    items: list[Any] = [
+        _question(4, "Платформа (Platform)", 2, [["You Tube", None, SUBMIT_FORM_CODE], ["Facebook"]]),
+        _page_break(YOUTUBE_SECTION_ID, "YouTube"),
+        _question(5, "You Tube Stream Key", 0),
+    ]
+    structure: FormStructure = _read(items, tmp_path, now)
+    assert "entry.4" not in structure.navigation
+
+
+def test_sections_are_numbered_in_order_regardless_of_ids(tmp_path: Path, now: datetime) -> None:
+    """Идентификаторы разрывов идут не по возрастанию, а номера разделов — подряд с нуля."""
+    items: list[Any] = [
+        _question(
+            1,
+            "Платформа (Platform)",
+            2,
+            [["Other", None, 2071313360], ["You Tube", None, 1281939289], ["Rumble", None, 339209492]],
+        ),
+        _page_break(1281939289, "YouTube"),
+        _question(2, "You Tube Stream Key", 0),
+        _page_break(643928232, "Facebook"),
+        _question(3, "Facebook Stream Key", 0),
+        _page_break(339209492, "Rumble"),
+        [333114025, "Пример (Example)", None, 11, None],     # картинка: элемент без вопроса
+        _question(4, "Stream Key (rumble)", 0),
+        _page_break(2071313360, "Other"),
+        _question(5, "Stream Key", 0),
+    ]
+    structure: FormStructure = _read(items, tmp_path, now)
+    pages: dict[str, int] = {question.title: question.page_index for question in structure.questions}
+    assert pages == {
+        "Платформа (Platform)": 0,
+        "You Tube Stream Key": 1,
+        "Facebook Stream Key": 2,
+        "Stream Key (rumble)": 3,
+        "Stream Key": 4,
+    }
+    jumps: dict[str, SectionJump] = structure.navigation["entry.1"]
+    assert {option: jump.page_index for option, jump in jumps.items()} == {"Other": 4, "You Tube": 1, "Rumble": 3}
+    assert structure.page_count == 5
 
 
 def test_structure_is_read_once_per_url(tmp_path: Path, now: datetime) -> None:

@@ -1,9 +1,9 @@
 """Чтение структуры Google-формы (ТЗ §7.5 п.1–2): вопросы, entry-ID, варианты, разделы.
 
 entry-ID нигде не конфигурируются: форма сама говорит, что у неё есть. Структура живёт
-в скрипте FB_PUBLIC_LOAD_DATA_ на странице viewform. Точная раскладка этого массива —
-открытая **[ПРОВЕРИТЬ]** в ТЗ §12, поэтому разбор нарочно терпимый: чего не понял —
-считает отсутствующим, а при неудаче сохраняет HTML, иначе проверку нечем закрыть.
+в скрипте FB_PUBLIC_LOAD_DATA_ на странице viewform; раскладка подтверждена живым прогоном
+13-09-2026 (ТЗ §12), но разбор всё равно терпимый: чего не понял — считает отсутствующим,
+а при неудаче сохраняет HTML для разбора.
 """
 from __future__ import annotations
 
@@ -57,23 +57,28 @@ class FormQuestion:
 
 
 @dataclass(frozen=True)
+class SectionJump:
+    """Переход варианта: в форме он задан идентификатором раздела, а pageHistory ждёт номер (§7.5 п.2)."""
+
+    section_id: int               # как записано у варианта: item[0] разрыва, открывающего раздел
+    page_index: int | None        # номер этого раздела с нуля; None — такого разрыва в форме нет
+
+
+@dataclass(frozen=True)
 class FormStructure:
     view_url: str                 # конечный адрес страницы после редиректа forms.gle
     response_url: str             # тот же адрес с formResponse вместо viewform
     fbzx: str
     questions: tuple[FormQuestion, ...]
-    # entry_id вопроса → текст варианта → индекс раздела, на который ведёт вариант
-    navigation: dict[str, dict[str, int]]
+    # entry_id вопроса → текст варианта → переход на раздел
+    navigation: dict[str, dict[str, SectionJump]]
+    page_count: int               # разрывов страниц + 1
 
     def question_by_title(self, title: str) -> FormQuestion | None:
         for question in self.questions:
             if question.title == title:
                 return question
         return None
-
-    @property
-    def page_count(self) -> int:
-        return max((question.page_index for question in self.questions), default=0) + 1
 
 
 class HttpResponse(Protocol):
@@ -151,8 +156,8 @@ class FormDiscovery:
                 "FB_PUBLIC_LOAD_DATA_ not found or not JSON",
                 self.save_diagnostic(html, form_url, "page"),
             )
-        questions, navigation = _read_items(payload)
-        if not questions:
+        parsed: _ParsedItems = _read_items(payload)
+        if not parsed.questions:
             raise FormError(
                 FORM_CODE_STRUCTURE_UNREADABLE,
                 "no questions in FB_PUBLIC_LOAD_DATA_",
@@ -162,8 +167,9 @@ class FormDiscovery:
             view_url=final_url,
             response_url=_response_url(final_url),
             fbzx=_read_fbzx(html, payload),
-            questions=tuple(questions),
-            navigation=navigation,
+            questions=tuple(parsed.questions),
+            navigation=parsed.navigation,
+            page_count=parsed.page_count,
         )
 
 
@@ -198,16 +204,24 @@ def _read_fbzx(html: str, payload: Any) -> str:
     return ""
 
 
-def _read_items(payload: Any) -> tuple[list[FormQuestion], dict[str, dict[str, int]]]:
+@dataclass(frozen=True)
+class _ParsedItems:
+    questions: list[FormQuestion]
+    navigation: dict[str, dict[str, SectionJump]]
+    page_count: int
+
+
+def _read_items(payload: Any) -> _ParsedItems:
     """payload[1][1] — список элементов формы; разделы считаются по разрывам страниц."""
     items: Any = _dig(payload, 1, 1)
     if not isinstance(items, list):
-        return [], {}
+        return _ParsedItems(questions=[], navigation={}, page_count=1)
+    section_ids: dict[int, int] = _read_section_ids(items)
     questions: list[FormQuestion] = []
-    navigation: dict[str, dict[str, int]] = {}
+    navigation: dict[str, dict[str, SectionJump]] = {}
     page_index: int = 0
     for item in items:
-        if not isinstance(item, list) or len(item) < 4:
+        if not _is_form_item(item):
             continue
         if item[3] == PAGE_BREAK_TYPE:
             page_index += 1
@@ -216,10 +230,34 @@ def _read_items(payload: Any) -> tuple[list[FormQuestion], dict[str, dict[str, i
         if question is None:
             continue
         questions.append(question)
-        targets: dict[str, int] = _read_navigation(item)
-        if targets:
-            navigation[question.entry_id] = targets
-    return questions, navigation
+        jumps: dict[str, SectionJump] = _read_navigation(item, section_ids)
+        if jumps:
+            navigation[question.entry_id] = jumps
+    return _ParsedItems(questions=questions, navigation=navigation, page_count=page_index + 1)
+
+
+def _read_section_ids(items: list[Any]) -> dict[int, int]:
+    """Идентификатор разрыва (item[0]) → номер раздела, который он открывает; раздел 0 — до первого разрыва.
+
+    Отдельным проходом: переход у варианта может вести на раздел, разрыв которого ещё впереди.
+    """
+    section_ids: dict[int, int] = {}
+    page_index: int = 0
+    for item in items:
+        if not _is_form_item(item) or item[3] != PAGE_BREAK_TYPE:
+            continue
+        page_index += 1
+        if _is_plain_int(item[0]):
+            section_ids[item[0]] = page_index
+    return section_ids
+
+
+def _is_form_item(item: Any) -> bool:
+    return isinstance(item, list) and len(item) >= 4
+
+
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _read_question(item: list[Any], page_index: int) -> FormQuestion | None:
@@ -253,7 +291,7 @@ def _read_options(entry: list[Any]) -> tuple[str, ...]:
     return tuple(str(option[0]) for option in raw if isinstance(option, list) and option and option[0] is not None)
 
 
-def _read_navigation(item: list[Any]) -> dict[str, int]:
+def _read_navigation(item: list[Any], section_ids: dict[int, int]) -> dict[str, SectionJump]:
     """Переход «вариант → раздел», если он у варианта указан; иначе вариант остаётся без цели."""
     entries: Any = item[4] if len(item) > 4 else None
     if not isinstance(entries, list) or not entries or not isinstance(entries[0], list):
@@ -261,14 +299,25 @@ def _read_navigation(item: list[Any]) -> dict[str, int]:
     raw_options: Any = entries[0][1] if len(entries[0]) > 1 else None
     if not isinstance(raw_options, list):
         return {}
-    targets: dict[str, int] = {}
+    jumps: dict[str, SectionJump] = {}
     for option in raw_options:
         if not isinstance(option, list) or not option or option[0] is None:
             continue
         target: Any = option[2] if len(option) > 2 else None
-        if isinstance(target, int) and target >= 0:
-            targets[str(option[0])] = target
-    return targets
+        # Отрицательные значения — служебные коды Google («следующий раздел», «отправить форму»),
+        # а не идентификаторы разделов: перехода на конкретный раздел в них нет.
+        if not _is_plain_int(target) or target < 0:
+            continue
+        jump: SectionJump = SectionJump(section_id=target, page_index=section_ids.get(target))
+        if jump.page_index is None:
+            LOGGER.warning(
+                "form_jump_unknown_section entry=%s option=%r section_id=%d",
+                ENTRY_TEMPLATE.format(entry_id=entries[0][0]),
+                option[0],
+                target,
+            )
+        jumps[str(option[0])] = jump
+    return jumps
 
 
 def _dig(payload: Any, *path: int) -> Any:

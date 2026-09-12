@@ -15,13 +15,14 @@ from app.form.base import (
     FORM_CODE_TRANSPORT_FAILED,
     FormSendResult,
 )
-from app.form.discovery import FormDiscovery
+from app.form.discovery import FormDiscovery, FormStructure, SectionJump
 from app.form.submitter import CONFIRMATION_MARKERS, GoogleFormSender
 from app.package.model import Slot
 from app.pipeline.plan import PlannedBroadcast
 from app.tests.conftest import build_planned
 from app.tests.test_form_discovery import (
     SHORT_URL,
+    YOUTUBE_SECTION_ID,
     _FakeResponse,
     _FakeSession,
     build_html,
@@ -54,6 +55,17 @@ def _planned(
 def _sender(session: _FakeSession, tmp_path: Path) -> GoogleFormSender:
     now: datetime = datetime(2027, 3, 16, 12, 0)
     return GoogleFormSender(session, FormDiscovery(session, tmp_path / "logs", now))
+
+
+class _FixedDiscovery(FormDiscovery):
+    """Структура задана тестом: так проверяется защита submitter независимо от разбора формы."""
+
+    def __init__(self, session: _FakeSession, tmp_path: Path, structure: FormStructure) -> None:
+        super().__init__(session, tmp_path / "logs", datetime(2027, 3, 16, 12, 0))
+        self._structure: FormStructure = structure
+
+    def structure(self, form_url: str) -> FormStructure:
+        return self._structure
 
 
 def _session(*bodies: str, status_code: int = 200) -> _FakeSession:
@@ -209,3 +221,55 @@ def test_structure_is_read_once_for_two_objects(
     sender.send(_planned(make_config, make_slot_object, start=datetime(2027, 3, 18, 19, 0, tzinfo=KYIV)))
     assert len(session.get_calls) == 1
     assert len(session.post_calls) == 2
+
+
+def test_page_history_uses_page_index_not_section_id(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+) -> None:
+    """Регрессия живого прогона 13-09-2026: было pageHistory=0,1281939289 и HTTP 400."""
+    session: _FakeSession = _session(CONFIRMED_BODY)
+    _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    [(_, body)] = session.post_calls
+    assert str(YOUTUBE_SECTION_ID) not in body["pageHistory"][0]
+    assert body["pageHistory"] == ["0,1"]
+
+
+def test_unknown_section_id_falls_back_to_answered_pages(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+) -> None:
+    items: list[Any] = default_items()
+    items[3][4][0][1] = [["You Tube", None, 555], ["Facebook", None, 777]]
+    session: _FakeSession = _FakeSession(_FakeResponse(build_html(build_payload(items))), _FakeResponse(CONFIRMED_BODY))
+    assert _sender(session, tmp_path).send(_planned(make_config, make_slot_object)).confirmed is True
+    [(_, body)] = session.post_calls
+    pages: list[int] = [int(page) for page in body["pageHistory"][0].split(",")]
+    assert pages == [0, 1]
+    assert all(0 <= page < 3 for page in pages)
+
+
+def test_out_of_range_page_is_never_sent(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+) -> None:
+    """Даже если разбор формы ошибся, номер вне 0..page_count-1 в pageHistory не попадает."""
+    html_session: _FakeSession = _FakeSession(_FakeResponse(build_html()))
+    now: datetime = datetime(2027, 3, 16, 12, 0)
+    parsed: FormStructure = FormDiscovery(html_session, tmp_path / "logs", now).structure(SHORT_URL)
+    broken: FormStructure = FormStructure(
+        view_url=parsed.view_url,
+        response_url=parsed.response_url,
+        fbzx=parsed.fbzx,
+        questions=parsed.questions,
+        navigation={"entry.4": {"You Tube": SectionJump(section_id=YOUTUBE_SECTION_ID, page_index=YOUTUBE_SECTION_ID)}},
+        page_count=parsed.page_count,
+    )
+    session: _FakeSession = _FakeSession(_FakeResponse(CONFIRMED_BODY))
+    sender: GoogleFormSender = GoogleFormSender(session, _FixedDiscovery(session, tmp_path, broken))
+    assert sender.send(_planned(make_config, make_slot_object)).confirmed is True
+    [(_, body)] = session.post_calls
+    assert body["pageHistory"] == ["0,1"]

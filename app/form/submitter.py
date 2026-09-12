@@ -27,6 +27,7 @@ from app.form.discovery import (
     HttpResponse,
     HttpSession,
     QuestionKind,
+    SectionJump,
 )
 from app.observability.logging_setup import get_logger, mask_stream_key
 from app.package.model import FormSpec
@@ -215,20 +216,31 @@ def _missing(question: FormQuestion, wanted: str) -> str:
 
 def _visited_pages(structure: FormStructure, answers: list[_Answer]) -> list[int]:
     """Раздел вопроса «Платформа» и раздел, куда ведёт выбранный вариант (§7.5 п.4)."""
-    platform_answer: _Answer | None = _answer_by_options(structure, answers)
+    fork: _Answer | None = _answer_by_options(structure, answers)
+    jump: SectionJump | None = _jump_for(structure, fork)
     pages: list[int] = [FIRST_PAGE]
-    if platform_answer is not None:
-        target: int | None = structure.navigation.get(platform_answer.question.entry_id, {}).get(
-            platform_answer.value
+    if fork is not None and jump is not None and _is_page_in_range(jump.page_index, structure):
+        _append_page(pages, fork.question.page_index, structure)
+        _append_page(pages, jump.page_index, structure)
+        LOGGER.info(
+            "form_pages_by_navigation pages=%s entry=%s option=%r section_id=%d page=%s page_count=%d",
+            pages,
+            fork.question.entry_id,
+            fork.value,
+            jump.section_id,
+            jump.page_index,
+            structure.page_count,
         )
-        if target is not None:
-            _append_page(pages, platform_answer.question.page_index)
-            _append_page(pages, target)
-            LOGGER.info("form_pages_by_navigation pages=%s", pages)
-            return pages
+        return pages
     for answer in answers:
-        _append_page(pages, answer.question.page_index)
-    LOGGER.info("form_pages_by_answers pages=%s", pages)
+        _append_page(pages, answer.question.page_index, structure)
+    LOGGER.info(
+        "form_pages_by_answers pages=%s section_id=%s page=%s page_count=%d",
+        pages,
+        jump.section_id if jump is not None else None,
+        jump.page_index if jump is not None else None,
+        structure.page_count,
+    )
     return pages
 
 
@@ -240,7 +252,21 @@ def _answer_by_options(structure: FormStructure, answers: list[_Answer]) -> _Ans
     return None
 
 
-def _append_page(pages: list[int], page: int) -> None:
+def _jump_for(structure: FormStructure, fork: _Answer | None) -> SectionJump | None:
+    if fork is None:
+        return None
+    return structure.navigation.get(fork.question.entry_id, {}).get(fork.value)
+
+
+def _is_page_in_range(page: int | None, structure: FormStructure) -> bool:
+    """pageHistory принимает только номера существующих разделов: всё прочее Google отвергает 400."""
+    return page is not None and 0 <= page < structure.page_count
+
+
+def _append_page(pages: list[int], page: int, structure: FormStructure) -> None:
+    if not _is_page_in_range(page, structure):
+        LOGGER.warning("form_page_out_of_range page=%s page_count=%d", page, structure.page_count)
+        return
     if page not in pages:
         pages.append(page)
 
