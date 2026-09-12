@@ -40,10 +40,11 @@ class ChannelInfo:
 @dataclass(frozen=True)
 class UpcomingBroadcast:
     broadcast_id: str
-    start_utc: datetime      # aware, UTC
+    start_utc: datetime        # aware, UTC
     title: str
     description: str
-    stream_id: str | None    # привязанный поток; None — поток не привязан
+    stream_id: str | None      # привязанный поток; None — поток не привязан
+    category_id: str | None = None   # snippet.categoryId: update заменяет часть ресурса целиком
 
 
 @dataclass(frozen=True)
@@ -90,12 +91,7 @@ class BroadcastPlatform(Protocol):
         """Привязанный поток: маркер (title) и ключ; None — потока нет."""
         ...
 
-    def create_broadcast(
-        self,
-        channel: ChannelConfig,
-        spec: BroadcastSpec,
-        preview: bytes | None,
-    ) -> CreatedBroadcast:
+    def create_broadcast(self, channel: ChannelConfig, spec: BroadcastSpec) -> CreatedBroadcast:
         """Все шаги §7.4 п.1–4; маркер потока — spec.marker.
 
         Площадка получает готовую спеку, а не слот: отправляемое и сравниваемое
@@ -108,9 +104,30 @@ class BroadcastPlatform(Protocol):
         channel: ChannelConfig,
         broadcast_id: str,
         spec: BroadcastSpec,
-        preview: bytes | None,
+        category_id: str | None = None,
     ) -> None:
-        """Исправление на месте (§7.3): название, описание, превью; ключ и ссылка не меняются."""
+        """Исправление на месте (§7.3): название, описание, превью; ключ и ссылка не меняются.
+
+        category_id — из найденного эфира: update заменяет snippet целиком,
+        и без него у эфира сменилась бы категория.
+        """
+        ...
+
+    def attach_stream(
+        self,
+        channel: ChannelConfig,
+        broadcast_id: str,
+        spec: BroadcastSpec,
+    ) -> CreatedBroadcast:
+        """Эфир есть, потока нет: создать поток с маркером и привязать (§7.3, §7.4 п.2–3)."""
+        ...
+
+    def set_language(self, channel: ChannelConfig, broadcast_id: str, language: str) -> None:
+        """Язык эфира: у liveBroadcast поля нет, оно у videos с тем же id (§7.4)."""
+        ...
+
+    def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
+        """Обложка эфира (§7.4 п.4). Сбой не отменяет эфир — решает вызывающий."""
         ...
 
 

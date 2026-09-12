@@ -53,6 +53,13 @@ class FakePlatform:
         self.fail_list: dict[str, PlatformError] = {}     # channel_id → ошибка list_upcoming
         self.fail_create: dict[str, PlatformError] = {}   # slot_id → ошибка create_broadcast
         self.fail_describe: dict[str, PlatformError] = {}  # channel_id → ошибка describe_channel
+        self.fail_update: dict[str, PlatformError] = {}    # broadcast_id → ошибка update_broadcast
+        self.fail_attach: dict[str, PlatformError] = {}    # broadcast_id → ошибка attach_stream
+        self.fail_language: dict[str, PlatformError] = {}  # broadcast_id → ошибка set_language
+        self.fail_thumbnail: dict[str, PlatformError] = {}  # broadcast_id → ошибка set_thumbnail
+        self.thumbnails: list[FakeCall] = []
+        self.attached: list[FakeCall] = []
+        self.languages: dict[str, str] = {}                # broadcast_id → записанный язык
         self.channel_info: dict[str, ChannelInfo] = {}     # channel_id → ответ describe_channel
         self.describe_calls: list[str] = []
 
@@ -123,12 +130,7 @@ class FakePlatform:
         self.stream_calls.append((channel.id, stream_id))
         return self._streams.get(channel.id, {}).get(stream_id)
 
-    def create_broadcast(
-        self,
-        channel: ChannelConfig,
-        spec: BroadcastSpec,
-        preview: bytes | None,
-    ) -> CreatedBroadcast:
+    def create_broadcast(self, channel: ChannelConfig, spec: BroadcastSpec) -> CreatedBroadcast:
         if spec.marker in self.fail_create:
             raise self.fail_create[spec.marker]
         number: int = self._next_number()
@@ -147,7 +149,7 @@ class FakePlatform:
         )
         self._streams.setdefault(channel.id, {})[stream.stream_id] = stream
         self._broadcasts.setdefault(channel.id, {})[broadcast.broadcast_id] = broadcast
-        self.created.append(FakeCall(channel.id, broadcast.broadcast_id, spec.marker, preview))
+        self.created.append(FakeCall(channel.id, broadcast.broadcast_id, spec.marker, None))
         return CreatedBroadcast(
             broadcast_id=broadcast.broadcast_id,
             broadcast_url=broadcast_url_for(channel, broadcast.broadcast_id),
@@ -161,8 +163,10 @@ class FakePlatform:
         channel: ChannelConfig,
         broadcast_id: str,
         spec: BroadcastSpec,
-        preview: bytes | None,
+        category_id: str | None = None,
     ) -> None:
+        if broadcast_id in self.fail_update:
+            raise self.fail_update[broadcast_id]
         current: UpcomingBroadcast | None = self._broadcasts.get(channel.id, {}).get(broadcast_id)
         if current is None:
             raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.id}")
@@ -171,7 +175,46 @@ class FakePlatform:
             title=spec.title,
             description=spec.description,
         )
-        self.updated.append(FakeCall(channel.id, broadcast_id, spec.marker, preview))
+        self.updated.append(FakeCall(channel.id, broadcast_id, spec.marker, None))
+
+    def attach_stream(
+        self,
+        channel: ChannelConfig,
+        broadcast_id: str,
+        spec: BroadcastSpec,
+    ) -> CreatedBroadcast:
+        if broadcast_id in self.fail_attach:
+            raise self.fail_attach[broadcast_id]
+        current: UpcomingBroadcast | None = self._broadcasts.get(channel.id, {}).get(broadcast_id)
+        if current is None:
+            raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.id}")
+        number: int = self._next_number()
+        stream: StreamInfo = StreamInfo(
+            stream_id=FAKE_STREAM_ID_TEMPLATE.format(number=number),
+            title=spec.marker,
+            ingestion_address=FAKE_STREAM_URL,
+            stream_name=FAKE_STREAM_KEY_TEMPLATE.format(number=number),
+        )
+        self._streams.setdefault(channel.id, {})[stream.stream_id] = stream
+        self._broadcasts[channel.id][broadcast_id] = replace(current, stream_id=stream.stream_id)
+        self.attached.append(FakeCall(channel.id, broadcast_id, spec.marker, None))
+        return CreatedBroadcast(
+            broadcast_id=broadcast_id,
+            broadcast_url=broadcast_url_for(channel, broadcast_id),
+            stream_id=stream.stream_id,
+            stream_url=stream.ingestion_address,
+            stream_key=stream.stream_name,
+        )
+
+    def set_language(self, channel: ChannelConfig, broadcast_id: str, language: str) -> None:
+        if broadcast_id in self.fail_language:
+            raise self.fail_language[broadcast_id]
+        self.languages[broadcast_id] = language
+
+    def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
+        if broadcast_id in self.fail_thumbnail:
+            raise self.fail_thumbnail[broadcast_id]
+        self.thumbnails.append(FakeCall(channel.id, broadcast_id, "", preview))
 
     def _next_number(self) -> int:
         self._counter += 1

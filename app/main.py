@@ -92,13 +92,13 @@ def _say(text: str) -> None:
     print(text)
 
 
-def _requested_run_mode(args: argparse.Namespace) -> RunMode | None:
-    """Полного запуска до задачи 3b нет: создание эфиров ещё не реализовано."""
+def _requested_run_mode(args: argparse.Namespace) -> RunMode:
+    """Без флагов — полный цикл §4: создание и исправление эфиров."""
     if args.status:
         return RunMode.STATUS
     if args.dry_run:
         return RunMode.DRY_RUN
-    return None
+    return RunMode.FULL
 
 
 def _run(args: argparse.Namespace, paths: PlanerPaths) -> int:
@@ -109,10 +109,9 @@ def _run(args: argparse.Namespace, paths: PlanerPaths) -> int:
         return _run_auth(args.auth, paths, dependencies)
     if args.check:
         return _run_check(paths, dependencies)
-    mode: RunMode | None = _requested_run_mode(args)
-    if mode is None:
-        return _run_first(paths, dependencies)
-    return _run_pipeline(mode, paths, dependencies)
+    if not (args.dry_run or args.status):
+        _say(msg.FIRST_RUN_HEADER)
+    return _run_pipeline(_requested_run_mode(args), paths, dependencies)
 
 
 def _build_dependencies(paths: PlanerPaths) -> _Dependencies | None:
@@ -252,14 +251,6 @@ def _remember_binding(
     else:
         _say(msg.AUTH_BINDING_SAVED.format(path=paths.channels_state_file))
     return True
-
-
-def _run_first(paths: PlanerPaths, dependencies: _Dependencies) -> int:
-    """Без флагов (двойной клик по planer.bat): авторизовать недостающее и проверить каналы."""
-    _say(msg.FIRST_RUN_HEADER)
-    exit_code: int = _run_check(paths, dependencies)
-    _say(msg.FULL_RUN_NOT_AVAILABLE_YET)
-    return exit_code
 
 
 def _run_check(paths: PlanerPaths, dependencies: _Dependencies) -> int:

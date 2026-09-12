@@ -34,6 +34,7 @@ from app.output.report import (
     RunReport,
     build_package_lines,
     build_skipped_lines,
+    build_warning_lines,
     outcome_from_marked,
     outcome_from_planned,
     planer_error_outcome,
@@ -44,7 +45,15 @@ from app.output.report import (
 from app.package.model import PackageError, read_preview
 from app.package.promo import PromoScan, scan_promo
 from app.paths import PlanerPaths
-from app.pipeline.plan import Decision, OutcomeError, PlannedBroadcast
+from app.pipeline.plan import (
+    WARNING_STEP_LANGUAGE,
+    WARNING_STEP_THUMBNAIL,
+    ChangedField,
+    Decision,
+    OutcomeError,
+    OutcomeWarning,
+    PlannedBroadcast,
+)
 from app.pipeline.reconciler import MarkedScan, OrphanBroadcast, Reconciler, split_marker
 from app.pipeline.selection import Selection, build_planned
 from app.platforms.base import BroadcastPlatform, CreatedBroadcast, PlatformError, broadcast_url_for
@@ -160,7 +169,9 @@ def _run_promo(context: _RunContext) -> RunOutcome:
     if context.is_full:
         keys_path, extra_outcomes = _execute_full(context, scan, selection)
     outcomes: list[PairOutcome] = [
-        outcome_from_planned(item, is_dry_run=not context.is_full) for item in selection.planned
+        outcome_from_planned(item, is_dry_run=not context.is_full)
+        for item in selection.planned
+        if not item.is_too_late      # они в разделе «пропущено», не в исходах
     ]
     outcomes.extend(extra_outcomes)
     report: RunReport = RunReport(
@@ -171,6 +182,7 @@ def _run_promo(context: _RunContext) -> RunOutcome:
         outcomes=outcomes,
         orphans=[_orphan_line(orphan) for orphan in orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
+        warnings=build_warning_lines(selection.planned),
         keys_file_path=_display_path(context.paths, keys_path),
         notice=context.notice,
     )
@@ -198,6 +210,7 @@ def _execute_full(
     outcomes.extend(_save_registry(context, selection.planned))
     keys_path, keys_errors = _write_keys(
         context,
+        # все будущие эфиры с ключом, включая слоты внутри min_lead_minutes (§5.5)
         [key_row_from_planned(item) for item in selection.planned if item.stream_key],
     )
     outcomes.extend(keys_errors)
@@ -324,6 +337,11 @@ class _Executor:
             item.decision = Decision.ERROR
 
     def _dispatch(self, item: PlannedBroadcast) -> None:
+        if item.is_too_late:
+            return      # до старта меньше min_lead_minutes: ключ храним, эфир не трогаем
+        if item.decision is Decision.NO_STREAM:
+            self._attach_stream(item)
+            return
         if item.decision in (Decision.CREATE, Decision.RECREATE):
             self._create(item, is_recreate=item.decision is Decision.RECREATE)
             return
@@ -334,11 +352,7 @@ class _Executor:
             self._adopt(item)
 
     def _create(self, item: PlannedBroadcast, *, is_recreate: bool) -> None:
-        created: CreatedBroadcast = self._platform.create_broadcast(
-            item.channel,
-            item.expected,
-            self._preview(item),
-        )
+        created: CreatedBroadcast = self._platform.create_broadcast(item.channel, item.expected)
         item.remember_broadcast(
             broadcast_id=created.broadcast_id,
             broadcast_url=created.broadcast_url,
@@ -354,10 +368,48 @@ class _Executor:
             created.broadcast_id,
             mask_stream_key(created.stream_key),
         )
+        self._set_thumbnail(item, created.broadcast_id)
+        self._set_language(item, created.broadcast_id)
+
+    def _attach_stream(self, item: PlannedBroadcast) -> None:
+        """Эфир есть, потока нет: привязываем поток и дальше ведём себя как с найденным."""
+        if item.found is None:
+            return
+        attached: CreatedBroadcast = self._platform.attach_stream(
+            item.channel,
+            item.found.broadcast_id,
+            item.expected,
+        )
+        item.stream_attached = True
+        item.remember_broadcast(
+            broadcast_id=attached.broadcast_id,
+            broadcast_url=attached.broadcast_url,
+            stream_url=attached.stream_url,
+            stream_key=attached.stream_key,
+            created_at=item.created_at or self._context.now_naive,
+            is_recreate=False,
+        )
+        LOGGER.info(
+            "stream_attached slot_id=%s channel=%s broadcast_id=%s stream_key=%s",
+            item.slot_id,
+            item.channel.id,
+            attached.broadcast_id,
+            mask_stream_key(attached.stream_key),
+        )
+        changed: tuple[ChangedField, ...] = item.actual.diff(item.expected) if item.actual else ()
+        item.changed_fields = changed
+        item.decision = Decision.UPDATE if changed else Decision.MATCH
+        if changed:
+            self._update(item)
 
     def _update(self, item: PlannedBroadcast) -> None:
         broadcast_id: str = item.found.broadcast_id if item.found else ""
-        self._platform.update_broadcast(item.channel, broadcast_id, item.expected, self._preview(item))
+        self._platform.update_broadcast(
+            item.channel,
+            broadcast_id,
+            item.expected,
+            item.found.category_id if item.found else None,
+        )
         LOGGER.info(
             "broadcast_updated slot_id=%s channel=%s broadcast_id=%s fields=%s",
             item.slot_id,
@@ -386,6 +438,35 @@ class _Executor:
             item.found.broadcast_id,
             mask_stream_key(item.found_stream.stream_name),
         )
+
+    def _set_thumbnail(self, item: PlannedBroadcast, broadcast_id: str) -> None:
+        """Превью не критично (ТЗ §7.4 п.4): эфир и ключ остаются в силе."""
+        preview: bytes | None = self._preview(item)
+        if preview is None:
+            return
+        try:
+            self._platform.set_thumbnail(item.channel, broadcast_id, preview)
+        except PlatformError as error:
+            LOGGER.warning(
+                "thumbnail_failed slot_id=%s channel=%s code=%s",
+                item.slot_id,
+                item.channel.id,
+                error.code,
+            )
+            item.warn(OutcomeWarning(WARNING_STEP_THUMBNAIL, error.code, error.message))
+
+    def _set_language(self, item: PlannedBroadcast, broadcast_id: str) -> None:
+        """Язык эфира — тоже не критично: ключ важнее."""
+        try:
+            self._platform.set_language(item.channel, broadcast_id, item.language)
+        except PlatformError as error:
+            LOGGER.warning(
+                "language_failed slot_id=%s channel=%s code=%s",
+                item.slot_id,
+                item.channel.id,
+                error.code,
+            )
+            item.warn(OutcomeWarning(WARNING_STEP_LANGUAGE, error.code, error.message))
 
     def _preview(self, item: PlannedBroadcast) -> bytes | None:
         """Случайное превью слота (§5.1) — если канал ставит превью и в слоте они есть."""

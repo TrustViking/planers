@@ -11,7 +11,8 @@ from googleapiclient.errors import HttpError
 from app.config.loader import ChannelConfig, Platform, Privacy
 from app.google import api_retry
 from app.platforms import youtube as youtube_module
-from app.platforms.base import ChannelInfo, PlatformError, StreamInfo, UpcomingBroadcast
+from app.pipeline.plan import BroadcastSpec
+from app.platforms.base import ChannelInfo, CreatedBroadcast, PlatformError, StreamInfo, UpcomingBroadcast
 from app.platforms.youtube import YOUTUBE_STREAM_KEY_PATTERN, YouTubePlatform
 
 CHANNEL: ChannelConfig = ChannelConfig(
@@ -45,9 +46,18 @@ class _FakeResource:
         self._name: str = name
 
     def list(self, **kwargs: Any) -> _FakeRequest:
-        self._calls.append({"resource": self._name, **kwargs})
+        return self._call("list", **kwargs)
+
+    def __getattr__(self, method: str) -> Any:
+        """insert, bind, update, set — все ведут себя одинаково: очередь ответов."""
+        if method.startswith("_"):
+            raise AttributeError(method)
+        return lambda **kwargs: self._call(method, **kwargs)
+
+    def _call(self, method: str, **kwargs: Any) -> _FakeRequest:
+        self._calls.append({"resource": self._name, "method": method, **kwargs})
         if not self._responses:
-            raise AssertionError(f"неожиданный вызов {self._name}.list")
+            raise AssertionError(f"неожиданный вызов {self._name}.{method}")
         return _FakeRequest(self._responses.pop(0))
 
 
@@ -69,6 +79,12 @@ class _FakeService:
 
     def liveStreams(self) -> _FakeResource:  # noqa: N802 — имя как у googleapiclient
         return self._resource("liveStreams")
+
+    def videos(self) -> _FakeResource:
+        return self._resource("videos")
+
+    def thumbnails(self) -> _FakeResource:
+        return self._resource("thumbnails")
 
 
 @pytest.fixture
@@ -338,15 +354,143 @@ def test_transport_failure_becomes_platform_error(
     assert raised.value.code == "transportFailed"
 
 
-def test_create_and_update_are_not_implemented_yet(
+def _stream_response(key: str = GOOD_KEY) -> dict[str, Any]:
+    return {
+        "id": "S1",
+        "cdn": {"ingestionInfo": {"ingestionAddress": "rtmp://a.rtmp.youtube.com/live2", "streamName": key}},
+    }
+
+
+def _spec(now: datetime) -> BroadcastSpec:
+    return BroadcastSpec(
+        start_minute=now,
+        marker="17-03-2027_1900_uk",
+        title="Эфир",
+        description="Описание",
+    )
+
+
+def test_create_broadcast_inserts_binds_and_returns_key(
     platform: YouTubePlatform,
     monkeypatch: pytest.MonkeyPatch,
-    make_slot_object: Any,
 ) -> None:
-    slot: Any = make_slot_object(datetime(2027, 3, 17, 19, 0, tzinfo=timezone.utc), "uk")
-    with pytest.raises(PlatformError) as created:
-        platform.create_broadcast(CHANNEL, slot, None)
-    with pytest.raises(PlatformError) as updated:
-        platform.update_broadcast(CHANNEL, "B1", slot, None)
-    assert created.value.code == "notImplementedYet"
-    assert updated.value.code == "notImplementedYet"
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            liveBroadcasts=[{"id": "B1"}, {"id": "B1"}],
+            liveStreams=[_stream_response()],
+        ),
+    )
+    spec: BroadcastSpec = _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc))
+    created: CreatedBroadcast = platform.create_broadcast(CHANNEL, spec)
+
+    assert created.broadcast_id == "B1"
+    assert created.broadcast_url == "https://www.youtube.com/watch?v=B1"
+    assert created.stream_key == GOOD_KEY
+    assert created.stream_url == "rtmp://a.rtmp.youtube.com/live2"
+    insert: dict[str, Any] = service.calls[0]["body"]
+    assert insert["snippet"]["scheduledStartTime"] == "2027-03-17T17:00:00Z"
+    assert insert["snippet"]["title"] == "Эфир"
+    assert insert["status"]["privacyStatus"] == "public"
+    assert insert["status"]["selfDeclaredMadeForKids"] is False
+    assert insert["contentDetails"] == {
+        "enableAutoStart": True,
+        "enableAutoStop": True,
+        "latencyPreference": "normal",
+    }
+    stream_body: dict[str, Any] = service.calls[1]["body"]
+    assert stream_body["snippet"]["title"] == spec.marker      # маркер планера (§7.3)
+    assert stream_body["cdn"] == {"ingestionType": "rtmp", "resolution": "variable", "frameRate": "variable"}
+    assert service.calls[2]["method"] == "bind"
+    assert (service.calls[2]["id"], service.calls[2]["streamId"]) == ("B1", "S1")
+
+
+def test_unexpected_stream_key_is_an_error(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ключ не того вида — эфир не засчитан: в журнал не пишем, форму не шлём (§7.4 п.2)."""
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            liveBroadcasts=[{"id": "B1"}],
+            liveStreams=[_stream_response("STRANGE")],
+        ),
+    )
+    with caplog.at_level("ERROR"), pytest.raises(PlatformError) as raised:
+        platform.create_broadcast(CHANNEL, _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
+    assert raised.value.code == "unexpectedStreamKeyFormat"
+    assert "STRANGE" not in caplog.text          # ключ только замаскированным
+
+
+def test_attach_stream_reuses_the_same_path(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveBroadcasts=[{"id": "B1"}], liveStreams=[_stream_response()]),
+    )
+    created: CreatedBroadcast = platform.attach_stream(
+        CHANNEL,
+        "B1",
+        _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)),
+    )
+    assert created.stream_key == GOOD_KEY
+    assert [call["resource"] for call in service.calls] == ["liveStreams", "liveBroadcasts"]
+    assert service.calls[1]["method"] == "bind"
+
+
+def test_update_sends_time_and_category(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """update заменяет snippet целиком: без времени и категории они бы потерялись."""
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"id": "B1"}]))
+    platform.update_broadcast(
+        CHANNEL,
+        "B1",
+        _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)),
+        category_id="22",
+    )
+    body: dict[str, Any] = service.calls[0]["body"]
+    assert service.calls[0]["part"] == "snippet"      # contentDetails тянет monitorStream
+    assert body["id"] == "B1"
+    assert body["snippet"]["scheduledStartTime"] == "2027-03-17T17:00:00Z"
+    assert body["snippet"]["categoryId"] == "22"
+
+
+def test_set_language_rewrites_the_whole_snippet(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Частичный snippet затирает непереданные поля — отправляется весь."""
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            videos=[{"items": [{"id": "B1", "snippet": {"title": "Эфир", "categoryId": "22",
+                                                        "description": "Описание"}}]}, {"id": "B1"}],
+        ),
+    )
+    platform.set_language(CHANNEL, "B1", "ru")
+    snippet: dict[str, Any] = service.calls[1]["body"]["snippet"]
+    assert snippet["defaultLanguage"] == "ru" and snippet["defaultAudioLanguage"] == "ru"
+    assert snippet["title"] == "Эфир" and snippet["categoryId"] == "22"
+    assert snippet["description"] == "Описание"
+
+
+def test_category_id_is_read_from_the_broadcast(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    item["snippet"]["categoryId"] = "22"
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
+    [broadcast] = platform.list_upcoming(CHANNEL)
+    assert broadcast.category_id == "22"
+

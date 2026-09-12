@@ -94,19 +94,33 @@ def _ready(root: Path) -> None:
     _write_bindings(root)
 
 
-def test_run_without_flags_checks_channels_and_names_3b(
+def test_run_without_flags_is_the_full_cycle(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Двойной клик по planer.bat: полный цикл §4 — эфиры создаются."""
+    _ready(planer_root)
+    make_package(planer_root / "promo", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    assert run_cli([]) == 0
+    out: str = capsys.readouterr().out
+    assert msg.FIRST_RUN_HEADER in out
+    assert "эфир создан, ключ получен" in out
+    assert len(fake_platform_in_main.created) == 1
+    assert (planer_root / "state" / "registry.json").exists()
+    assert "fake-0001" in (planer_root / "keystreams" / "keys.txt").read_text(encoding="utf-8")
+
+
+def test_run_without_flags_on_empty_promo_exits_3(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Двойной клик по planer.bat: проверка каналов и честная строка про задачу 3b."""
     _ready(planer_root)
-    assert run_cli([]) == 0
-    out: str = capsys.readouterr().out
-    assert msg.FIRST_RUN_HEADER in out
-    assert msg.CHECK_ALL_OK in out
-    assert msg.FULL_RUN_NOT_AVAILABLE_YET in out
-    assert not (planer_root / "state" / "registry.json").exists()
+    assert run_cli([]) == 3
+    assert "нет пакетов" in capsys.readouterr().out
 
 
 def test_missing_configs_copy_examples_and_exit_2(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:

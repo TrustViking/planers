@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from app.config.loader import PlanerConfig
 from app.core.dates import build_slot_id, format_date, format_time
 from app.package.model import Package, Slot
+from app.pipeline.plan import Decision
 from app.pipeline.selection import Selection, SkipReason, build_planned
 from app.platforms.fake import FakePlatform
 from app.state.registry import Registry
@@ -46,12 +47,16 @@ def _select(slot_map: dict[str, Slot], config: PlanerConfig, now: datetime) -> S
     return build_planned(slot_map, sources, config, FakePlatform().limits, Registry(), now)
 
 
-def test_too_late_by_min_lead_minutes(now: datetime, make_config: ConfigFactory) -> None:
+def test_too_late_slot_becomes_an_object_with_a_flag(now: datetime, make_config: ConfigFactory) -> None:
+    """Слот внутри min_lead_minutes не выбрасывается: иначе его ключ пропал бы из keys.txt."""
     soon: Slot = _slot(now, minutes=30, language="uk")
     boundary: Slot = _slot(now, minutes=60, language="uk")
     selection: Selection = _select(_slot_map(soon, boundary), make_config(min_lead_minutes=60), now)
-    assert [(item.slot.slot_id, item.reason) for item in selection.skipped] == [(soon.slot_id, SkipReason.TOO_LATE)]
-    assert [item.slot.slot_id for item in selection.planned] == [boundary.slot_id]
+    assert selection.skipped == ()
+    by_slot: dict[str, bool] = {item.slot.slot_id: item.is_too_late for item in selection.planned}
+    assert by_slot == {soon.slot_id: True, boundary.slot_id: False}
+    too_late = [item for item in selection.planned if item.is_too_late]
+    assert [item.decision for item in too_late] == [Decision.TOO_LATE]
 
 
 def test_language_without_channel_is_skipped(now: datetime, make_config: ConfigFactory) -> None:

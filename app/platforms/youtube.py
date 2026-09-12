@@ -1,7 +1,7 @@
-"""YouTube Data API v3 (ТЗ §7.3, §7.4): чтение каналов, эфиров и потоков.
+"""YouTube Data API v3 (ТЗ §7.3, §7.4): чтение и планирование эфиров.
 
-Задача 3a — только чтение: describe_channel, list_upcoming, get_stream. Создание и
-исправление эфиров появятся в задаче 3b. Любой сбой наружу — только PlatformError.
+Чтение: describe_channel, list_upcoming, get_stream. Планирование: create_broadcast,
+update_broadcast, attach_stream, set_language. Любой сбой наружу — только PlatformError.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from typing import Any, Final
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaInMemoryUpload
 
 from app.config.loader import ChannelConfig
 from app.google.api_retry import GoogleApiRetryPolicy, execute_with_retry
@@ -26,6 +27,7 @@ from app.platforms.base import (
     PlatformLimits,
     StreamInfo,
     UpcomingBroadcast,
+    broadcast_url_for,
 )
 
 LOGGER = get_logger("youtube")
@@ -40,6 +42,16 @@ MAX_RESULTS: Final[int] = 50
 CHANNEL_PARTS: Final[str] = "snippet,brandingSettings"
 BROADCAST_PARTS: Final[str] = "snippet,contentDetails,status"
 STREAM_PARTS: Final[str] = "snippet,cdn"
+BROADCAST_INSERT_PARTS: Final[str] = "snippet,status,contentDetails"
+BROADCAST_UPDATE_PARTS: Final[str] = "snippet"   # без contentDetails: он требует monitorStream
+BIND_PARTS: Final[str] = "id,contentDetails"
+VIDEO_PARTS: Final[str] = "snippet"
+RFC3339_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
+INGESTION_TYPE: Final[str] = "rtmp"
+STREAM_RESOLUTION: Final[str] = "variable"
+STREAM_FRAME_RATE: Final[str] = "variable"
+LATENCY_PREFERENCE: Final[str] = "normal"
+THUMBNAIL_MIME_TYPE: Final[str] = "image/jpeg"
 
 # Формат ключа потока YouTube (ТЗ §7.4) — единственный источник.
 YOUTUBE_STREAM_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]{4}(-[a-z0-9]{4}){3,4}$")
@@ -49,7 +61,7 @@ ERROR_CHANNEL_NOT_FOUND: Final[str] = "channelNotFound"
 ERROR_AUTH: Final[str] = "authFailed"
 ERROR_TRANSPORT: Final[str] = "transportFailed"
 ERROR_BAD_RESPONSE: Final[str] = "badResponse"
-ERROR_NOT_IMPLEMENTED: Final[str] = "notImplementedYet"
+ERROR_UNEXPECTED_KEY: Final[str] = "unexpectedStreamKeyFormat"
 ERROR_UNKNOWN: Final[str] = "unknown"
 
 RETRY_MAX_ATTEMPTS: Final[int] = 4
@@ -168,22 +180,141 @@ class YouTubePlatform:
         _warn_on_unexpected_key(channel.id, stream)
         return stream
 
-    def create_broadcast(
+    def create_broadcast(self, channel: ChannelConfig, spec: BroadcastSpec) -> CreatedBroadcast:
+        """§7.4: insert эфира → insert потока → bind. Оборвалось — доделает следующий запуск."""
+        response: dict[str, Any] = self._execute(
+            channel,
+            "liveBroadcasts.insert",
+            lambda service: service.liveBroadcasts().insert(
+                part=BROADCAST_INSERT_PARTS,
+                body=_broadcast_body(channel, spec),
+            ),
+        )
+        broadcast_id: str = _text(response, "id")
+        LOGGER.info("broadcast_inserted channel=%s broadcast_id=%s", channel.id, broadcast_id)
+        return self._attach_new_stream(channel, broadcast_id, spec)
+
+    def attach_stream(
         self,
         channel: ChannelConfig,
+        broadcast_id: str,
         spec: BroadcastSpec,
-        preview: bytes | None,
     ) -> CreatedBroadcast:
-        raise PlatformError(ERROR_NOT_IMPLEMENTED, "create_broadcast appears in task 3c")
+        """Эфир уже есть, потока нет: тот же путь, начиная с liveStreams.insert."""
+        return self._attach_new_stream(channel, broadcast_id, spec)
 
     def update_broadcast(
         self,
         channel: ChannelConfig,
         broadcast_id: str,
         spec: BroadcastSpec,
-        preview: bytes | None,
+        category_id: str | None = None,
     ) -> None:
-        raise PlatformError(ERROR_NOT_IMPLEMENTED, "update_broadcast appears in task 3c")
+        """update заменяет переданную часть целиком: время и категорию отправляем всегда."""
+        snippet: dict[str, Any] = {
+            "title": spec.title,
+            "description": spec.description,
+            "scheduledStartTime": _rfc3339(spec.start_minute),
+        }
+        if category_id:
+            snippet["categoryId"] = category_id
+        self._execute(
+            channel,
+            "liveBroadcasts.update",
+            lambda service: service.liveBroadcasts().update(
+                part=BROADCAST_UPDATE_PARTS,
+                body={"id": broadcast_id, "snippet": snippet},
+            ),
+        )
+        LOGGER.info("broadcast_updated channel=%s broadcast_id=%s", channel.id, broadcast_id)
+
+    def set_language(self, channel: ChannelConfig, broadcast_id: str, language: str) -> None:
+        """Только read-modify-write: частичный snippet затирает непереданные поля."""
+        response: dict[str, Any] = self._execute(
+            channel,
+            "videos.list",
+            lambda service: service.videos().list(part=VIDEO_PARTS, id=broadcast_id),
+        )
+        items: list[dict[str, Any]] = _items(response)
+        if not items:
+            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"videos.list is empty for {broadcast_id}")
+        snippet: dict[str, Any] = dict(_mapping(items[0], "snippet"))
+        snippet["defaultLanguage"] = language
+        snippet["defaultAudioLanguage"] = language
+        self._execute(
+            channel,
+            "videos.update",
+            lambda service: service.videos().update(
+                part=VIDEO_PARTS,
+                body={"id": broadcast_id, "snippet": snippet},
+            ),
+        )
+        LOGGER.info(
+            "broadcast_language_set channel=%s broadcast_id=%s language=%s",
+            channel.id,
+            broadcast_id,
+            language,
+        )
+
+    def _attach_new_stream(
+        self,
+        channel: ChannelConfig,
+        broadcast_id: str,
+        spec: BroadcastSpec,
+    ) -> CreatedBroadcast:
+        """liveStreams.insert → проверка ключа → bind. Один поток на эфир (§7.4)."""
+        response: dict[str, Any] = self._execute(
+            channel,
+            "liveStreams.insert",
+            lambda service: service.liveStreams().insert(
+                part=STREAM_PARTS,
+                body=_stream_body(spec),
+            ),
+        )
+        stream_id: str = _text(response, "id")
+        ingestion: dict[str, Any] = _mapping(_mapping(response, "cdn"), "ingestionInfo")
+        stream_key: str = _text(ingestion, "streamName")
+        if not YOUTUBE_STREAM_KEY_PATTERN.fullmatch(stream_key):
+            LOGGER.error(
+                "stream_key_rejected channel=%s stream_id=%s stream_key=%s",
+                channel.id,
+                stream_id,
+                mask_stream_key(stream_key),
+            )
+            raise PlatformError(ERROR_UNEXPECTED_KEY, mask_stream_key(stream_key))
+        self._execute(
+            channel,
+            "liveBroadcasts.bind",
+            lambda service: service.liveBroadcasts().bind(
+                part=BIND_PARTS,
+                id=broadcast_id,
+                streamId=stream_id,
+            ),
+        )
+        LOGGER.info(
+            "stream_bound channel=%s broadcast_id=%s stream_id=%s stream_key=%s",
+            channel.id,
+            broadcast_id,
+            stream_id,
+            mask_stream_key(stream_key),
+        )
+        return CreatedBroadcast(
+            broadcast_id=broadcast_id,
+            broadcast_url=broadcast_url_for(channel, broadcast_id),
+            stream_id=stream_id,
+            stream_url=_text(ingestion, "ingestionAddress"),
+            stream_key=stream_key,
+        )
+
+    def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
+        """Превью не критично (ТЗ §7.4 п.4): сбой поднимается как PlatformError, решает вызывающий."""
+        media: MediaInMemoryUpload = MediaInMemoryUpload(preview, mimetype=THUMBNAIL_MIME_TYPE)
+        self._execute(
+            channel,
+            "thumbnails.set",
+            lambda service: service.thumbnails().set(videoId=broadcast_id, media_body=media),
+        )
+        LOGGER.info("thumbnail_set channel=%s broadcast_id=%s", channel.id, broadcast_id)
 
     def _service(self, channel: ChannelConfig) -> Any:
         cached: Any = self._services.get(channel.id)
@@ -217,6 +348,42 @@ class YouTubePlatform:
         if not isinstance(response, dict):
             raise PlatformError(ERROR_BAD_RESPONSE, f"{operation} returned {type(response).__name__}")
         return response
+
+
+def _rfc3339(value: datetime) -> str:
+    """Момент старта в том виде, в каком его ждёт YouTube (ТЗ §7.4 п.1)."""
+    return value.astimezone(timezone.utc).strftime(RFC3339_FORMAT)
+
+
+def _broadcast_body(channel: ChannelConfig, spec: BroadcastSpec) -> dict[str, Any]:
+    return {
+        "snippet": {
+            "title": spec.title,
+            "description": spec.description,
+            "scheduledStartTime": _rfc3339(spec.start_minute),
+        },
+        "status": {
+            "privacyStatus": channel.privacy.value,
+            "selfDeclaredMadeForKids": False,
+        },
+        "contentDetails": {
+            "enableAutoStart": channel.auto_start,
+            "enableAutoStop": True,
+            "latencyPreference": LATENCY_PREFERENCE,
+        },
+    }
+
+
+def _stream_body(spec: BroadcastSpec) -> dict[str, Any]:
+    """Название потока — маркер планера (§7.3), зрителям он не виден."""
+    return {
+        "snippet": {"title": spec.marker},
+        "cdn": {
+            "ingestionType": INGESTION_TYPE,
+            "resolution": STREAM_RESOLUTION,
+            "frameRate": STREAM_FRAME_RATE,
+        },
+    }
 
 
 def _items(response: dict[str, Any]) -> list[dict[str, Any]]:
@@ -273,12 +440,14 @@ def _broadcast_from_item(item: dict[str, Any], channel_key: str) -> UpcomingBroa
             start_text,
         )
         return None
+    category_id: Any = snippet.get("categoryId")
     return UpcomingBroadcast(
         broadcast_id=broadcast_id,
         start_utc=start_utc,
         title=_text(snippet, "title", allow_empty=True),
         description=_text(snippet, "description", allow_empty=True),
         stream_id=_bound_stream_id(item),
+        category_id=category_id if isinstance(category_id, str) and category_id else None,
     )
 
 

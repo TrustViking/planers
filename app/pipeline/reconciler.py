@@ -88,6 +88,8 @@ def _group_by_channel(
         channel.id: (channel, []) for channel in channels
     }
     for item in planned:
+        if item.is_too_late:
+            continue      # слот внутри min_lead_minutes: площадку по нему не трогаем
         groups.setdefault(item.channel.id, (item.channel, []))[1].append(item)
     return list(groups.values())
 

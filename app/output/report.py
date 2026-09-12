@@ -6,6 +6,7 @@ RunMode живёт здесь, а не в runner.py: отчёт зависит �
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -50,6 +51,7 @@ class OutcomeKind(str, Enum):
     FIXED = "fixed"
     MATCHED = "matched"
     NO_STREAM = "no_stream"   # эфир есть, привязанного потока нет — ключ взять неоткуда
+    STREAM_ATTACHED = "stream_attached"   # эфир был без потока, поток привязан этим запуском
     ERROR = "error"
     AMBIGUOUS = "ambiguous"
 
@@ -121,6 +123,7 @@ class RunReport:
     outcomes: list[PairOutcome] = field(default_factory=list)
     orphans: list[OrphanLine] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     keys_file_path: str | None = None
     notice: str | None = None
 
@@ -133,6 +136,7 @@ _DECISION_KINDS: Final[dict[Decision, OutcomeKind]] = {
     Decision.UPDATE: OutcomeKind.FIXED,
     Decision.MATCH: OutcomeKind.MATCHED,
     Decision.NO_STREAM: OutcomeKind.NO_STREAM,
+    Decision.TOO_LATE: OutcomeKind.MATCHED,   # в исходы не попадает: раздел «пропущено»
     Decision.AMBIGUOUS: OutcomeKind.AMBIGUOUS,
     Decision.ERROR: OutcomeKind.ERROR,
 }
@@ -141,6 +145,8 @@ _DECISION_KINDS: Final[dict[Decision, OutcomeKind]] = {
 def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) -> PairOutcome:
     """Исход по объекту; в dry-run форма не отправлялась, поэтому её отметки нет."""
     kind: OutcomeKind = OutcomeKind.ERROR if item.error is not None else _DECISION_KINDS[item.decision]
+    if item.stream_attached and item.error is None:
+        kind = OutcomeKind.STREAM_ATTACHED
     return PairOutcome(
         kind=kind,
         account_name=item.account_name,
@@ -185,7 +191,30 @@ def planer_error_outcome(name: str, code: str, detail: str) -> PairOutcome:
     )
 
 
+def build_warning_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
+    """Предупреждения (§7.4 п.4): эфир в силе, код выхода не меняется."""
+    return [
+        msg.WARNING_LINE.format(
+            prefix=_slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name),
+            step=msg.WARNING_STEP_TEXT.get(warning.step, warning.step),
+            code=warning.code,
+            message=warning.message,
+        )
+        for item in planned
+        for warning in item.warnings
+    ]
+
+
+def _unique(lines: Iterable[str]) -> list[str]:
+    """Один слот на несколько каналов даёт одну строку пропуска, а не несколько."""
+    seen: dict[str, None] = {}
+    for line in lines:
+        seen.setdefault(line, None)
+    return list(seen)
+
+
 def _form_state(item: PlannedBroadcast) -> FormState | None:
+
     """None — отправлять было нечего: ключа у объекта нет."""
     if not item.stream_key:
         return None
@@ -231,9 +260,14 @@ def build_skipped_lines(scan: PromoScan, selection: Selection, config: PlanerCon
         for slot in scan.past_slots
         if slot.language in config.served_languages
     ]
-    entries.extend((skipped.slot, _skip_text(skipped, config)) for skipped in selection.skipped)
+    entries.extend(
+        (item.slot, _slot_text(msg.SKIP_TOO_LATE, item.slot, minutes=config.min_lead_minutes))
+        for item in selection.planned
+        if item.is_too_late
+    )
+    entries.extend((skipped.slot, _skip_text(skipped)) for skipped in selection.skipped)
     entries.sort(key=lambda entry: slot_order_key(entry[0]))
-    return [text for _, text in entries]
+    return _unique(text for _, text in entries)
 
 
 def _header_lines(report: RunReport) -> list[str]:
@@ -259,12 +293,14 @@ def _append_run_body(lines: list[str], report: RunReport) -> None:
         if outcome.kind in ERROR_OUTCOME_KINDS
     ]
     _append_section(lines, msg.REPORT_SECTION_PACKAGES, [_render_package_line(line) for line in report.packages])
-    for kind, header in (
-        (OutcomeKind.CREATED, msg.REPORT_SECTION_CREATED),
-        (OutcomeKind.FIXED, msg.REPORT_SECTION_FIXED),
-        (OutcomeKind.MATCHED, msg.REPORT_SECTION_MATCHED),
+    # привязанный поток — тоже новый ключ, поэтому он в разделе «Создано»
+    created: list[str] = texts[OutcomeKind.CREATED] + texts[OutcomeKind.STREAM_ATTACHED]
+    for body, header in (
+        (created, msg.REPORT_SECTION_CREATED),
+        (texts[OutcomeKind.FIXED], msg.REPORT_SECTION_FIXED),
+        (texts[OutcomeKind.MATCHED], msg.REPORT_SECTION_MATCHED),
     ):
-        _append_section(lines, header.format(count=len(texts[kind])), texts[kind])
+        _append_section(lines, header.format(count=len(body)), body)
     if report.orphans:
         _append_section(
             lines,
@@ -272,10 +308,12 @@ def _append_run_body(lines: list[str], report: RunReport) -> None:
             [_orphan_text(orphan) for orphan in report.orphans],
         )
     _append_section(lines, msg.REPORT_SECTION_SKIPPED, report.skipped)
+    if report.warnings:      # раздела нет, когда предупреждать не о чем
+        _append_section(lines, msg.REPORT_SECTION_WARNINGS, report.warnings)
     _append_section(lines, msg.REPORT_SECTION_ERRORS, errors)
     lines.append(
         msg.REPORT_TOTAL.format(
-            created=len(texts[OutcomeKind.CREATED]),
+            created=len(created),
             fixed=len(texts[OutcomeKind.FIXED]),
             matched=len(texts[OutcomeKind.MATCHED]),
             skipped=len(report.skipped),
@@ -341,6 +379,8 @@ def _outcome_body(outcome: PairOutcome, *, is_dry_run: bool) -> str:
         return msg.OUTCOME_AMBIGUOUS.format(prefix=prefix)
     if outcome.kind is OutcomeKind.NO_STREAM:
         return msg.OUTCOME_NO_STREAM.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE)
+    if outcome.kind is OutcomeKind.STREAM_ATTACHED:
+        return msg.OUTCOME_STREAM_ATTACHED.format(prefix=prefix, form=_form_mark(outcome.form))
     return _error_text(outcome, prefix)
 
 
@@ -439,10 +479,10 @@ def _problem_line(problem: PackageProblem) -> ReportPackageLine:
     return ReportPackageLine(problem.file.name, PackageLineStatus.DAMAGED, detail=reason_text)
 
 
-def _skip_text(skipped: SkippedSlot, config: PlanerConfig) -> str:
-    if skipped.reason is SkipReason.TOO_LATE:
-        return _slot_text(msg.SKIP_TOO_LATE, skipped.slot, minutes=config.min_lead_minutes)
-    return _slot_text(msg.SKIP_NO_CHANNEL, skipped.slot)
+def _skip_text(skipped: SkippedSlot) -> str:
+    if skipped.reason is SkipReason.NO_CHANNEL:
+        return _slot_text(msg.SKIP_NO_CHANNEL, skipped.slot)
+    raise ValueError(f'unknown skip reason {skipped.reason}')
 
 
 def _slot_text(template: str, slot: Slot, **extra: object) -> str:

@@ -11,11 +11,8 @@ HELP_AUTH: Final[str] = "заново авторизовать канал (кл�
 HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из promo"
 HELP_DEBUG: Final[str] = "подробный лог в консоли"
 FIRST_RUN_HEADER: Final[str] = (
-    "Запуск без ключей: проверяю каналы. Канал без авторизации будет авторизован сейчас."
-)
-FULL_RUN_NOT_AVAILABLE_YET: Final[str] = (
-    "Создание эфиров появится в задаче 3b. Пока планер умеет: авторизовать каналы, "
-    "проверить их (--check), показать план по пакетам (--dry-run) и что уже запланировано (--status)."
+    "Запуск без ключей: проверяю каналы и планирую эфиры по пакетам. "
+    "Канал без авторизации будет авторизован сейчас."
 )
 REGISTRY_UNREADABLE: Final[str] = "Журнал {path} не читается: {error}. Ничего не делалось."
 
@@ -145,7 +142,17 @@ OUTCOME_NO_STREAM: Final[str] = (
     "{prefix} — эфир на канале есть ({url}), но к нему не привязан поток: ключ взять неоткуда. "
     "Привяжите поток в YouTube Studio или удалите эфир — планер создаст его заново"
 )
+OUTCOME_STREAM_ATTACHED: Final[str] = (
+    "{prefix} — эфир был без потока, поток привязан, ключ получен, форма {form}"
+)
+WARNING_LINE: Final[str] = "- {prefix}: {step} — {code} ({message})"
+# ключи — WARNING_STEP_* (app/pipeline/plan.py)
+WARNING_STEP_TEXT: Final[dict[str, str]] = {
+    "thumbnail": "обложка не поставлена (нужен подтверждённый канал); эфир и ключ в силе",
+    "language": "язык эфира не записан; эфир и ключ в силе",
+}
 OUTCOME_AMBIGUOUS: Final[str] = (
+
     "{prefix} — на канале несколько эфиров на эту минуту без маркера планера, "
     "не могу различить — разберитесь вручную"
 )
@@ -184,6 +191,7 @@ REPORT_SECTION_MATCHED: Final[str] = "## Уже запланировано, со
 REPORT_SECTION_ORPHANS: Final[str] = "## Перенесён или отменён? ({count})"
 REPORT_SECTION_SCHEDULED: Final[str] = "## Запланировано на каналах ({count})"
 REPORT_SECTION_SKIPPED: Final[str] = "## Пропущено"
+REPORT_SECTION_WARNINGS: Final[str] = "## Предупреждения"
 REPORT_SECTION_ERRORS: Final[str] = "## Ошибки"
 REPORT_TOTAL: Final[str] = (
     "Итог: создано {created}, исправлено {fixed}, копий {matched}, пропущено {skipped}, "

@@ -19,6 +19,9 @@ from app.platforms.base import PlatformLimits, StreamInfo, UpcomingBroadcast, br
 from app.state.registry import FormStatus, Registration, Registry
 
 EMPTY_MARKER: Final[str] = ""
+# Шаги, сбой которых не отменяет эфир (ТЗ §7.4 п.4); тексты — в messages_ru.
+WARNING_STEP_THUMBNAIL: Final[str] = "thumbnail"
+WARNING_STEP_LANGUAGE: Final[str] = "language"
 
 
 class ChangedField(str, Enum):
@@ -32,8 +35,18 @@ class Decision(str, Enum):
     UPDATE = "update"          # есть, название или описание отличаются
     RECREATE = "recreate"      # журнал помнит эфир, на площадке его нет — владелец удалил
     NO_STREAM = "no_stream"    # эфир есть, привязанного потока нет — ключ взять неоткуда
+    TOO_LATE = "too_late"      # до старта меньше min_lead_minutes — эфир не трогаем
     AMBIGUOUS = "ambiguous"    # несколько эфиров без маркера на эту минуту
     ERROR = "error"            # площадка не ответила по каналу
+
+
+@dataclass(frozen=True)
+class OutcomeWarning:
+    """Шаг не удался, но эфир и ключ в силе: в отчёт строкой, код выхода не меняется."""
+
+    step: str          # WARNING_STEP_*
+    code: str
+    message: str = ""
 
 
 @dataclass(frozen=True)
@@ -109,6 +122,8 @@ class PlannedBroadcast:
     decision: Decision = Decision.CREATE
     changed_fields: tuple[ChangedField, ...] = ()
     is_rebind: bool = False        # журнал надо переписать на найденный эфир
+    is_too_late: bool = False      # слот внутри min_lead_minutes: не планируем, но ключ храним
+    stream_attached: bool = False  # эфир был без потока, поток привязан этим запуском
 
     # --- результат действий и память журнала
     broadcast_id: str | None = None
@@ -121,6 +136,7 @@ class PlannedBroadcast:
     last_error: str | None = None
     created_at: datetime | None = None
     error: OutcomeError | None = None
+    warnings: list[OutcomeWarning] = field(default_factory=list)   # превью, язык эфира
 
     @property
     def key(self) -> str:
@@ -211,6 +227,10 @@ class PlannedBroadcast:
         self.created_at = created_at
         self.form_status = FormStatus.PENDING
         self.form_sent_at = None
+
+    def warn(self, warning: OutcomeWarning) -> None:
+        """Сбой, который не отменяет эфир и не меняет код выхода (ТЗ §7.4 п.4)."""
+        self.warnings.append(warning)
 
     @property
     def needs_form(self) -> bool:
