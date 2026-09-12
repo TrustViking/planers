@@ -49,7 +49,7 @@ BROADCAST_UPDATE_PARTS: Final[str] = "snippet"   # без contentDetails: он �
 BIND_PARTS: Final[str] = "id,contentDetails"
 VIDEO_PARTS: Final[str] = "snippet"
 VIDEO_STATUS_PARTS: Final[str] = "status"
-VIDEO_FACTS_PARTS: Final[str] = "snippet,status,contentDetails"
+VIDEO_FACTS_PARTS: Final[str] = "snippet,status,contentDetails,liveStreamingDetails"
 AGE_RESTRICTED_RATING: Final[str] = "ytAgeRestricted"
 RFC3339_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
 INGESTION_TYPE: Final[str] = "rtmp"
@@ -288,13 +288,15 @@ class YouTubePlatform:
         snippet: dict[str, Any] = _mapping(item, "snippet")
         status: dict[str, Any] = _mapping(item, "status")
         rating: dict[str, Any] = _mapping(_mapping(item, "contentDetails"), "contentRating")
+        # запланированное время у ресурса videos лежит в liveStreamingDetails, не в snippet
+        live_details: dict[str, Any] = _mapping(item, "liveStreamingDetails")
         stream_id: str | None = self._bound_stream_of(channel, broadcast_id)
         stream: StreamInfo | None = self.get_stream(channel, stream_id) if stream_id else None
         return BroadcastFacts(
             broadcast_id=broadcast_id,
             title=_text(snippet, "title", allow_empty=True),
             description=_text(snippet, "description", allow_empty=True),
-            start_utc=_parse_start(snippet.get("scheduledStartTime")),
+            start_utc=_parse_start(live_details.get("scheduledStartTime")),
             privacy_status=_optional_text(status, "privacyStatus"),
             made_for_kids=_optional_bool(status, "madeForKids"),
             age_restricted=rating.get("ytRating") == AGE_RESTRICTED_RATING,

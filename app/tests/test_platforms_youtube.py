@@ -602,9 +602,11 @@ def test_read_facts_collects_language_audience_and_age(
                             "id": "B1",
                             "snippet": {"title": "Эфир", "description": "Описание",
                                         "defaultLanguage": "ru", "defaultAudioLanguage": "ru",
-                                        "categoryId": "22", "scheduledStartTime": "2027-03-17T17:00:00Z"},
+                                        "categoryId": "22"},
                             "status": {"privacyStatus": "unlisted", "madeForKids": False},
                             "contentDetails": {"contentRating": {"ytRating": "ytAgeRestricted"}},
+                            # время старта у videos живёт здесь, а не в snippet
+                            "liveStreamingDetails": {"scheduledStartTime": "2027-03-17T17:00:00Z"},
                         }
                     ]
                 }
@@ -626,3 +628,28 @@ def test_read_facts_collects_language_audience_and_age(
     assert facts.age_restricted is True
     assert (facts.privacy_status, facts.category_id) == ("unlisted", "22")
     assert (facts.bound_stream_id, facts.stream_marker) == ("S1", "17-03-2027_1900_uk")
+    assert facts.start_utc == datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)
+
+
+def test_read_facts_asks_for_live_streaming_details() -> None:
+    """Живой прогон 13-09-2026 01:21: без этой части время старта приходило пустым."""
+    assert "liveStreamingDetails" in youtube_module.VIDEO_FACTS_PARTS
+
+
+def test_read_facts_without_live_streaming_details_gives_none(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """У эфира без запланированного времени его действительно нет — это не ошибка."""
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            videos=[{"items": [{"id": "B1", "snippet": {"title": "Эфир", "description": ""},
+                                "status": {}, "contentDetails": {}}]}],
+            liveBroadcasts=[{"items": []}],
+        ),
+    )
+    facts: BroadcastFacts = platform.read_facts(CHANNEL, "B1")
+    assert facts.start_utc is None
+    assert facts.bound_stream_id is None

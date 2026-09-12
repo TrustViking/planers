@@ -5,7 +5,7 @@ import re
 
 import pytest
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -510,6 +510,22 @@ def test_matching_broadcast_has_no_mismatch_section(
 ) -> None:
     make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None and outcome.report.mismatches == []
+    assert "Расхождения с платформой" not in (outcome.report_text or "")
+
+
+def test_full_match_reports_no_mismatch_at_all(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Регрессия на живой случай 13-09-2026: время, тексты и маркер совпали — расхождений нет."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.promo_dir, slots=[spec])
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    [created] = fake_platform.created
+    facts = fake_platform.read_facts(make_config().channels[0], created.broadcast_id)
+    assert facts.start_utc == UK_START.astimezone(timezone.utc)
+    assert facts.stream_marker == UK_SLOT
     assert outcome.report is not None and outcome.report.mismatches == []
     assert "Расхождения с платформой" not in (outcome.report_text or "")
 
