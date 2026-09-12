@@ -7,15 +7,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 from app.config.loader import ChannelConfig, Platform
-from app.package.model import Slot
+
+if TYPE_CHECKING:   # спека живёт в pipeline; здесь она нужна только для аннотаций
+    from app.pipeline.plan import BroadcastSpec
 
 # Ссылка на эфир по его id — единственный источник (у UpcomingBroadcast ссылки нет).
 BROADCAST_URL_TEMPLATES: Final[dict[Platform, str]] = {
     Platform.YOUTUBE: "https://www.youtube.com/watch?v={broadcast_id}",
 }
+
+
+@dataclass(frozen=True)
+class PlatformLimits:
+    """Лимиты площадки на тексты эфира: единственный источник — сама площадка."""
+
+    title_max_chars: int
+    description_max_chars: int
 
 
 @dataclass(frozen=True)
@@ -63,6 +73,11 @@ class PlatformError(Exception):
 
 
 class BroadcastPlatform(Protocol):
+    @property
+    def limits(self) -> PlatformLimits:
+        """Пределы длины названия и описания (ТЗ §7.4 п.1)."""
+        ...
+
     def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
         """Канал, на который ведёт токен: id, название, язык канала (ТЗ §5.3)."""
         ...
@@ -75,15 +90,24 @@ class BroadcastPlatform(Protocol):
         """Привязанный поток: маркер (title) и ключ; None — потока нет."""
         ...
 
-    def create_broadcast(self, channel: ChannelConfig, slot: Slot, preview: bytes | None) -> CreatedBroadcast:
-        """Все шаги §7.4 п.1–4; маркер — slot.slot_id в названии потока."""
+    def create_broadcast(
+        self,
+        channel: ChannelConfig,
+        spec: BroadcastSpec,
+        preview: bytes | None,
+    ) -> CreatedBroadcast:
+        """Все шаги §7.4 п.1–4; маркер потока — spec.marker.
+
+        Площадка получает готовую спеку, а не слот: отправляемое и сравниваемое
+        обязаны совпадать по построению.
+        """
         ...
 
     def update_broadcast(
         self,
         channel: ChannelConfig,
         broadcast_id: str,
-        slot: Slot,
+        spec: BroadcastSpec,
         preview: bytes | None,
     ) -> None:
         """Исправление на месте (§7.3): название, описание, превью; ключ и ссылка не меняются."""

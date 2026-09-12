@@ -9,7 +9,6 @@ from app.config.loader import PlanerConfig
 from app.output.report import (
     FormState,
     OrphanLine,
-    OutcomeError,
     OutcomeKind,
     PackageLineStatus,
     PairOutcome,
@@ -23,7 +22,10 @@ from app.output.report import (
 )
 from app.package.promo import PromoScan, scan_promo
 from app.paths import PlanerPaths
-from app.pipeline.selection import Selection, select_pairs
+from app.pipeline.plan import OutcomeError
+from app.pipeline.selection import Selection, build_planned
+from app.platforms.fake import FakePlatform
+from app.state.registry import Registry
 
 # Пример из ТЗ §5.6 с согласованными счётчиками (в ТЗ строки разделов даны выборочно).
 TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00, владелец: Иван
@@ -243,7 +245,9 @@ def test_package_and_skipped_lines_from_scan_and_selection(
     )
     config: PlanerConfig = make_config()
     scan: PromoScan = scan_promo(planer_paths, now)
-    selection: Selection = select_pairs(scan.slot_map, config, now)
+    selection: Selection = build_planned(
+        scan.slot_map, scan.slot_sources, config, FakePlatform().limits, Registry(), now
+    )
     assert build_package_lines(scan, config) == [
         ReportPackageLine("plan.bcast", PackageLineStatus.ACCEPTED, slots_total=5, slots_mine=3)
     ]

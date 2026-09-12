@@ -1,13 +1,22 @@
-"""Отбор слотов под каналы (ТЗ §7.2): слот → пары (слот, канал) или пропуск с причиной."""
+"""Построение объектов запланированных эфиров (ТЗ §7.2): слот → объекты по каналам.
+
+Слоты уже слиты по slot_id в app/package/promo.py, и только после этого каждый
+размножается по каналам своего языка. Сливать расширенные объекты нельзя: один слот
+из двух пакетов дал бы два эфира на один канал.
+"""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.observability.logging_setup import get_logger
-from app.package.model import Slot, slot_order_key
+from app.package.model import Package, Slot, slot_order_key
+from app.pipeline.plan import BroadcastSpec, PlannedBroadcast
+from app.platforms.base import PlatformLimits
+from app.state.registry import Registration, Registry
 
 LOGGER = get_logger("selection")
 
@@ -18,12 +27,6 @@ class SkipReason(str, Enum):
 
 
 @dataclass(frozen=True)
-class SlotChannelPair:
-    slot: Slot
-    channel: ChannelConfig
-
-
-@dataclass(frozen=True)
 class SkippedSlot:
     slot: Slot
     reason: SkipReason
@@ -31,14 +34,21 @@ class SkippedSlot:
 
 @dataclass(frozen=True)
 class Selection:
-    pairs: tuple[SlotChannelPair, ...]   # по (дата, время, язык, id канала)
+    planned: tuple[PlannedBroadcast, ...]   # по (дата, время, язык, id канала)
     skipped: tuple[SkippedSlot, ...]
 
 
-def select_pairs(slot_map: dict[str, Slot], config: PlanerConfig, now: datetime) -> Selection:
-    """Два канала на один язык → две пары (два эфира)."""
+def build_planned(
+    slot_map: Mapping[str, Slot],
+    slot_sources: Mapping[str, Package],
+    config: PlanerConfig,
+    limits: PlatformLimits,
+    registry: Registry,
+    now: datetime,
+) -> Selection:
+    """Два канала на один язык → два объекта (два эфира)."""
     lead: timedelta = timedelta(minutes=config.min_lead_minutes)
-    pairs: list[SlotChannelPair] = []
+    planned: list[PlannedBroadcast] = []
     skipped: list[SkippedSlot] = []
     for slot in sorted(slot_map.values(), key=slot_order_key):
         if slot.start - now < lead:
@@ -50,7 +60,28 @@ def select_pairs(slot_map: dict[str, Slot], config: PlanerConfig, now: datetime)
         if not channels:
             skipped.append(SkippedSlot(slot=slot, reason=SkipReason.NO_CHANNEL))
             continue
-        pairs.extend(SlotChannelPair(slot=slot, channel=channel) for channel in channels)
-    pairs.sort(key=lambda pair: (*slot_order_key(pair.slot), pair.channel.id))
-    LOGGER.info("selection_done pairs=%d skipped=%d", len(pairs), len(skipped))
-    return Selection(pairs=tuple(pairs), skipped=tuple(skipped))
+        planned.extend(
+            _build_one(slot, slot_sources[slot.slot_id], channel, limits, registry) for channel in channels
+        )
+    planned.sort(key=lambda item: (*slot_order_key(item.slot), item.channel.id))
+    LOGGER.info("selection_done planned=%d skipped=%d", len(planned), len(skipped))
+    return Selection(planned=tuple(planned), skipped=tuple(skipped))
+
+
+def _build_one(
+    slot: Slot,
+    source_package: Package,
+    channel: ChannelConfig,
+    limits: PlatformLimits,
+    registry: Registry,
+) -> PlannedBroadcast:
+    planned: PlannedBroadcast = PlannedBroadcast(
+        slot=slot,
+        source_package=source_package,
+        channel=channel,
+        expected=BroadcastSpec.from_slot(slot, limits),
+    )
+    registration: Registration | None = registry.get(planned.key)
+    if registration is not None:
+        planned.apply_registration(registration)
+    return planned

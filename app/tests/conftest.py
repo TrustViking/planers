@@ -17,7 +17,9 @@ import pytest
 from app.config.loader import ChannelConfig, Platform, PlanerConfig, Privacy
 from app.core.dates import build_slot_id, format_date, format_time, parse_date, parse_time
 from app.form.base import FormSendResult
-from app.package.model import FormSpec, Slot
+from app.package.model import FormSpec, Package, Slot
+from app.pipeline.plan import BroadcastSpec, PlannedBroadcast
+from app.platforms.base import PlatformLimits
 from app.paths import PlanerPaths, build_paths, ensure_dirs
 from app.platforms.fake import FakePlatform
 from app.state.registry import Registration
@@ -132,6 +134,38 @@ def build_slot(
     )
 
 
+def build_package_object(package_id: str = "pkg-test", path: Path | None = None) -> Package:
+    """Package без архива: нужен объектам как источник package_id и превью."""
+    return Package(
+        path=path or Path("plan.bcast"),
+        package_id=package_id,
+        generated_at=datetime(2026, 9, 13, 10, 15),
+        generator={"project": "pipeline", "version": "1.0.0"},
+        timezone="Europe/Kyiv",
+        period_from="17-03-2027",
+        period_to="18-03-2027",
+        form=build_form_spec(),
+        slots=(),
+    )
+
+
+def build_planned(
+    slot: Slot,
+    channel: ChannelConfig,
+    *,
+    limits: PlatformLimits | None = None,
+    package: Package | None = None,
+) -> PlannedBroadcast:
+    """Объект так же, как его строит production-путь (app/pipeline/selection.py)."""
+    platform_limits: PlatformLimits = limits or FakePlatform().limits
+    return PlannedBroadcast(
+        slot=slot,
+        source_package=package or build_package_object(),
+        channel=channel,
+        expected=BroadcastSpec.from_slot(slot, platform_limits),
+    )
+
+
 @dataclass(frozen=True)
 class FormCall:
     slot_id: str
@@ -148,8 +182,8 @@ class FakeFormSender:
         self.error: str | None = error
         self.calls: list[FormCall] = []
 
-    def send(self, registration: Registration, slot: Slot, channel: ChannelConfig, form: FormSpec) -> FormSendResult:
-        self.calls.append(FormCall(registration.slot_id, channel.id, registration.stream_key, form.url))
+    def send(self, planned: PlannedBroadcast) -> FormSendResult:
+        self.calls.append(FormCall(planned.slot_id, planned.channel.id, planned.stream_key, planned.form.url))
         return FormSendResult(confirmed=self.confirmed, error=self.error)
 
 

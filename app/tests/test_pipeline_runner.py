@@ -9,6 +9,7 @@ from typing import Any
 from app.config.loader import PlanerConfig
 from app.output.report import FormState, OutcomeKind, PackageLineStatus
 from app.paths import PlanerPaths
+from app.pipeline.plan import PlannedBroadcast
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.platforms.base import PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
@@ -227,6 +228,71 @@ def test_pending_form_is_resent_for_confirmed_broadcast(
     assert outcome.report is not None
     assert (outcome.report.outcomes[0].kind, outcome.report.outcomes[0].form) == (OutcomeKind.MATCHED, FormState.SENT)
 
+
+def test_two_packages_with_one_slot_give_one_object_per_channel(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Слоты сливаются по slot_id ДО размножения по каналам: два пакета — один эфир."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.promo_dir, file_name="old.bcast", generated_at="13-09-2026 10:15", slots=[spec])
+    newer: dict[str, Any] = dict(spec, title="Новое название")
+    make_package(planer_paths.promo_dir, file_name="new.bcast", generated_at="14-09-2026 09:00", slots=[newer])
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    assert len(outcome.report.outcomes) == 1
+    assert len(fake_platform.created) == 1
+    [created] = fake_platform.created
+    assert created.marker == UK_SLOT
+    registration: Registration | None = _loaded(planer_paths, UK_KEY)
+    assert registration is not None and registration.package_id == "pkg-14-09-2026 09:00"
+
+
+def test_broadcast_without_stream_is_reported_and_gets_no_key(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Эфир есть, потока нет: ключа нет, в форму ничего не уходит, эфир не пересоздаётся."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.promo_dir, slots=[spec])
+    fake_platform.seed_broadcast("yt_ua", UK_START, spec["title"], spec["description"], marker=None)
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.ERRORS
+    assert fake_platform.created == []
+    assert form_sender.calls == []
+    assert _loaded(planer_paths, UK_KEY) is None
+    assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.NO_STREAM
+    assert "не привязан поток" in (outcome.report_text or "")
+
+
+def test_package_fields_of_the_object_survive_the_whole_run(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Поля из пакета задаются в конструкторе и не переприсваиваются ни сверкой, ни действиями."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.promo_dir, slots=[spec])
+    fake_platform.seed_broadcast("yt_ua", UK_START, "Другое название", "Другое описание", marker=UK_SLOT)
+    captured: list[PlannedBroadcast] = []
+    original_send = FakeFormSender.send
+
+    def _capture(self: FakeFormSender, planned: PlannedBroadcast) -> Any:
+        captured.append(planned)
+        return original_send(self, planned)
+
+    monkeypatched: Any = _capture
+    FakeFormSender.send = monkeypatched          # type: ignore[method-assign]
+    try:
+        _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    finally:
+        FakeFormSender.send = original_send      # type: ignore[method-assign]
+    [item] = captured
+    assert item.slot.slot_id == UK_SLOT
+    assert item.slot.title == spec["title"]                    # слот не переписан текстами с площадки
+    assert item.expected.title == spec["title"]
+    assert item.channel.id == "yt_ua"
+    assert item.source_package.path.name.endswith(".bcast")
+    assert item.actual is not None and item.actual.title == "Другое название"
 
 def test_all_past_package_stays_and_is_reported(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,

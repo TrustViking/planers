@@ -1,5 +1,7 @@
-"""Сверка пар (слот, канал) с эфирами на площадке (ТЗ §7.3). Истина — на площадке, журнал — память.
+"""Сверка объектов с эфирами на площадке (ТЗ §7.3). Истина — на площадке, журнал — память.
 
+Решения и найденные данные записываются в сами объекты; наружу отдаются только эфиры,
+у которых есть маркер планера, но нет соответствующего слота (сироты, §12 п.4).
 Маркер планера — slot_id в названии привязанного потока. Поток с другим названием
 (ручной эфир) считается эфиром без маркера.
 """
@@ -8,47 +10,19 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import datetime
 from typing import Final
 
 from app.config.loader import ChannelConfig
 from app.core.dates import SLOT_TIME_FORMAT, build_slot_id, format_date, format_time, parse_date
 from app.observability.logging_setup import get_logger
-from app.package.model import Slot
-from app.pipeline.selection import SlotChannelPair
+from app.pipeline.plan import BroadcastSpec, Decision, OutcomeError, PlannedBroadcast, to_minute
 from app.platforms.base import BroadcastPlatform, PlatformError, StreamInfo, UpcomingBroadcast
-from app.state.registry import Registration, Registry
 
 LOGGER = get_logger("reconciler")
 # Форма маркера планера — единственный источник.
 PLANER_MARKER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\d{2}-\d{2}-\d{4}_\d{4}_[a-z]+$")
 MARKER_SEPARATOR: Final[str] = "_"  # как в SLOT_ID_TEMPLATE (app/core/dates.py)
-
-
-class Decision(str, Enum):
-    CREATE = "create"          # эфира нет
-    MATCH = "match"            # есть, тексты совпадают
-    UPDATE = "update"          # есть, название или описание отличаются
-    RECREATE = "recreate"      # журнал помнит эфир, на площадке его нет — владелец удалил
-    AMBIGUOUS = "ambiguous"    # несколько эфиров без маркера на эту минуту
-    ERROR = "error"            # площадка не ответила по каналу
-
-
-class ChangedField(str, Enum):
-    TITLE = "title"
-    DESCRIPTION = "description"
-
-
-@dataclass(frozen=True)
-class ReconciledPair:
-    pair: SlotChannelPair
-    decision: Decision
-    broadcast: UpcomingBroadcast | None = None
-    stream: StreamInfo | None = None
-    rebind: bool = False                              # журнал надо переписать на найденный эфир
-    changed_fields: tuple[ChangedField, ...] = ()
-    error: PlatformError | None = None
 
 
 @dataclass(frozen=True)
@@ -82,24 +56,9 @@ class ChannelFailure:
 
 
 @dataclass(frozen=True)
-class Reconciliation:
-    pairs: tuple[ReconciledPair, ...]   # в порядке входных пар
-    orphans: tuple[OrphanBroadcast, ...]
-
-
-@dataclass(frozen=True)
 class MarkedScan:
     broadcasts: tuple[MarkedBroadcast, ...]
     failures: tuple[ChannelFailure, ...]
-
-
-def normalize_description(text: str) -> str:
-    """CRLF→LF, пробелы в конце строк и по краям текста не различаются.
-
-    Правило уточняется на этапе 3 после [ПРОВЕРИТЬ] §7.3 (как YouTube хранит описание).
-    """
-    lines: list[str] = text.replace("\r\n", "\n").split("\n")
-    return "\n".join(line.rstrip() for line in lines).strip()
 
 
 def split_marker(marker: str) -> MarkerParts | None:
@@ -117,28 +76,19 @@ def split_marker(marker: str) -> MarkerParts | None:
     return MarkerParts(date=date_text, time=time_text, language=language)
 
 
-def _minute(value: datetime) -> datetime:
-    return value.astimezone(timezone.utc).replace(second=0, microsecond=0)
-
-
-def _changed_fields(broadcast: UpcomingBroadcast, slot: Slot) -> tuple[ChangedField, ...]:
-    changed: list[ChangedField] = []
-    if broadcast.title.strip() != slot.title.strip():
-        changed.append(ChangedField.TITLE)
-    if normalize_description(broadcast.description) != normalize_description(slot.description):
-        changed.append(ChangedField.DESCRIPTION)
-    return tuple(changed)
+def _platform_error(channel: ChannelConfig, error: PlatformError) -> OutcomeError:
+    return OutcomeError(origin=channel.platform.value, code=error.code, message=error.message)
 
 
 def _group_by_channel(
-    pairs: Sequence[SlotChannelPair],
+    planned: Sequence[PlannedBroadcast],
     channels: Sequence[ChannelConfig],
-) -> list[tuple[ChannelConfig, list[tuple[int, SlotChannelPair]]]]:
-    groups: dict[str, tuple[ChannelConfig, list[tuple[int, SlotChannelPair]]]] = {
+) -> list[tuple[ChannelConfig, list[PlannedBroadcast]]]:
+    groups: dict[str, tuple[ChannelConfig, list[PlannedBroadcast]]] = {
         channel.id: (channel, []) for channel in channels
     }
-    for index, pair in enumerate(pairs):
-        groups.setdefault(pair.channel.id, (pair.channel, []))[1].append((index, pair))
+    for item in planned:
+        groups.setdefault(item.channel.id, (item.channel, []))[1].append(item)
     return list(groups.values())
 
 
@@ -151,20 +101,15 @@ class Reconciler:
 
     def reconcile(
         self,
-        pairs: Sequence[SlotChannelPair],
-        registry: Registry,
+        planned: Sequence[PlannedBroadcast],
         slot_ids: frozenset[str],
         channels: Sequence[ChannelConfig] = (),
-    ) -> Reconciliation:
-        """slot_ids — все будущие слоты карты; channels — ещё и каналы без пар (поиск потерянных)."""
-        decided: dict[int, ReconciledPair] = {}
+    ) -> tuple[OrphanBroadcast, ...]:
+        """Решения пишутся в объекты; наружу — только сироты (§12 п.4)."""
         orphans: list[OrphanBroadcast] = []
-        for channel, indexed_pairs in _group_by_channel(pairs, channels):
-            channel_pairs: list[SlotChannelPair] = [pair for _, pair in indexed_pairs]
-            results, channel_orphans = self._reconcile_channel(channel, channel_pairs, registry, slot_ids)
-            decided.update(zip((index for index, _ in indexed_pairs), results))
-            orphans.extend(channel_orphans)
-        return Reconciliation(pairs=tuple(decided[index] for index in range(len(pairs))), orphans=tuple(orphans))
+        for channel, items in _group_by_channel(planned, channels):
+            orphans.extend(self._reconcile_channel(channel, items, slot_ids))
+        return tuple(orphans)
 
     def marked_broadcasts(self, channels: Sequence[ChannelConfig]) -> MarkedScan:
         """Все эфиры с маркером планера на каналах (--status); сбой канала не валит остальные."""
@@ -182,55 +127,49 @@ class Reconciler:
     def _reconcile_channel(
         self,
         channel: ChannelConfig,
-        pairs: list[SlotChannelPair],
-        registry: Registry,
+        items: list[PlannedBroadcast],
         slot_ids: frozenset[str],
-    ) -> tuple[list[ReconciledPair], list[OrphanBroadcast]]:
+    ) -> list[OrphanBroadcast]:
         try:
             broadcasts: list[UpcomingBroadcast] = self._platform.list_upcoming(channel)
-            results: list[ReconciledPair] = [self._decide(channel, pair, broadcasts, registry) for pair in pairs]
-            orphans: list[OrphanBroadcast] = self._orphans(channel, broadcasts, slot_ids)
         except PlatformError as error:
-            LOGGER.warning("channel_unavailable channel=%s code=%s pairs=%d", channel.id, error.code, len(pairs))
-            return [ReconciledPair(pair=pair, decision=Decision.ERROR, error=error) for pair in pairs], []
-        for result in results:
+            LOGGER.warning("channel_unavailable channel=%s code=%s planned=%d", channel.id, error.code, len(items))
+            for item in items:
+                item.decision = Decision.ERROR
+                item.error = _platform_error(channel, error)
+            return []
+        for item in items:
+            self._decide(item, broadcasts)
             LOGGER.info(
                 "pair_decision slot_id=%s channel=%s decision=%s broadcast_id=%s rebind=%s",
-                result.pair.slot.slot_id,
+                item.slot_id,
                 channel.id,
-                result.decision.value,
-                result.broadcast.broadcast_id if result.broadcast else "-",
-                result.rebind,
+                item.decision.value,
+                item.found.broadcast_id if item.found else "-",
+                item.is_rebind,
             )
-        return results, orphans
+        return self._orphans(channel, broadcasts, slot_ids)
 
-    def _decide(
-        self,
-        channel: ChannelConfig,
-        pair: SlotChannelPair,
-        broadcasts: list[UpcomingBroadcast],
-        registry: Registry,
-    ) -> ReconciledPair:
-        slot: Slot = pair.slot
+    def _decide(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> None:
         candidates: list[UpcomingBroadcast] = [
-            broadcast for broadcast in broadcasts if _minute(broadcast.start_utc) == _minute(slot.start)
+            broadcast for broadcast in broadcasts if to_minute(broadcast.start_utc) == item.expected.start_minute
         ]
-        found, stream, is_ambiguous = self._pick_candidate(channel, slot.slot_id, candidates)
+        found, stream, is_ambiguous = self._pick_candidate(item.channel, item.slot_id, candidates)
         if is_ambiguous:
-            return ReconciledPair(pair=pair, decision=Decision.AMBIGUOUS)
-        registration: Registration | None = registry.get(Registry.key(slot.slot_id, channel.id))
+            item.decision = Decision.AMBIGUOUS
+            return
         if found is None:
-            is_deleted: bool = registration is not None and bool(registration.broadcast_id)
-            return ReconciledPair(pair=pair, decision=Decision.RECREATE if is_deleted else Decision.CREATE)
-        changed: tuple[ChangedField, ...] = _changed_fields(found, slot)
-        return ReconciledPair(
-            pair=pair,
-            decision=Decision.UPDATE if changed else Decision.MATCH,
-            broadcast=found,
-            stream=stream,
-            rebind=registration is None or registration.broadcast_id != found.broadcast_id,
-            changed_fields=changed,
-        )
+            item.decision = Decision.RECREATE if item.broadcast_id else Decision.CREATE
+            return
+        item.found = found
+        item.found_stream = stream
+        item.actual = BroadcastSpec.from_platform(found, stream, self._platform.limits)
+        item.is_rebind = item.broadcast_id != found.broadcast_id
+        if stream is None:
+            item.decision = Decision.NO_STREAM
+            return
+        item.changed_fields = item.actual.diff(item.expected)
+        item.decision = Decision.UPDATE if item.changed_fields else Decision.MATCH
 
     def _pick_candidate(
         self,

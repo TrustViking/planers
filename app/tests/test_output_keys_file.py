@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from app.output.keys_file import form_status_text, key_row_from_registration, render_keys_file, write_keys_file
+from app.config.loader import ChannelConfig, Platform, Privacy
+from app.output.keys_file import form_status_text, key_row_from_planned, render_keys_file, write_keys_file
 from app.paths import PlanerPaths
+from app.pipeline.plan import PlannedBroadcast
 from app.state.registry import FormStatus, Registration
+from app.tests.conftest import build_planned, build_slot
+
+KYIV: timezone = timezone(timedelta(hours=2))
 
 # Образец ТЗ §5.5 с ключами по 5 групп. Отличие от ТЗ: в строке «форма ❌ ошибка сети» один
 # пробел перед « | », в ТЗ — два (опечатка выравнивания; поля всегда разделяются « | »).
@@ -15,6 +20,18 @@ TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенериров
 uk | 16-09-2026 | 19:00 | Іван UA | форма ✅ 13-09-2026 12:00 | rtmp://a.rtmp.youtube.com/live2 | xxxx-xxxx-xxxx-xxxx-xxxx | https://www.youtube.com/watch?v=abc123
 ru | 16-09-2026 | 21:00 | Иван RU | форма ❌ ошибка сети | rtmp://a.rtmp.youtube.com/live2 | yyyy-yyyy-yyyy-yyyy-yyyy | https://www.youtube.com/watch?v=def456
 """
+
+
+def _channel(channel_id: str, account_name: str, language: str) -> ChannelConfig:
+    return ChannelConfig(
+        id=channel_id,
+        platform=Platform.YOUTUBE,
+        account_name=account_name,
+        languages=(language,),
+        privacy=Privacy.PUBLIC,
+        auto_start=True,
+        set_thumbnail=True,
+    )
 
 
 def _registration(**overrides: Any) -> Registration:
@@ -40,22 +57,55 @@ def _registration(**overrides: Any) -> Registration:
     return Registration(**values)
 
 
-def test_render_matches_tz_sample() -> None:
-    failed: Registration = _registration(
-        slot_id="16-09-2026_2100_ru",
-        channel_id="yt_ru",
-        account_name="Иван RU",
-        language="ru",
-        time="21:00",
-        broadcast_id="def456",
-        broadcast_url="https://www.youtube.com/watch?v=def456",
-        stream_key="yyyy-yyyy-yyyy-yyyy-yyyy",
-        form_status=FormStatus.PENDING,
-        form_sent_at=None,
-        last_error="ошибка сети",
+def _planned(hour: int, language: str, channel: ChannelConfig, registration: Registration) -> PlannedBroadcast:
+    item: PlannedBroadcast = build_planned(
+        build_slot(datetime(2026, 9, 16, hour, 0, tzinfo=KYIV), language),
+        channel,
     )
-    rows = [key_row_from_registration(failed), key_row_from_registration(_registration())]
+    item.apply_registration(registration)
+    return item
+
+
+def test_render_matches_tz_sample() -> None:
+    sent: PlannedBroadcast = _planned(19, "uk", _channel("yt_ua", "Іван UA", "uk"), _registration())
+    failed: PlannedBroadcast = _planned(
+        21,
+        "ru",
+        _channel("yt_ru", "Иван RU", "ru"),
+        _registration(
+            slot_id="16-09-2026_2100_ru",
+            channel_id="yt_ru",
+            account_name="Иван RU",
+            language="ru",
+            time="21:00",
+            broadcast_id="def456",
+            broadcast_url="https://www.youtube.com/watch?v=def456",
+            stream_key="yyyy-yyyy-yyyy-yyyy-yyyy",
+            form_status=FormStatus.PENDING,
+            form_sent_at=None,
+            last_error="ошибка сети",
+        ),
+    )
+    rows = [key_row_from_planned(failed), key_row_from_planned(sent)]
     assert render_keys_file(rows, "13-09-2026 12:00") == TZ_SAMPLE_KEYS
+
+
+def test_row_takes_texts_from_the_object_not_from_the_journal() -> None:
+    """Дата, время, язык и аккаунт — из слота и канала объекта; журнал даёт ключи и статус формы."""
+    channel: ChannelConfig = _channel("yt_ua", "Іван UA", "uk")
+    item: PlannedBroadcast = _planned(19, "uk", channel, _registration(account_name="Старое имя", date="01-01-2000"))
+    row = key_row_from_planned(item)
+    assert (row.date, row.time, row.language, row.account_name) == ("16-09-2026", "19:00", "uk", "Іван UA")
+    assert row.stream_key == "xxxx-xxxx-xxxx-xxxx-xxxx"
+
+
+def test_object_without_key_shows_dashes() -> None:
+    item: PlannedBroadcast = build_planned(
+        build_slot(datetime(2026, 9, 16, 19, 0, tzinfo=KYIV), "uk"),
+        _channel("yt_ua", "Іван UA", "uk"),
+    )
+    row = key_row_from_planned(item)
+    assert (row.stream_key, row.stream_url, row.broadcast_url) == ("-", "-", "-")
 
 
 def test_form_status_texts() -> None:

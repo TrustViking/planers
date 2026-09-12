@@ -12,18 +12,24 @@ from enum import Enum
 from pathlib import Path
 from typing import Final
 
-from app.config.loader import PlanerConfig
+from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import FILE_STAMP_FORMAT
 from app.package.promo import AcceptedPackage, PromoScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
 from app.paths import PlanerPaths
+from app.pipeline.plan import Decision, OutcomeError, PlannedBroadcast
+from app.state.registry import FormStatus
+from app.pipeline.reconciler import MarkedBroadcast
 from app.pipeline.selection import Selection, SkippedSlot, SkipReason
+from app.platforms.base import PlatformError, broadcast_url_for
 from app.ui import messages_ru as msg
 
 REPORT_FILE_TEMPLATE: Final[str] = "{stamp}_report.md"
 REPORT_ENCODING: Final[str] = "utf-8"
 MISSING_VALUE: Final[str] = "-"
+# OutcomeError.origin для сбоев самого планера; расшифровка — PLANER_ERROR_TEXT в messages_ru.
+PLANER_ORIGIN: Final[str] = "planer"
 
 
 class RunMode(str, Enum):
@@ -43,11 +49,15 @@ class OutcomeKind(str, Enum):
     CREATED = "created"
     FIXED = "fixed"
     MATCHED = "matched"
+    NO_STREAM = "no_stream"   # эфир есть, привязанного потока нет — ключ взять неоткуда
     ERROR = "error"
     AMBIGUOUS = "ambiguous"
 
 
-ERROR_OUTCOME_KINDS: Final[frozenset[OutcomeKind]] = frozenset({OutcomeKind.ERROR, OutcomeKind.AMBIGUOUS})
+# Требуют внимания владельца и дают код выхода 1.
+ERROR_OUTCOME_KINDS: Final[frozenset[OutcomeKind]] = frozenset(
+    {OutcomeKind.ERROR, OutcomeKind.AMBIGUOUS, OutcomeKind.NO_STREAM}
+)
 
 
 class FormState(str, Enum):
@@ -76,13 +86,6 @@ class ReportPackageLine:
     slots_total: int = 0
     slots_mine: int = 0
     detail: str = ""   # причина повреждения, версия схемы или ошибка переноса
-
-
-@dataclass(frozen=True)
-class OutcomeError:
-    origin: str        # "youtube" (Platform) | "registry" | "package" | "planer"
-    code: str
-    message: str = ""
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,76 @@ class RunReport:
     skipped: list[str] = field(default_factory=list)
     keys_file_path: str | None = None
     notice: str | None = None
+
+
+# --- строители исходов: единственный мост «объект → строка отчёта»
+
+_DECISION_KINDS: Final[dict[Decision, OutcomeKind]] = {
+    Decision.CREATE: OutcomeKind.CREATED,
+    Decision.RECREATE: OutcomeKind.CREATED,
+    Decision.UPDATE: OutcomeKind.FIXED,
+    Decision.MATCH: OutcomeKind.MATCHED,
+    Decision.NO_STREAM: OutcomeKind.NO_STREAM,
+    Decision.AMBIGUOUS: OutcomeKind.AMBIGUOUS,
+    Decision.ERROR: OutcomeKind.ERROR,
+}
+
+
+def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) -> PairOutcome:
+    """Исход по объекту; в dry-run форма не отправлялась, поэтому её отметки нет."""
+    kind: OutcomeKind = OutcomeKind.ERROR if item.error is not None else _DECISION_KINDS[item.decision]
+    return PairOutcome(
+        kind=kind,
+        account_name=item.account_name,
+        date=item.date,
+        time=item.time,
+        language=item.language,
+        broadcast_url=item.broadcast_url or item.found_url,
+        changed_fields=tuple(changed.value for changed in item.changed_fields),
+        form=None if is_dry_run else _form_state(item),
+        recreated=item.decision is Decision.RECREATE,
+        rebind=item.is_rebind,
+        error=item.error,
+    )
+
+
+def outcome_from_marked(marked: MarkedBroadcast) -> PairOutcome:
+    """--status: эфир с маркером планера, найденный на канале."""
+    return PairOutcome(
+        kind=OutcomeKind.MATCHED,
+        account_name=marked.channel.account_name,
+        date=marked.parts.date,
+        time=marked.parts.time,
+        language=marked.parts.language,
+        broadcast_url=broadcast_url_for(marked.channel, marked.broadcast.broadcast_id),
+    )
+
+
+def platform_error_outcome(channel: ChannelConfig, error: PlatformError) -> PairOutcome:
+    return PairOutcome(
+        kind=OutcomeKind.ERROR,
+        account_name=channel.account_name,
+        error=OutcomeError(origin=channel.platform.value, code=error.code, message=error.message),
+    )
+
+
+def planer_error_outcome(name: str, code: str, detail: str) -> PairOutcome:
+    """Сбой самого планера: не записан журнал, не записан файл ключей."""
+    return PairOutcome(
+        kind=OutcomeKind.ERROR,
+        account_name=name,
+        error=OutcomeError(origin=PLANER_ORIGIN, code=code, message=detail),
+    )
+
+
+def _form_state(item: PlannedBroadcast) -> FormState | None:
+    """None — отправлять было нечего: ключа у объекта нет."""
+    if not item.stream_key:
+        return None
+    if item.form_status is FormStatus.SENT:
+        return FormState.SENT
+    return FormState.FAILED if item.last_error else FormState.WAITING
+
 
 
 def render_report(report: RunReport) -> str:
@@ -266,6 +339,8 @@ def _outcome_body(outcome: PairOutcome, *, is_dry_run: bool) -> str:
         return _matched_text(outcome, prefix, is_dry_run=is_dry_run)
     if outcome.kind is OutcomeKind.AMBIGUOUS:
         return msg.OUTCOME_AMBIGUOUS.format(prefix=prefix)
+    if outcome.kind is OutcomeKind.NO_STREAM:
+        return msg.OUTCOME_NO_STREAM.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE)
     return _error_text(outcome, prefix)
 
 

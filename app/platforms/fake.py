@@ -10,11 +10,12 @@ from datetime import datetime, timezone
 from typing import Final
 
 from app.config.loader import ChannelConfig
-from app.package.model import Slot
+from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
     ChannelInfo,
     CreatedBroadcast,
     PlatformError,
+    PlatformLimits,
     StreamInfo,
     UpcomingBroadcast,
     broadcast_url_for,
@@ -27,13 +28,16 @@ FAKE_STREAM_KEY_TEMPLATE: Final[str] = "fake-{number:04d}-0000-0000-0000"
 FAKE_CHANNEL_ID_TEMPLATE: Final[str] = "UCfake{channel_key}"
 FAKE_CHANNEL_TITLE_TEMPLATE: Final[str] = "Fake {channel_key}"
 NOT_FOUND_CODE: Final[str] = "broadcastNotFound"
+# Те же лимиты, что у YouTube: тесты должны ловить реальное поведение обрезки.
+FAKE_TITLE_MAX_CHARS: Final[int] = 100
+FAKE_DESCRIPTION_MAX_CHARS: Final[int] = 5000
 
 
 @dataclass(frozen=True)
 class FakeCall:
     channel_id: str
     broadcast_id: str
-    slot_id: str
+    marker: str
     preview: bytes | None
 
 
@@ -86,6 +90,13 @@ class FakePlatform:
         """Владелец удалил эфир руками."""
         self._broadcasts.get(channel_id, {}).pop(broadcast_id, None)
 
+    @property
+    def limits(self) -> PlatformLimits:
+        return PlatformLimits(
+            title_max_chars=FAKE_TITLE_MAX_CHARS,
+            description_max_chars=FAKE_DESCRIPTION_MAX_CHARS,
+        )
+
     def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
         """По умолчанию — детерминированный ответ по channel.id; тест может задать свой."""
         self.describe_calls.append(channel.id)
@@ -112,26 +123,31 @@ class FakePlatform:
         self.stream_calls.append((channel.id, stream_id))
         return self._streams.get(channel.id, {}).get(stream_id)
 
-    def create_broadcast(self, channel: ChannelConfig, slot: Slot, preview: bytes | None) -> CreatedBroadcast:
-        if slot.slot_id in self.fail_create:
-            raise self.fail_create[slot.slot_id]
+    def create_broadcast(
+        self,
+        channel: ChannelConfig,
+        spec: BroadcastSpec,
+        preview: bytes | None,
+    ) -> CreatedBroadcast:
+        if spec.marker in self.fail_create:
+            raise self.fail_create[spec.marker]
         number: int = self._next_number()
         stream: StreamInfo = StreamInfo(
             stream_id=FAKE_STREAM_ID_TEMPLATE.format(number=number),
-            title=slot.slot_id,
+            title=spec.marker,
             ingestion_address=FAKE_STREAM_URL,
             stream_name=FAKE_STREAM_KEY_TEMPLATE.format(number=number),
         )
         broadcast: UpcomingBroadcast = UpcomingBroadcast(
             broadcast_id=FAKE_BROADCAST_ID_TEMPLATE.format(number=number),
-            start_utc=slot.start.astimezone(timezone.utc),
-            title=slot.title,
-            description=slot.description,
+            start_utc=spec.start_minute,
+            title=spec.title,
+            description=spec.description,
             stream_id=stream.stream_id,
         )
         self._streams.setdefault(channel.id, {})[stream.stream_id] = stream
         self._broadcasts.setdefault(channel.id, {})[broadcast.broadcast_id] = broadcast
-        self.created.append(FakeCall(channel.id, broadcast.broadcast_id, slot.slot_id, preview))
+        self.created.append(FakeCall(channel.id, broadcast.broadcast_id, spec.marker, preview))
         return CreatedBroadcast(
             broadcast_id=broadcast.broadcast_id,
             broadcast_url=broadcast_url_for(channel, broadcast.broadcast_id),
@@ -144,14 +160,18 @@ class FakePlatform:
         self,
         channel: ChannelConfig,
         broadcast_id: str,
-        slot: Slot,
+        spec: BroadcastSpec,
         preview: bytes | None,
     ) -> None:
         current: UpcomingBroadcast | None = self._broadcasts.get(channel.id, {}).get(broadcast_id)
         if current is None:
             raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.id}")
-        self._broadcasts[channel.id][broadcast_id] = replace(current, title=slot.title, description=slot.description)
-        self.updated.append(FakeCall(channel.id, broadcast_id, slot.slot_id, preview))
+        self._broadcasts[channel.id][broadcast_id] = replace(
+            current,
+            title=spec.title,
+            description=spec.description,
+        )
+        self.updated.append(FakeCall(channel.id, broadcast_id, spec.marker, preview))
 
     def _next_number(self) -> int:
         self._counter += 1

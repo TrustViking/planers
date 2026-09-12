@@ -18,14 +18,24 @@ from app.config.loader import ChannelConfig
 from app.google.api_retry import GoogleApiRetryPolicy, execute_with_retry
 from app.google.auth import AuthError, load_credentials, token_file_for
 from app.observability.logging_setup import get_logger, mask_stream_key
-from app.package.model import Slot
-from app.platforms.base import ChannelInfo, CreatedBroadcast, PlatformError, StreamInfo, UpcomingBroadcast
+from app.pipeline.plan import BroadcastSpec
+from app.platforms.base import (
+    ChannelInfo,
+    CreatedBroadcast,
+    PlatformError,
+    PlatformLimits,
+    StreamInfo,
+    UpcomingBroadcast,
+)
 
 LOGGER = get_logger("youtube")
 
 API_SERVICE_NAME: Final[str] = "youtube"
 API_VERSION: Final[str] = "v3"
 BROADCAST_STATUS_UPCOMING: Final[str] = "upcoming"
+# Пределы YouTube на тексты эфира (ТЗ §7.4 п.1) — единственный источник.
+YOUTUBE_TITLE_MAX_CHARS: Final[int] = 100
+YOUTUBE_DESCRIPTION_MAX_CHARS: Final[int] = 5000
 MAX_RESULTS: Final[int] = 50
 CHANNEL_PARTS: Final[str] = "snippet,brandingSettings"
 BROADCAST_PARTS: Final[str] = "snippet,contentDetails,status"
@@ -73,8 +83,20 @@ class YouTubePlatform:
         self._client_secret_file: Path = client_secret_file
         self._secrets_dir: Path = secrets_dir
         self._services: dict[str, Any] = {}
+        self._channels: dict[str, ChannelInfo] = {}
+
+    @property
+    def limits(self) -> PlatformLimits:
+        return PlatformLimits(
+            title_max_chars=YOUTUBE_TITLE_MAX_CHARS,
+            description_max_chars=YOUTUBE_DESCRIPTION_MAX_CHARS,
+        )
 
     def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
+        """Кеш на процесс: за запуск канал спрашивается один раз (квота §6.1 п.3)."""
+        cached: ChannelInfo | None = self._channels.get(channel.id)
+        if cached is not None:
+            return cached
         response: dict[str, Any] = self._execute(
             channel,
             "channels.list",
@@ -96,6 +118,7 @@ class YouTubePlatform:
             info.youtube_channel_id,
             info.default_language or "-",
         )
+        self._channels[channel.id] = info
         return info
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
@@ -145,17 +168,22 @@ class YouTubePlatform:
         _warn_on_unexpected_key(channel.id, stream)
         return stream
 
-    def create_broadcast(self, channel: ChannelConfig, slot: Slot, preview: bytes | None) -> CreatedBroadcast:
-        raise PlatformError(ERROR_NOT_IMPLEMENTED, "create_broadcast appears in task 3b")
+    def create_broadcast(
+        self,
+        channel: ChannelConfig,
+        spec: BroadcastSpec,
+        preview: bytes | None,
+    ) -> CreatedBroadcast:
+        raise PlatformError(ERROR_NOT_IMPLEMENTED, "create_broadcast appears in task 3c")
 
     def update_broadcast(
         self,
         channel: ChannelConfig,
         broadcast_id: str,
-        slot: Slot,
+        spec: BroadcastSpec,
         preview: bytes | None,
     ) -> None:
-        raise PlatformError(ERROR_NOT_IMPLEMENTED, "update_broadcast appears in task 3b")
+        raise PlatformError(ERROR_NOT_IMPLEMENTED, "update_broadcast appears in task 3c")
 
     def _service(self, channel: ChannelConfig) -> Any:
         cached: Any = self._services.get(channel.id)

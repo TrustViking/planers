@@ -141,6 +141,10 @@ OUTCOME_MATCHED: Final[str] = "{prefix} — {url}{suffix}"
 MATCHED_SUFFIX_RESENT: Final[str] = "; форма {form} (повторная отправка)"
 MATCHED_SUFFIX_REBIND: Final[str] = "; эфира не было в журнале — ключ взят с площадки, форма {form}"
 MATCHED_SUFFIX_REBIND_PLANNED: Final[str] = "; эфира нет в журнале — ключ будет взят с площадки"
+OUTCOME_NO_STREAM: Final[str] = (
+    "{prefix} — эфир на канале есть ({url}), но к нему не привязан поток: ключ взять неоткуда. "
+    "Привяжите поток в YouTube Studio или удалите эфир — планер создаст его заново"
+)
 OUTCOME_AMBIGUOUS: Final[str] = (
     "{prefix} — на канале несколько эфиров на эту минуту без маркера планера, "
     "не могу различить — разберитесь вручную"
