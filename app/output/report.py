@@ -22,7 +22,6 @@ from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
 from app.paths import PlanerPaths
 from app.pipeline.plan import Decision, OutcomeError, PlannedBroadcast
-from app.state.registry import FormStatus
 from app.pipeline.reconciler import MarkedBroadcast
 from app.pipeline.selection import Selection, SkippedSlot, SkipReason
 from app.platforms.base import BroadcastFacts, PlatformError, broadcast_url_for
@@ -66,9 +65,10 @@ ERROR_OUTCOME_KINDS: Final[frozenset[OutcomeKind]] = frozenset(
 
 
 class FormState(str, Enum):
+    """Только для нового ключа этого запуска: прежний ключ в форму не уходит (§7.5)."""
+
     SENT = "sent"          # ответ формы подтверждён
-    FAILED = "failed"      # не подтверждён — повтор в следующий запуск
-    WAITING = "waiting"    # отправка не выполнялась (NoopFormSender до этапа 4)
+    FAILED = "failed"      # не подтверждён; повтора не будет
 
 
 _PACKAGE_TEMPLATES: Final[dict[PackageLineStatus, str]] = {
@@ -80,7 +80,6 @@ _PACKAGE_TEMPLATES: Final[dict[PackageLineStatus, str]] = {
 _FORM_MARKS: Final[dict[FormState, str]] = {
     FormState.SENT: msg.FORM_MARK_SENT,
     FormState.FAILED: msg.FORM_MARK_FAILED,
-    FormState.WAITING: msg.FORM_MARK_WAITING,
 }
 
 
@@ -102,10 +101,8 @@ class PairOutcome:
     language: str | None = None
     broadcast_url: str | None = None
     changed_fields: tuple[str, ...] = ()   # "title", "description"
-    form: FormState | None = None          # None — форма в этом запуске не отправлялась
-    form_error: str | None = None          # причина, по которой ключ не ушёл (§7.5)
-    recreated: bool = False
-    rebind: bool = False
+    form: FormState | None = None          # None — нового ключа нет, форма не отправлялась
+    form_error: str | None = None          # причина, по которой новый ключ не ушёл (§7.5)
     error: OutcomeError | None = None
 
 
@@ -137,7 +134,6 @@ class RunReport:
 
 _DECISION_KINDS: Final[dict[Decision, OutcomeKind]] = {
     Decision.CREATE: OutcomeKind.CREATED,
-    Decision.RECREATE: OutcomeKind.CREATED,
     Decision.UPDATE: OutcomeKind.FIXED,
     Decision.MATCH: OutcomeKind.MATCHED,
     Decision.NO_STREAM: OutcomeKind.NO_STREAM,
@@ -161,9 +157,7 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
         broadcast_url=item.broadcast_url or item.found_url,
         changed_fields=tuple(changed.value for changed in item.changed_fields),
         form=None if is_dry_run else _form_state(item),
-        form_error=None if is_dry_run else item.last_error,
-        recreated=item.decision is Decision.RECREATE,
-        rebind=item.is_rebind,
+        form_error=item.last_error if item.is_new_key else None,
         error=item.error,
     )
 
@@ -211,6 +205,8 @@ def build_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequen
     ]
     if any(item.facts is not None and item.facts.live_chat_id for item in planned):
         lines.append(msg.WARNING_LIVE_CHAT)      # один раз на запуск, а не на каждый эфир
+    if any(item.has_kept_key for item in planned):
+        lines.append(msg.WARNING_KEPT_KEY)       # тоже один раз: правило общее для всех эфиров
     lines.extend(msg.WARNING_FORM_DIAGNOSTIC.format(path=path) for path in diagnostics)
     return lines
 
@@ -285,14 +281,10 @@ def _add_if_different(found: list[tuple[str, str, str]], field: str, wanted: str
 
 
 def _form_state(item: PlannedBroadcast) -> FormState | None:
-
-    """None — отправлять было нечего: ключа у объекта нет."""
-    if not item.stream_key:
+    """None — нового ключа нет: прежний ключ планер в форму не отправляет (§7.5)."""
+    if not item.is_new_key or not item.stream_key:
         return None
-    if item.form_status is FormStatus.SENT:
-        return FormState.SENT
-    return FormState.FAILED if item.last_error else FormState.WAITING
-
+    return FormState.SENT if item.is_form_sent else FormState.FAILED
 
 
 def render_report(report: RunReport) -> str:
@@ -447,7 +439,7 @@ def _outcome_body(outcome: PairOutcome, *, is_dry_run: bool) -> str:
     if outcome.kind is OutcomeKind.FIXED:
         return _fixed_text(outcome, prefix, is_dry_run=is_dry_run)
     if outcome.kind is OutcomeKind.MATCHED:
-        return _matched_text(outcome, prefix, is_dry_run=is_dry_run)
+        return _matched_text(outcome, prefix)
     if outcome.kind is OutcomeKind.AMBIGUOUS:
         return msg.OUTCOME_AMBIGUOUS.format(prefix=prefix)
     if outcome.kind is OutcomeKind.NO_STREAM:
@@ -461,12 +453,12 @@ def _form_mark(form: FormState | None, error: str | None = None) -> str:
     if form is None:
         return MISSING_VALUE
     if form is FormState.FAILED:
-        return msg.FORM_MARK_FAILED.format(reason=_form_error_text(error))
+        return msg.FORM_MARK_FAILED.format(reason=form_reason_text(error))
     return _FORM_MARKS[form]
 
 
-def _form_error_text(error: str | None) -> str:
-    """Код исхода из журнала → текст для владельца (§7.5)."""
+def form_reason_text(error: str | None) -> str:
+    """Код исхода отправки «code: detail» → текст для владельца (§7.5); единый для отчёта и keys.txt."""
     if not error:
         return msg.FORM_REASON_TEXT[FORM_CODE_NOT_CONFIRMED].format(detail=FORM_CODE_NOT_CONFIRMED)
     code, _, detail = error.partition(": ")
@@ -476,35 +468,18 @@ def _form_error_text(error: str | None) -> str:
 
 def _created_text(outcome: PairOutcome, prefix: str, *, is_dry_run: bool) -> str:
     if is_dry_run:
-        template: str = msg.OUTCOME_RECREATE_PLANNED if outcome.recreated else msg.OUTCOME_CREATE_PLANNED
-        return template.format(prefix=prefix)
-    template = msg.OUTCOME_RECREATED if outcome.recreated else msg.OUTCOME_CREATED
-    return template.format(prefix=prefix, form=_form_mark(outcome.form, outcome.form_error))
+        return msg.OUTCOME_CREATE_PLANNED.format(prefix=prefix)
+    return msg.OUTCOME_CREATED.format(prefix=prefix, form=_form_mark(outcome.form, outcome.form_error))
 
 
 def _fixed_text(outcome: PairOutcome, prefix: str, *, is_dry_run: bool) -> str:
     what: str = msg.CHANGED_FIELDS_JOINER.join(msg.CHANGED_FIELD_TEXT[name] for name in outcome.changed_fields)
-    if is_dry_run:
-        return msg.OUTCOME_FIX_PLANNED.format(prefix=prefix, what=what)
-    if outcome.rebind:
-        form_part: str = msg.FIXED_FORM_REBIND.format(form=_form_mark(outcome.form, outcome.form_error))
-    elif outcome.form is not None:
-        form_part = msg.FIXED_FORM_RESENT.format(form=_form_mark(outcome.form, outcome.form_error))
-    else:
-        form_part = msg.FIXED_FORM_NOT_RESENT
-    return msg.OUTCOME_FIXED.format(prefix=prefix, what=what, form_part=form_part)
+    template: str = msg.OUTCOME_FIX_PLANNED if is_dry_run else msg.OUTCOME_FIXED
+    return template.format(prefix=prefix, what=what)
 
 
-def _matched_text(outcome: PairOutcome, prefix: str, *, is_dry_run: bool) -> str:
-    if is_dry_run:
-        suffix: str = msg.MATCHED_SUFFIX_REBIND_PLANNED if outcome.rebind else ""
-    elif outcome.rebind:
-        suffix = msg.MATCHED_SUFFIX_REBIND.format(form=_form_mark(outcome.form, outcome.form_error))
-    elif outcome.form is not None:
-        suffix = msg.MATCHED_SUFFIX_RESENT.format(form=_form_mark(outcome.form, outcome.form_error))
-    else:
-        suffix = ""
-    return msg.OUTCOME_MATCHED.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE, suffix=suffix)
+def _matched_text(outcome: PairOutcome, prefix: str) -> str:
+    return msg.OUTCOME_MATCHED.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE)
 
 
 def _error_text(outcome: PairOutcome, prefix: str) -> str:

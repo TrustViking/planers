@@ -126,18 +126,10 @@ SKIP_NO_CHANNEL: Final[str] = "- {date} {time} {language} — нет канал�
 OUTCOME_SLOT_PREFIX: Final[str] = "- {date} {time} {language} → {account_name}"
 OUTCOME_CHANNEL_PREFIX: Final[str] = "- {account_name}"
 OUTCOME_CREATED: Final[str] = "{prefix} — эфир создан, ключ получен, форма {form}"
-OUTCOME_RECREATED: Final[str] = "{prefix} — эфира на YouTube не было (удалён?), создан заново, ключ получен, форма {form}"
 OUTCOME_CREATE_PLANNED: Final[str] = "{prefix} — эфира нет, будет создан"
-OUTCOME_RECREATE_PLANNED: Final[str] = "{prefix} — эфира на YouTube нет (удалён?), будет создан заново"
-OUTCOME_FIXED: Final[str] = "{prefix} — на YouTube было другое {what}; обновлено. {form_part}"
+OUTCOME_FIXED: Final[str] = "{prefix} — на YouTube было другое {what}; обновлено. Ключ и ссылка прежние"
 OUTCOME_FIX_PLANNED: Final[str] = "{prefix} — на YouTube другое {what}; будет обновлено"
-FIXED_FORM_NOT_RESENT: Final[str] = "Ключ и ссылка прежние, форма не переотправлялась"
-FIXED_FORM_RESENT: Final[str] = "Ключ и ссылка прежние, форма {form} (повторная отправка)"
-FIXED_FORM_REBIND: Final[str] = "Эфира не было в журнале — ключ взят с площадки, форма {form}"
-OUTCOME_MATCHED: Final[str] = "{prefix} — {url}{suffix}"
-MATCHED_SUFFIX_RESENT: Final[str] = "; форма {form} (повторная отправка)"
-MATCHED_SUFFIX_REBIND: Final[str] = "; эфира не было в журнале — ключ взят с площадки, форма {form}"
-MATCHED_SUFFIX_REBIND_PLANNED: Final[str] = "; эфира нет в журнале — ключ будет взят с площадки"
+OUTCOME_MATCHED: Final[str] = "{prefix} — {url}"
 OUTCOME_NO_STREAM: Final[str] = (
     "{prefix} — эфир на канале есть ({url}), но к нему не привязан поток: ключ взять неоткуда. "
     "Привяжите поток в YouTube Studio или удалите эфир — планер создаст его заново"
@@ -157,6 +149,11 @@ MISMATCH_FIELD_AUDIENCE: Final[str] = "аудитория"
 MISMATCH_FIELD_CATEGORY: Final[str] = "категория"
 WARNING_FORM_DIAGNOSTIC: Final[str] = (
     "- ответ формы сохранён для разбора: {path}"
+)
+WARNING_KEPT_KEY: Final[str] = (
+    "- у совпавших и исправленных эфиров ключ прежний: планер не отправляет его в форму повторно, "
+    "чтобы не задвоить ключ у стримера. Если стример ключа не получил — передайте его из keys.txt "
+    "вручную или удалите эфир на YouTube: планер создаст его заново с новым ключом и отправит."
 )
 WARNING_LIVE_CHAT: Final[str] = (
     "- у эфиров включён живой чат. Через API он не отключается: если чат не нужен, "
@@ -183,8 +180,9 @@ OUTCOME_ERROR: Final[str] = "{prefix} — {origin}: {code} ({message})"
 OUTCOME_PLANER_ERROR: Final[str] = "{prefix} — {text}"
 OUTCOME_DRY_RUN_SUFFIX: Final[str] = " — не выполнено (dry-run)"
 FORM_MARK_SENT: Final[str] = "✅"
-FORM_MARK_FAILED: Final[str] = "❌ {reason}; повторю в следующий запуск"
-FORM_MARK_WAITING: Final[str] = "⏳ отправка не выполнялась"
+FORM_MARK_FAILED: Final[str] = (
+    "❌ {reason}; повторно планер ключ не отправит — передайте его стримеру из keys.txt вручную"
+)
 # ключи — коды из app/form/base.py
 FORM_REASON_TEXT: Final[dict[str, str]] = {
     "structureUnreadable": "не удалось прочитать форму ({detail})",
@@ -240,7 +238,6 @@ KEYS_FILE_HEADER: Final[str] = (
 KEYS_FILE_COLUMNS: Final[str] = (
     "# язык | дата | время (Киев) | аккаунт | статус формы | stream_url | stream_key | ссылка на эфир"
 )
-KEY_FORM_SENT: Final[str] = "форма ✅ {sent_at}"
-KEY_FORM_FAILED: Final[str] = "форма ❌ {error}"
-KEY_FORM_WAITING: Final[str] = "форма ⏳ отправка не выполнялась"
-KEY_FORM_NEVER_SENT: Final[str] = "форма — не отправлялась"
+KEY_FORM_SENT: Final[str] = "ключ передан в форму {sent_at}"
+KEY_FORM_KEPT: Final[str] = "ключ прежний, планер его не передавал"
+KEY_FORM_FAILED: Final[str] = "не удалось передать: {reason}"

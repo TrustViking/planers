@@ -1,6 +1,8 @@
-"""Журнал state\\registry.json (ТЗ §5.4): какие ключи получены и отправлена ли форма.
+"""Журнал state\\registry.json (ТЗ §5.4): запись о том, что планер сделал в запуске.
 
-Не источник истины об эфирах — истина на YouTube (ТЗ §7.3). Запись атомарная.
+Конвейер журнал не читает ни для одного решения: ключ и ссылка — только с площадки,
+статус формы — только этого запуска (ТЗ §7.3, §7.5). Registry.load остаётся защитой
+файла: битый журнал останавливает запуск. Запись атомарная.
 """
 from __future__ import annotations
 
@@ -8,7 +10,7 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -41,8 +43,11 @@ OPTIONAL_TEXT_FIELDS: Final[tuple[str, ...]] = (
 
 
 class FormStatus(str, Enum):
-    PENDING = "pending"  # ключ есть, отправка формы не подтверждена — повторить
-    SENT = "sent"        # подтверждено
+    """Что было с формой в запуске, записавшем строку; прошлые запуски планер не помнит."""
+
+    PENDING = "pending"    # ключ новый, отправка не подтверждена; повтора не будет (§7.5)
+    SENT = "sent"          # ключ новый, отправка подтверждена
+    NOT_SENT = "not_sent"  # ключ прежний, планер его не передавал
 
 
 class RegistryError(Exception):
@@ -135,48 +140,11 @@ class Registry:
     def upsert(self, registration: Registration) -> None:
         self._registrations[self.key(registration.slot_id, registration.channel_id)] = registration
 
-    def mark_form_sent(self, key: str, sent_at: datetime) -> None:
-        current: Registration = self._require(key)
-        self._registrations[key] = replace(current, form_status=FormStatus.SENT, form_sent_at=sent_at)
-
-    def mark_recreated(
-        self,
-        key: str,
-        *,
-        broadcast_id: str,
-        broadcast_url: str,
-        stream_url: str,
-        stream_key: str,
-        created_at: datetime,
-    ) -> None:
-        """Эфир пересоздан (ТЗ §7.3): старый broadcast_id — в историю, форма снова pending."""
-        current: Registration = self._require(key)
-        previous_ids: list[str] = list(current.previous_broadcast_ids)
-        if current.broadcast_id:
-            previous_ids.append(current.broadcast_id)
-        self._registrations[key] = replace(
-            current,
-            broadcast_id=broadcast_id,
-            broadcast_url=broadcast_url,
-            stream_url=stream_url,
-            stream_key=stream_key,
-            created_at=created_at,
-            form_status=FormStatus.PENDING,
-            form_sent_at=None,
-            previous_broadcast_ids=previous_ids,
-        )
-
     def note_package(self, package_id: str, file: str, seen_at: datetime) -> None:
         """Запомнить пакет; уже известный не трогается (first_seen не перезаписывается)."""
         if package_id in self._packages:
             return
         self._packages[package_id] = PackageSeen(file=file, first_seen=seen_at)
-
-    def _require(self, key: str) -> Registration:
-        registration: Registration | None = self._registrations.get(key)
-        if registration is None:
-            raise RegistryError(f"unknown registration key={key}")
-        return registration
 
 
 def _read_payload(path: Path) -> dict[str, Any]:

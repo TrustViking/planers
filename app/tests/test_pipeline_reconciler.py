@@ -9,7 +9,6 @@ from app.pipeline.plan import ChangedField, Decision, PlannedBroadcast
 from app.pipeline.reconciler import MarkerParts, OrphanBroadcast, Reconciler, split_marker
 from app.platforms.base import PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
-from app.state.registry import FormStatus, Registration
 from app.tests.conftest import build_planned
 
 ConfigFactory = Callable[..., PlanerConfig]
@@ -25,25 +24,11 @@ def _objects(config: PlanerConfig, *slots: Slot) -> list[PlannedBroadcast]:
     ]
 
 
-def _registration(slot: Slot, channel_id: str, broadcast_id: str) -> Registration:
-    return Registration(
-        slot_id=slot.slot_id,
-        channel_id=channel_id,
-        account_name="Account",
-        language=slot.language,
-        date=slot.date,
-        time=slot.time,
-        broadcast_id=broadcast_id,
-        broadcast_url=f"https://www.youtube.com/watch?v={broadcast_id}",
-        stream_url="rtmp://a.rtmp.youtube.com/live2",
-        stream_key="abcd-abcd-abcd-abcd-abcd",
-        package_id="pkg",
-        created_at=datetime(2027, 3, 1, 10, 0),
-        form_status=FormStatus.SENT,
-        form_sent_at=datetime(2027, 3, 1, 10, 0),
-        previous_broadcast_ids=[],
-        last_error=None,
-    )
+def _too_late(item: PlannedBroadcast) -> PlannedBroadcast:
+    """Как его строит отбор (app/pipeline/selection.py): флаг и решение TOO_LATE."""
+    item.is_too_late = True
+    item.decision = Decision.TOO_LATE
+    return item
 
 
 def _reconcile(
@@ -88,12 +73,16 @@ def test_marked_broadcast_with_same_texts_matches(
     slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
     seeded: UpcomingBroadcast = _seed_like(fake_platform, "yt_ua", slot, stream_key="abcd-abcd-abcd-abcd-abcd")
     [item] = _objects(make_config(), slot)
-    item.apply_registration(_registration(slot, "yt_ua", seeded.broadcast_id))
     _reconcile(fake_platform, make_config(), item)
     assert item.decision is Decision.MATCH
     assert item.found == seeded
-    assert item.is_rebind is False
     assert item.found_stream is not None and item.found_stream.stream_name == "abcd-abcd-abcd-abcd-abcd"
+    # ключ и ссылка — те, что сейчас на площадке; новым такой ключ не считается
+    assert (item.broadcast_id, item.stream_key, item.is_new_key) == (
+        seeded.broadcast_id,
+        "abcd-abcd-abcd-abcd-abcd",
+        False,
+    )
 
 
 def test_changed_description_means_update(
@@ -148,17 +137,17 @@ def test_title_longer_than_limit_does_not_loop_forever(
     assert second.decision is Decision.MATCH
 
 
-def test_registered_broadcast_missing_on_platform_means_recreate(
-    fake_platform: FakePlatform,
-    make_config: ConfigFactory,
-    make_slot_object: SlotFactory,
-    now: datetime,
-) -> None:
-    slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
-    [item] = _objects(make_config(), slot)
-    item.apply_registration(_registration(slot, "yt_ua", "deletedbc"))
-    _reconcile(fake_platform, make_config(), item)
-    assert item.decision is Decision.RECREATE
+def test_decisions_have_no_recreate_branch() -> None:
+    """Эфира нет — всегда CREATE: различать «впервые» и «заново» планеру нечем и незачем."""
+    assert {decision.value for decision in Decision} == {
+        "create",
+        "match",
+        "update",
+        "no_stream",
+        "too_late",
+        "ambiguous",
+        "error",
+    }
 
 
 def test_two_languages_on_one_minute_each_find_their_marker(
@@ -182,7 +171,7 @@ def test_two_languages_on_one_minute_each_find_their_marker(
     assert len(fake_platform.stream_calls) == len(set(fake_platform.stream_calls))
 
 
-def test_single_manual_broadcast_matches_with_rebind(
+def test_single_manual_broadcast_matches_with_its_platform_key(
     fake_platform: FakePlatform,
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
@@ -194,8 +183,8 @@ def test_single_manual_broadcast_matches_with_rebind(
     _reconcile(fake_platform, make_config(), item)
     assert item.decision is Decision.MATCH
     assert item.found == manual
-    assert item.is_rebind is True
     assert item.found_stream is not None
+    assert item.stream_key == item.found_stream.stream_name
 
 
 def test_broadcast_without_bound_stream_gives_no_stream(
@@ -255,6 +244,54 @@ def test_list_upcoming_is_called_once_per_channel(
     slots: list[Slot] = [make_slot_object(start, "uk"), make_slot_object(start, "ru"), make_slot_object(start, "en")]
     _reconcile(fake_platform, make_config(), *_objects(make_config(), *slots))
     assert fake_platform.list_calls == ["yt_ua", "yt_ru"]
+
+
+def test_too_late_object_only_reads_its_key(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """too_late: опознание и ключ с площадки; решение TOO_LATE, тексты не сравниваются."""
+    soon: Slot = make_slot_object(now + timedelta(minutes=30), "uk")
+    later: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    seeded: UpcomingBroadcast = _seed_like(fake_platform, "yt_ua", soon, title="Другое", stream_key="soon-soon-soon-soon-soon")
+    _seed_like(fake_platform, "yt_ua", later)
+    [soon_item] = _objects(make_config(), soon)
+    [later_item] = _objects(make_config(), later)
+    _reconcile(fake_platform, make_config(), _too_late(soon_item), later_item)
+    assert soon_item.decision is Decision.TOO_LATE
+    assert (soon_item.found, soon_item.stream_key, soon_item.is_new_key) == (seeded, "soon-soon-soon-soon-soon", False)
+    assert (soon_item.actual, soon_item.changed_fields) == (None, ())
+    assert later_item.decision is Decision.MATCH
+    assert fake_platform.list_calls == ["yt_ua", "yt_ru"]                        # по-прежнему раз на канал
+    assert len(fake_platform.stream_calls) == len(set(fake_platform.stream_calls))  # тот же кеш потоков
+
+
+def test_too_late_without_broadcast_has_no_key_and_no_create(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    soon: Slot = make_slot_object(now + timedelta(minutes=30), "uk")
+    [item] = _objects(make_config(), soon)
+    _reconcile(fake_platform, make_config(), _too_late(item))
+    assert item.decision is Decision.TOO_LATE
+    assert (item.found, item.stream_key) == (None, None)
+
+
+def test_too_late_is_not_an_error_when_the_channel_fails(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    soon: Slot = make_slot_object(now + timedelta(minutes=30), "uk")
+    fake_platform.fail_list["yt_ua"] = PlatformError("quotaExceeded", "квота исчерпана")
+    [item] = _objects(make_config(), soon)
+    _reconcile(fake_platform, make_config(), _too_late(item))
+    assert (item.decision, item.error, item.stream_key) == (Decision.TOO_LATE, None, None)
 
 
 def test_marker_of_slot_outside_the_map_is_an_orphan(

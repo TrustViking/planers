@@ -1,7 +1,8 @@
 """Единый объект запланированного эфира (ТЗ §7.2, §7.3).
 
 Одна рабочая единица = один эфир одного слота на одном канале. Объект рождается из
-пакета, дозаполняется тем, что нашлось на площадке, и результатами действий.
+пакета и канала и ничего не знает о прошлых запусках: ключ и ссылка приходят только
+с площадки — из найденного эфира или из ответа на создание и привязку потока.
 Сравнение идёт между двумя BroadcastSpec — «как должно быть» и «как есть», — поэтому
 нормализация и обрезка применяются к обеим сторонам по построению.
 """
@@ -17,6 +18,7 @@ from app.core.text import normalize_description, normalize_title, safe_trim
 from app.package.model import FormSpec, Package, Slot
 from app.platforms.base import (
     BroadcastFacts,
+    CreatedBroadcast,
     PlatformLimits,
     StreamInfo,
     UpcomingBroadcast,
@@ -44,7 +46,6 @@ class Decision(str, Enum):
     CREATE = "create"          # эфира нет
     MATCH = "match"            # есть, тексты совпадают
     UPDATE = "update"          # есть, название или описание отличаются
-    RECREATE = "recreate"      # журнал помнит эфир, на площадке его нет — владелец удалил
     NO_STREAM = "no_stream"    # эфир есть, привязанного потока нет — ключ взять неоткуда
     TOO_LATE = "too_late"      # до старта меньше min_lead_minutes — эфир не трогаем
     AMBIGUOUS = "ambiguous"    # несколько эфиров без маркера на эту минуту
@@ -133,20 +134,20 @@ class PlannedBroadcast:
     # --- решение сверки
     decision: Decision = Decision.CREATE
     changed_fields: tuple[ChangedField, ...] = ()
-    is_rebind: bool = False        # журнал надо переписать на найденный эфир
-    is_too_late: bool = False      # слот внутри min_lead_minutes: не планируем, но ключ храним
+    is_too_late: bool = False      # слот внутри min_lead_minutes: только чтение площадки, ключ храним
     stream_attached: bool = False  # эфир был без потока, поток привязан этим запуском
 
-    # --- результат действий и память журнала
+    # --- ключ и ссылка: только из ответа площадки (ТЗ §7.3)
     broadcast_id: str | None = None
     broadcast_url: str | None = None
     stream_url: str | None = None
     stream_key: str | None = None
-    form_status: FormStatus = FormStatus.PENDING
+    is_new_key: bool = False       # ключ получен в этом запуске: создание или привязка потока
+
+    # --- форма и сбои этого запуска
+    is_form_sent: bool = False
     form_sent_at: datetime | None = None
-    previous_broadcast_ids: list[str] = field(default_factory=list)
     last_error: str | None = None
-    created_at: datetime | None = None
     error: OutcomeError | None = None
     warnings: list[OutcomeWarning] = field(default_factory=list)   # превью, язык эфира
 
@@ -186,20 +187,8 @@ class PlannedBroadcast:
             return None
         return broadcast_url_for(self.channel, self.found.broadcast_id)
 
-    def apply_registration(self, registration: Registration) -> None:
-        """Что помнит журнал: ключи и статус отправки формы (ТЗ §5.4)."""
-        self.broadcast_id = registration.broadcast_id
-        self.broadcast_url = registration.broadcast_url
-        self.stream_url = registration.stream_url
-        self.stream_key = registration.stream_key
-        self.form_status = registration.form_status
-        self.form_sent_at = registration.form_sent_at
-        self.previous_broadcast_ids = list(registration.previous_broadcast_ids)
-        self.last_error = registration.last_error
-        self.created_at = registration.created_at
-
-    def to_registration(self) -> Registration:
-        """Формат записи — как в ТЗ §5.4, без изменений."""
+    def to_registration(self, recorded_at: datetime) -> Registration:
+        """Запись о сделанном (ТЗ §5.4): поля прежние, previous_broadcast_ids унаследовано и всегда пусто."""
         return Registration(
             slot_id=self.slot.slot_id,
             channel_id=self.channel.id,
@@ -212,39 +201,47 @@ class PlannedBroadcast:
             stream_url=self.stream_url,
             stream_key=self.stream_key,
             package_id=self.source_package.package_id,
-            created_at=self.created_at,
+            created_at=recorded_at,
             form_status=self.form_status,
             form_sent_at=self.form_sent_at,
-            previous_broadcast_ids=list(self.previous_broadcast_ids),
+            previous_broadcast_ids=[],
             last_error=self.last_error,
         )
 
-    def remember_broadcast(
-        self,
-        *,
-        broadcast_id: str,
-        broadcast_url: str,
-        stream_url: str,
-        stream_key: str,
-        created_at: datetime,
-        is_recreate: bool,
-    ) -> None:
-        """Новый эфир: прежний id — в историю, форма снова ждёт отправки (ТЗ §5.4, §7.3)."""
-        if is_recreate and self.broadcast_id:
-            self.previous_broadcast_ids.append(self.broadcast_id)
-        self.broadcast_id = broadcast_id
-        self.broadcast_url = broadcast_url
-        self.stream_url = stream_url
-        self.stream_key = stream_key
-        self.created_at = created_at
-        self.form_status = FormStatus.PENDING
-        self.form_sent_at = None
+    @property
+    def form_status(self) -> FormStatus:
+        if self.is_form_sent:
+            return FormStatus.SENT
+        return FormStatus.PENDING if self.is_new_key else FormStatus.NOT_SENT
+
+    def take_new_key(self, created: CreatedBroadcast) -> None:
+        """Ключ получен в этом запуске — единственное место, где ставится is_new_key."""
+        self.broadcast_id = created.broadcast_id
+        self.broadcast_url = created.broadcast_url
+        self.stream_url = created.stream_url
+        self.stream_key = created.stream_key
+        self.is_new_key = True
+
+    def take_found_key(self) -> None:
+        """Ключ и ссылка найденного эфира — такие, какие сейчас лежат на площадке."""
+        if self.found is None or self.found_stream is None:
+            return
+        self.broadcast_id = self.found.broadcast_id
+        self.broadcast_url = broadcast_url_for(self.channel, self.found.broadcast_id)
+        self.stream_url = self.found_stream.ingestion_address
+        self.stream_key = self.found_stream.stream_name
 
     def warn(self, warning: OutcomeWarning) -> None:
         """Сбой, который не отменяет эфир и не меняет код выхода (ТЗ §7.4 п.4)."""
         self.warnings.append(warning)
 
     @property
-    def needs_form(self) -> bool:
-        """Финальный проход §7.5: ключ есть, а подтверждения отправки нет."""
-        return bool(self.stream_key) and self.form_status is not FormStatus.SENT
+    def is_new_key_undelivered(self) -> bool:
+        """Новый ключ, до формы ещё не дошёл: финальный проход §7.5 и код выхода 1."""
+        return self.is_new_key and bool(self.stream_key) and not self.is_form_sent
+
+    @property
+    def has_kept_key(self) -> bool:
+        """Эфир совпал или исправлен, ключ прежний: в форму не уходит никогда (§7.5)."""
+        is_found_decision: bool = self.decision in (Decision.MATCH, Decision.UPDATE)
+        return is_found_decision and not self.is_new_key and self.error is None and bool(self.stream_key)

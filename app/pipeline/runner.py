@@ -2,7 +2,8 @@
 
 main.py только разбирает флаги, строит зависимости и печатает результат.
 Рабочая единица — PlannedBroadcast: один эфир одного слота на одном канале.
-Отправка в форму — отдельным финальным проходом по статусу отправки (§7.5).
+Отправка в форму — отдельным финальным проходом, только новые ключи этого запуска (§7.5).
+Журнал только загружается (битый файл останавливает запуск) и пишется — решений по нему нет.
 """
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ from app.platforms.base import (
     VideoFixes,
     broadcast_url_for,
 )
-from app.state.registry import FormStatus, Registry, RegistryError
+from app.state.registry import Registry, RegistryError
 
 __all__ = ["ExitCode", "RunMode", "RunOutcome", "RunProblem", "run"]
 
@@ -183,7 +184,6 @@ def _run_promo(context: _RunContext) -> RunOutcome:
         scan.slot_sources,
         context.config,
         context.platform.limits,
-        context.registry,
         context.now_utc,
     )
     orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform).reconcile(
@@ -214,8 +214,8 @@ def _run_promo(context: _RunContext) -> RunOutcome:
         keys_file_path=_display_path(context.paths, keys_path),
         notice=context.notice,
     )
-    # ключ, не дошедший до стримера, — это код выхода 1: молчать об этом нельзя (§7.5)
-    form_pending: bool = context.is_full and any(item.needs_form for item in selection.planned)
+    # новый ключ, не дошедший до стримера, — это код выхода 1; прежний ключ форму не ждёт (§7.5)
+    form_pending: bool = context.is_full and any(item.is_new_key_undelivered for item in selection.planned)
     has_errors: bool = _has_error_outcomes(report.outcomes) or bool(scan.problems) or form_pending
     return _complete(context, report, has_errors=has_errors)
 
@@ -250,10 +250,7 @@ def _execute_full(
 def _run_status(context: _RunContext) -> RunOutcome:
     """Без promo: эфиры с маркером планера на каналах → keys.txt и отчёт; журнал не пишется."""
     marked: MarkedScan = Reconciler(context.platform).marked_broadcasts(context.config.channels)
-    rows: list[KeyRow] = [
-        key_row_from_marked(item, context.registry.get(Registry.key(item.stream.title, item.channel.id)))
-        for item in marked.broadcasts
-    ]
+    rows: list[KeyRow] = [key_row_from_marked(item) for item in marked.broadcasts]
     outcomes: list[PairOutcome] = [outcome_from_marked(item) for item in marked.broadcasts]
     outcomes.extend(platform_error_outcome(failure.channel, failure.error) for failure in marked.failures)
     keys_path, keys_errors = _write_keys(context, rows)
@@ -312,9 +309,10 @@ def _orphan_line(orphan: OrphanBroadcast) -> OrphanLine:
 
 
 def _save_registry(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[PairOutcome]:
+    """Запись о сделанном (§5.4): по каждому объекту с ключом, как он есть сейчас на площадке."""
     for item in planned:
-        if item.broadcast_id or item.stream_key:
-            context.registry.upsert(item.to_registration())
+        if item.stream_key:
+            context.registry.upsert(item.to_registration(context.now_naive))
     try:
         context.registry.save(context.paths.registry_file)
     except OSError as error:
@@ -332,17 +330,19 @@ def _write_keys(context: _RunContext, rows: list[KeyRow]) -> tuple[Path | None, 
 
 
 def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[str]:
-    """Финальный проход (§7.5): решает статус отправки, а не факт создания эфира.
+    """Финальный проход (§7.5): только ключ, полученный в этом запуске.
 
+    Прежний ключ совпавшего или исправленного эфира не отправляется никогда — даже если
+    прошлая отправка не подтвердилась: повтор задвоил бы ключ у стримера.
     Возвращает пути сохранённых диагностических файлов формы — они идут в отчёт.
     """
     diagnostics: list[str] = []
     for item in planned:
-        if not item.needs_form:
+        if not item.is_new_key_undelivered:
             continue
         result: FormSendResult = context.form_sender.send(item)
         if result.confirmed:
-            item.form_status = FormStatus.SENT
+            item.is_form_sent = True
             item.form_sent_at = context.now_naive
             item.last_error = None
         else:
@@ -437,25 +437,16 @@ class _Executor:
         if item.decision is Decision.NO_STREAM:
             self._attach_stream(item)
             return
-        if item.decision in (Decision.CREATE, Decision.RECREATE):
-            self._create(item, is_recreate=item.decision is Decision.RECREATE)
+        if item.decision is Decision.CREATE:
+            self._create(item)
             return
         if item.decision is Decision.UPDATE:
             self._update(item)
-            return
-        if item.decision is Decision.MATCH:
-            self._adopt(item)
+        # MATCH: ключ и ссылку сверка уже взяла с площадки, действий нет
 
-    def _create(self, item: PlannedBroadcast, *, is_recreate: bool) -> None:
+    def _create(self, item: PlannedBroadcast) -> None:
         created: CreatedBroadcast = self._platform.create_broadcast(item.channel, item.expected)
-        item.remember_broadcast(
-            broadcast_id=created.broadcast_id,
-            broadcast_url=created.broadcast_url,
-            stream_url=created.stream_url,
-            stream_key=created.stream_key,
-            created_at=self._context.now_naive,
-            is_recreate=is_recreate,
-        )
+        item.take_new_key(created)
         LOGGER.info(
             "broadcast_created slot_id=%s channel=%s broadcast_id=%s stream_key=%s",
             item.slot_id,
@@ -475,14 +466,7 @@ class _Executor:
             item.expected,
         )
         item.stream_attached = True
-        item.remember_broadcast(
-            broadcast_id=attached.broadcast_id,
-            broadcast_url=attached.broadcast_url,
-            stream_url=attached.stream_url,
-            stream_key=attached.stream_key,
-            created_at=item.created_at or self._context.now_naive,
-            is_recreate=False,
-        )
+        item.take_new_key(attached)
         LOGGER.info(
             "stream_attached slot_id=%s channel=%s broadcast_id=%s stream_key=%s",
             item.slot_id,
@@ -510,27 +494,6 @@ class _Executor:
             broadcast_id,
             ",".join(changed.value for changed in item.changed_fields),
         )
-        self._adopt(item)
-
-    def _adopt(self, item: PlannedBroadcast) -> None:
-        """Эфир подтверждён на площадке: журнал переписывается на найденный эфир и его ключ."""
-        if not item.is_rebind or item.found is None or item.found_stream is None:
-            return
-        item.remember_broadcast(
-            broadcast_id=item.found.broadcast_id,
-            broadcast_url=broadcast_url_for(item.channel, item.found.broadcast_id),
-            stream_url=item.found_stream.ingestion_address,
-            stream_key=item.found_stream.stream_name,
-            created_at=item.created_at or self._context.now_naive,
-            is_recreate=bool(item.broadcast_id),
-        )
-        LOGGER.info(
-            "registration_rebound slot_id=%s channel=%s broadcast_id=%s stream_key=%s",
-            item.slot_id,
-            item.channel.id,
-            item.found.broadcast_id,
-            mask_stream_key(item.found_stream.stream_name),
-        )
 
     def _finish(self, item: PlannedBroadcast) -> None:
         """Аудитория и снимок фактов — по каждому эфиру, который планер считает своим."""
@@ -545,7 +508,7 @@ class _Executor:
         """Эфир планера: создан, привязан, исправлен или подтверждён. Прочие — не наше дело."""
         if item.error is not None or item.is_too_late:
             return None
-        if item.decision not in (Decision.CREATE, Decision.RECREATE, Decision.UPDATE, Decision.MATCH):
+        if item.decision not in (Decision.CREATE, Decision.UPDATE, Decision.MATCH):
             return None
         return item.broadcast_id or (item.found.broadcast_id if item.found else None)
 

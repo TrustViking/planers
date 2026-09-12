@@ -1,5 +1,7 @@
-"""Сверка объектов с эфирами на площадке (ТЗ §7.3). Истина — на площадке, журнал — память.
+"""Сверка объектов с эфирами на площадке (ТЗ §7.3). Истина — только на площадке.
 
+Журнал сверка не видит: решение и ключ найденного эфира — только по ответу площадки.
+Объект too_late сверяется только на чтение: опознание и ключ, решение остаётся TOO_LATE.
 Решения и найденные данные записываются в сами объекты; наружу отдаются только эфиры,
 у которых есть маркер планера, но нет соответствующего слота (сироты, §12 п.4).
 Маркер планера — slot_id в названии привязанного потока. Поток с другим названием
@@ -15,7 +17,7 @@ from typing import Final
 
 from app.config.loader import ChannelConfig
 from app.core.dates import SLOT_TIME_FORMAT, build_slot_id, format_date, format_time, parse_date
-from app.observability.logging_setup import get_logger
+from app.observability.logging_setup import get_logger, mask_stream_key
 from app.pipeline.plan import BroadcastSpec, Decision, OutcomeError, PlannedBroadcast, to_minute
 from app.platforms.base import BroadcastPlatform, PlatformError, StreamInfo, UpcomingBroadcast
 
@@ -88,8 +90,6 @@ def _group_by_channel(
         channel.id: (channel, []) for channel in channels
     }
     for item in planned:
-        if item.is_too_late:
-            continue      # слот внутри min_lead_minutes: площадку по нему не трогаем
         groups.setdefault(item.channel.id, (item.channel, []))[1].append(item)
     return list(groups.values())
 
@@ -137,41 +137,63 @@ class Reconciler:
         except PlatformError as error:
             LOGGER.warning("channel_unavailable channel=%s code=%s planned=%d", channel.id, error.code, len(items))
             for item in items:
+                if item.is_too_late:
+                    continue      # решения у него нет: ключа просто не будет, ошибкой это не считается
                 item.decision = Decision.ERROR
                 item.error = _platform_error(channel, error)
             return []
         for item in items:
-            self._decide(item, broadcasts)
+            if item.is_too_late:
+                self._read_key_only(item, broadcasts)
+            else:
+                self._decide(item, broadcasts)
             LOGGER.info(
-                "pair_decision slot_id=%s channel=%s decision=%s broadcast_id=%s rebind=%s",
+                "pair_decision slot_id=%s channel=%s decision=%s broadcast_id=%s stream_key=%s",
                 item.slot_id,
                 channel.id,
                 item.decision.value,
                 item.found.broadcast_id if item.found else "-",
-                item.is_rebind,
+                mask_stream_key(item.stream_key),
             )
         return self._orphans(channel, broadcasts, slot_ids)
 
     def _decide(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> None:
-        candidates: list[UpcomingBroadcast] = [
-            broadcast for broadcast in broadcasts if to_minute(broadcast.start_utc) == item.expected.start_minute
-        ]
-        found, stream, is_ambiguous = self._pick_candidate(item.channel, item.slot_id, candidates)
+        """Эфира на площадке нет — CREATE, что бы ни помнил журнал: действие одно и то же."""
+        found, stream, is_ambiguous = self._find(item, broadcasts)
         if is_ambiguous:
             item.decision = Decision.AMBIGUOUS
             return
         if found is None:
-            item.decision = Decision.RECREATE if item.broadcast_id else Decision.CREATE
+            item.decision = Decision.CREATE
             return
         item.found = found
         item.found_stream = stream
         item.actual = BroadcastSpec.from_platform(found, stream, self._platform.limits)
-        item.is_rebind = item.broadcast_id != found.broadcast_id
         if stream is None:
             item.decision = Decision.NO_STREAM
             return
+        item.take_found_key()
         item.changed_fields = item.actual.diff(item.expected)
         item.decision = Decision.UPDATE if item.changed_fields else Decision.MATCH
+
+    def _read_key_only(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> None:
+        """too_late: только опознать эфир и взять его ключ; не нашёлся — ключа нет, решение прежнее."""
+        found, stream, is_ambiguous = self._find(item, broadcasts)
+        if is_ambiguous or found is None or stream is None:
+            return
+        item.found = found
+        item.found_stream = stream
+        item.take_found_key()
+
+    def _find(
+        self,
+        item: PlannedBroadcast,
+        broadcasts: list[UpcomingBroadcast],
+    ) -> tuple[UpcomingBroadcast | None, StreamInfo | None, bool]:
+        candidates: list[UpcomingBroadcast] = [
+            broadcast for broadcast in broadcasts if to_minute(broadcast.start_utc) == item.expected.start_minute
+        ]
+        return self._pick_candidate(item.channel, item.slot_id, candidates)
 
     def _pick_candidate(
         self,

@@ -9,7 +9,6 @@ from app.package.model import Package, Slot
 from app.pipeline.plan import Decision
 from app.pipeline.selection import Selection, SkipReason, build_planned
 from app.platforms.fake import FakePlatform
-from app.state.registry import Registry
 from app.tests.conftest import build_form_spec, build_package_object
 
 KYIV_WINTER: timezone = timezone(timedelta(hours=2))
@@ -42,9 +41,9 @@ def _slot_map(*slots: Slot) -> dict[str, Slot]:
 
 
 def _select(slot_map: dict[str, Slot], config: PlanerConfig, now: datetime) -> Selection:
-    """Реальный production-путь: пакет-источник один на все слоты, журнал пуст."""
+    """Реальный production-путь: пакет-источник один на все слоты; журнал отбору не нужен."""
     sources: dict[str, Package] = {slot_id: _PACKAGE for slot_id in slot_map}
-    return build_planned(slot_map, sources, config, FakePlatform().limits, Registry(), now)
+    return build_planned(slot_map, sources, config, FakePlatform().limits, now)
 
 
 def test_too_late_slot_becomes_an_object_with_a_flag(now: datetime, make_config: ConfigFactory) -> None:

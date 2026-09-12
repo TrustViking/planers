@@ -1,22 +1,23 @@
 """Файл ключей keystreams\\keys.txt (ТЗ §5.5): производный, перегенерируется при каждом запуске.
 
 Строки строятся из объекта запланированного эфира, а в --status — из того, что нашлось
-на площадке: там объектов нет, есть эфиры с маркером планера.
+на площадке: там объектов нет, есть эфиры с маркером планера. Журнал не читается:
+статус формы говорит только о том, что планер сделал в этом запуске (ТЗ §5.5).
 """
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Final
 
 from app.core.dates import format_datetime_text, parse_date
+from app.output.report import form_reason_text
 from app.paths import PlanerPaths
 from app.pipeline.plan import PlannedBroadcast
 from app.pipeline.reconciler import MarkedBroadcast
 from app.platforms.base import broadcast_url_for
-from app.state.registry import FormStatus, Registration
 from app.ui import messages_ru as msg
 
 FIELD_SEPARATOR: Final[str] = " | "
@@ -36,21 +37,15 @@ class KeyRow:
     broadcast_url: str
 
 
-def form_status_text(registration: Registration | None) -> str:
-    """None — эфир есть на площадке, в журнале его нет (только --status)."""
-    if registration is None:
-        return msg.KEY_FORM_NEVER_SENT
-    return _form_text(registration.form_status, registration.form_sent_at, registration.last_error)
-
-
-def _form_text(status: FormStatus, sent_at: datetime | None, last_error: str | None) -> str:
-    if status is FormStatus.SENT:
+def form_status_text(item: PlannedBroadcast) -> str:
+    """Только этот запуск: передан сейчас, не передан новый или ключ прежний."""
+    if item.is_form_sent:
         return msg.KEY_FORM_SENT.format(
-            sent_at=format_datetime_text(sent_at) if sent_at else MISSING_VALUE
+            sent_at=format_datetime_text(item.form_sent_at) if item.form_sent_at else MISSING_VALUE
         )
-    if last_error:
-        return msg.KEY_FORM_FAILED.format(error=last_error)
-    return msg.KEY_FORM_WAITING
+    if item.is_new_key:
+        return msg.KEY_FORM_FAILED.format(reason=form_reason_text(item.last_error))
+    return msg.KEY_FORM_KEPT
 
 
 def key_row_from_planned(item: PlannedBroadcast) -> KeyRow:
@@ -60,21 +55,21 @@ def key_row_from_planned(item: PlannedBroadcast) -> KeyRow:
         date=item.date,
         time=item.time,
         account_name=item.account_name,
-        form_status_text=_form_text(item.form_status, item.form_sent_at, item.last_error),
+        form_status_text=form_status_text(item),
         stream_url=item.stream_url or MISSING_VALUE,
         stream_key=item.stream_key or MISSING_VALUE,
         broadcast_url=item.broadcast_url or MISSING_VALUE,
     )
 
 
-def key_row_from_marked(marked: MarkedBroadcast, registration: Registration | None) -> KeyRow:
-    """--status: ключ берётся с площадки, статус формы — из журнала, если запись есть."""
+def key_row_from_marked(marked: MarkedBroadcast) -> KeyRow:
+    """--status: ключ с площадки; в форму этот режим ничего не передаёт."""
     return KeyRow(
         language=marked.parts.language,
         date=marked.parts.date,
         time=marked.parts.time,
         account_name=marked.channel.account_name,
-        form_status_text=form_status_text(registration),
+        form_status_text=msg.KEY_FORM_KEPT,
         stream_url=marked.stream.ingestion_address,
         stream_key=marked.stream.stream_name,
         broadcast_url=broadcast_url_for(marked.channel, marked.broadcast.broadcast_id),

@@ -6,6 +6,7 @@
 
 Слот внутри min_lead_minutes не выбрасывается: у него есть канал, значит есть и объект,
 просто с признаком too_late. Иначе его ключ пропал бы из keys.txt ровно перед эфиром.
+Объект рождается только из пакета и канала: журнал здесь не читается (ТЗ §5.4).
 """
 from __future__ import annotations
 
@@ -19,7 +20,6 @@ from app.observability.logging_setup import get_logger
 from app.package.model import Package, Slot, slot_order_key
 from app.pipeline.plan import BroadcastSpec, Decision, PlannedBroadcast
 from app.platforms.base import PlatformLimits
-from app.state.registry import Registration, Registry
 
 LOGGER = get_logger("selection")
 
@@ -45,7 +45,6 @@ def build_planned(
     slot_sources: Mapping[str, Package],
     config: PlanerConfig,
     limits: PlatformLimits,
-    registry: Registry,
     now: datetime,
 ) -> Selection:
     """Два канала на один язык → два объекта (два эфира)."""
@@ -61,7 +60,7 @@ def build_planned(
             continue
         is_too_late: bool = slot.start - now < lead
         planned.extend(
-            _build_one(slot, slot_sources[slot.slot_id], channel, limits, registry, is_too_late)
+            _build_one(slot, slot_sources[slot.slot_id], channel, limits, is_too_late)
             for channel in channels
         )
     planned.sort(key=lambda item: (*slot_order_key(item.slot), item.channel.id))
@@ -79,10 +78,9 @@ def _build_one(
     source_package: Package,
     channel: ChannelConfig,
     limits: PlatformLimits,
-    registry: Registry,
     is_too_late: bool,
 ) -> PlannedBroadcast:
-    planned: PlannedBroadcast = PlannedBroadcast(
+    return PlannedBroadcast(
         slot=slot,
         source_package=source_package,
         channel=channel,
@@ -90,7 +88,3 @@ def _build_one(
         is_too_late=is_too_late,
         decision=Decision.TOO_LATE if is_too_late else Decision.CREATE,
     )
-    registration: Registration | None = registry.get(planned.key)
-    if registration is not None:
-        planned.apply_registration(registration)
-    return planned

@@ -6,8 +6,8 @@ from typing import Any
 
 from app.config.loader import PlanerConfig
 from app.package.model import Slot
-from app.pipeline.plan import BroadcastSpec, ChangedField, PlannedBroadcast
-from app.platforms.base import PlatformLimits, StreamInfo, UpcomingBroadcast
+from app.pipeline.plan import BroadcastSpec, ChangedField, Decision, OutcomeError, PlannedBroadcast
+from app.platforms.base import CreatedBroadcast, PlatformLimits, StreamInfo, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
 from app.state.registry import FormStatus, Registration
 from app.tests.conftest import build_planned
@@ -15,6 +15,13 @@ from app.tests.conftest import build_planned
 ConfigFactory = Callable[..., PlanerConfig]
 SlotFactory = Callable[..., Slot]
 LIMITS: PlatformLimits = PlatformLimits(title_max_chars=20, description_max_chars=40)
+CREATED: CreatedBroadcast = CreatedBroadcast(
+    broadcast_id="newbc",
+    broadcast_url="https://www.youtube.com/watch?v=newbc",
+    stream_id="S9",
+    stream_url="rtmp://a.rtmp.youtube.com/live2",
+    stream_key="newk-newk-newk-newk-newk",
+)
 
 
 def _broadcast(title: str, description: str, start: datetime, stream_id: str | None = "S1") -> UpcomingBroadcast:
@@ -118,64 +125,86 @@ def test_key_is_slot_and_channel(make_config: ConfigFactory, make_slot_object: S
     assert item.form is slot.form
 
 
-def test_registration_round_trip(make_config: ConfigFactory, make_slot_object: SlotFactory, now: datetime) -> None:
-    slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
-    item: PlannedBroadcast = build_planned(slot, make_config().channels[0])
-    registration: Registration = Registration(
-        slot_id=slot.slot_id,
-        channel_id="yt_ua",
-        account_name="Account yt_ua",
-        language="uk",
-        date=slot.date,
-        time=slot.time,
-        broadcast_id="bc1",
-        broadcast_url="https://www.youtube.com/watch?v=bc1",
-        stream_url="rtmp://a.rtmp.youtube.com/live2",
-        stream_key="abcd-abcd-abcd-abcd-abcd",
-        package_id=item.source_package.package_id,
-        created_at=datetime(2027, 3, 1, 10, 0),
-        form_status=FormStatus.SENT,
-        form_sent_at=datetime(2027, 3, 1, 10, 5),
-        previous_broadcast_ids=["old"],
-        last_error=None,
+def _with_found_key(item: PlannedBroadcast) -> PlannedBroadcast:
+    item.found = _broadcast(item.slot.title, item.slot.description, item.slot.start)
+    item.found_stream = _stream(item.slot_id)
+    item.take_found_key()
+    return item
+
+
+def test_object_is_born_without_key(make_config: ConfigFactory, make_slot_object: SlotFactory, now: datetime) -> None:
+    """Объект знает только пакет и канал: о прошлых запусках ему нечего помнить."""
+    item: PlannedBroadcast = build_planned(make_slot_object(now + timedelta(days=1), "uk"), make_config().channels[0])
+    assert (item.broadcast_id, item.broadcast_url, item.stream_url, item.stream_key) == (None, None, None, None)
+    assert (item.is_new_key, item.is_form_sent, item.is_new_key_undelivered) == (False, False, False)
+
+
+def test_found_key_is_taken_from_the_platform(
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    item: PlannedBroadcast = _with_found_key(
+        build_planned(make_slot_object(now + timedelta(days=1), "uk"), make_config().channels[0])
     )
-    item.apply_registration(registration)
-    assert item.to_registration() == registration
+    assert (item.broadcast_id, item.stream_key) == ("B1", "abcd-abcd-abcd-abcd-abcd")
+    assert (item.broadcast_url, item.stream_url) == ("https://www.youtube.com/watch?v=B1", "rtmp://a.rtmp.youtube.com/live2")
+    assert item.is_new_key is False                    # ключ найденного эфира — не новый
+    assert item.is_new_key_undelivered is False
 
 
-def test_needs_form_follows_status_not_creation(
+def test_only_new_key_waits_for_the_form(
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
     now: datetime,
 ) -> None:
     item: PlannedBroadcast = build_planned(make_slot_object(now + timedelta(days=1), "uk"), make_config().channels[0])
-    assert item.needs_form is False                    # ключа нет — отправлять нечего
-    item.stream_key = "abcd-abcd-abcd-abcd-abcd"
-    assert item.needs_form is True                     # ключ есть, подтверждения нет
-    item.form_status = FormStatus.SENT
-    assert item.needs_form is False
+    item.take_new_key(CREATED)
+    assert (item.broadcast_id, item.stream_key, item.is_new_key) == ("newbc", CREATED.stream_key, True)
+    assert item.is_new_key_undelivered is True
+    item.is_form_sent = True
+    assert item.is_new_key_undelivered is False
 
 
-def test_remember_broadcast_keeps_previous_id_on_recreate(
+def test_kept_key_is_match_or_update_without_new_key(
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
     now: datetime,
 ) -> None:
-    item: PlannedBroadcast = build_planned(make_slot_object(now + timedelta(days=1), "uk"), make_config().channels[0])
-    item.broadcast_id = "oldbc"
-    item.form_status = FormStatus.SENT
-    item.remember_broadcast(
-        broadcast_id="newbc",
-        broadcast_url="https://www.youtube.com/watch?v=newbc",
-        stream_url="rtmp://a.rtmp.youtube.com/live2",
-        stream_key="abcd-abcd-abcd-abcd-abcd",
-        created_at=datetime(2027, 3, 16, 12, 0),
-        is_recreate=True,
+    item: PlannedBroadcast = _with_found_key(
+        build_planned(make_slot_object(now + timedelta(days=1), "uk"), make_config().channels[0])
     )
-    assert item.previous_broadcast_ids == ["oldbc"]
-    assert item.broadcast_id == "newbc"
-    assert item.form_status is FormStatus.PENDING      # новый ключ — новая отправка
-    assert item.form_sent_at is None
+    for decision, expected in ((Decision.MATCH, True), (Decision.UPDATE, True), (Decision.TOO_LATE, False)):
+        item.decision = decision
+        assert item.has_kept_key is expected
+    item.decision = Decision.UPDATE
+    item.error = OutcomeError(origin="youtube", code="forbidden")
+    assert item.has_kept_key is False                  # исправление не удалось — это ошибка, не прежний ключ
+    item.error = None
+    item.take_new_key(CREATED)                         # привязка потока: ключ новый
+    assert item.has_kept_key is False
+
+
+def test_registration_records_this_run_only(
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """Журнал — запись о сделанном: previous_broadcast_ids всегда пуст, статус формы — этого запуска."""
+    recorded_at: datetime = datetime(2027, 3, 16, 12, 0)
+    channel: Any = make_config().channels[0]
+    kept: PlannedBroadcast = _with_found_key(build_planned(make_slot_object(now + timedelta(days=1), "uk"), channel))
+    kept_registration: Registration = kept.to_registration(recorded_at)
+    assert (kept_registration.form_status, kept_registration.form_sent_at) == (FormStatus.NOT_SENT, None)
+    assert (kept_registration.previous_broadcast_ids, kept_registration.created_at) == ([], recorded_at)
+    assert kept_registration.stream_key == "abcd-abcd-abcd-abcd-abcd"
+    fresh: PlannedBroadcast = build_planned(make_slot_object(now + timedelta(days=2), "uk"), channel)
+    fresh.take_new_key(CREATED)
+    assert fresh.to_registration(recorded_at).form_status is FormStatus.PENDING
+    fresh.is_form_sent = True
+    fresh.form_sent_at = recorded_at
+    sent: Registration = fresh.to_registration(recorded_at)
+    assert (sent.form_status, sent.form_sent_at, sent.stream_key) == (FormStatus.SENT, recorded_at, CREATED.stream_key)
 
 
 def test_package_fields_survive_platform_data(

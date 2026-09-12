@@ -94,32 +94,16 @@ def test_save_leaves_no_temp_file(tmp_path: Path) -> None:
     assert [item.name for item in path.parent.iterdir()] == ["registry.json"]
 
 
-def test_mark_form_sent(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", list(FormStatus))
+def test_every_form_status_round_trips(tmp_path: Path, status: FormStatus) -> None:
+    """not_sent — ключ прежний; старые файлы с pending и sent читаются как раньше."""
+    path: Path = tmp_path / "registry.json"
     registry: Registry = Registry()
-    registry.upsert(_registration(form_status=FormStatus.PENDING, form_sent_at=None))
-    registry.mark_form_sent(KEY, datetime(2026, 9, 14, 8, 30))
-    registration: Registration | None = registry.get(KEY)
-    assert registration is not None
-    assert (registration.form_status, registration.form_sent_at) == (FormStatus.SENT, datetime(2026, 9, 14, 8, 30))
-
-
-def test_mark_recreated_keeps_history_and_resets_form() -> None:
-    registry: Registry = _filled_registry()
-    registry.mark_recreated(
-        KEY,
-        broadcast_id="new456",
-        broadcast_url="https://www.youtube.com/watch?v=new456",
-        stream_url="rtmp://a.rtmp.youtube.com/live2",
-        stream_key="yyyy-yyyy-yyyy-yyyy-yyyy",
-        created_at=datetime(2026, 9, 15, 9, 0),
-    )
-    registration: Registration | None = registry.get(KEY)
-    assert registration is not None
-    assert registration.broadcast_id == "new456"
-    assert registration.previous_broadcast_ids == ["abc123"]
-    assert registration.form_status is FormStatus.PENDING
-    assert registration.form_sent_at is None
-    assert registration.created_at == datetime(2026, 9, 15, 9, 0)
+    registration: Registration = _registration(form_status=status, form_sent_at=None)
+    registry.upsert(registration)
+    registry.save(path)
+    assert Registry.load(path).get(KEY) == registration
+    assert json.loads(path.read_text(encoding="utf-8"))["registrations"][KEY]["form_status"] == status.value
 
 
 def test_note_package_keeps_first_seen() -> None:
@@ -136,8 +120,3 @@ def test_unknown_schema_version_is_rejected(tmp_path: Path) -> None:
     path.write_text(json.dumps({"schema_version": 2, "registrations": {}, "packages": {}}), encoding="utf-8")
     with pytest.raises(RegistryError):
         Registry.load(path)
-
-
-def test_mark_unknown_key_is_rejected() -> None:
-    with pytest.raises(RegistryError):
-        Registry().mark_form_sent(KEY, datetime(2026, 9, 14, 8, 30))
