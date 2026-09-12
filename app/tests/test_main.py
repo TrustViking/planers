@@ -94,10 +94,18 @@ def _ready(root: Path) -> None:
     _write_bindings(root)
 
 
-def test_full_run_is_not_available_before_task_3b(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_without_flags_checks_channels_and_names_3b(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Двойной клик по planer.bat: проверка каналов и честная строка про задачу 3b."""
     _ready(planer_root)
-    assert run_cli([]) == 2
-    assert msg.FULL_RUN_NOT_AVAILABLE_YET in capsys.readouterr().out
+    assert run_cli([]) == 0
+    out: str = capsys.readouterr().out
+    assert msg.FIRST_RUN_HEADER in out
+    assert msg.CHECK_ALL_OK in out
+    assert msg.FULL_RUN_NOT_AVAILABLE_YET in out
     assert not (planer_root / "state" / "registry.json").exists()
 
 
@@ -123,16 +131,24 @@ def test_missing_client_secret_exits_2(planer_root: Path, capsys: pytest.Capture
     assert "client_secret.json" in capsys.readouterr().out
 
 
-def test_missing_token_stops_dry_run(
+def test_missing_token_triggers_authorization(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """ТЗ §5.3 п.1-2: токена нет — браузер открывается сам, запуск продолжается."""
     _write_config(planer_root)
-    assert run_cli(["--dry-run"]) == 2
+    monkeypatch.setattr(
+        main_module,
+        "load_credentials",
+        lambda client_secret, token_file, force_reauth=False: token_file.write_text("{}", encoding="utf-8"),
+    )
+    assert run_cli(["--dry-run"]) == 3          # авторизовались, а пакетов в promo нет
     out: str = capsys.readouterr().out
-    assert "--auth yt_ua" in out
-    assert fake_platform_in_main.describe_calls == []
+    assert "Google hasn't verified this app" in out
+    assert fake_platform_in_main.describe_calls != []
+    assert (planer_root / "state" / "channels.json").exists()
 
 
 def test_binding_mismatch_stops_dry_run(
@@ -257,16 +273,24 @@ def test_check_reports_disabled_streaming_and_exits_1(
     assert msg.CHECK_HAS_PROBLEMS in out
 
 
-def test_check_without_token_asks_for_auth(
+def test_check_authorizes_channel_without_token(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
     _write_tokens(planer_root, "yt_ua")
     _write_bindings(planer_root, {"yt_ua": "UCfakeyt_ua"})
-    assert run_cli(["--check"]) == 1
-    assert "planer.bat --auth yt_ru" in capsys.readouterr().out
+    monkeypatch.setattr(
+        main_module,
+        "load_credentials",
+        lambda client_secret, token_file, force_reauth=False: token_file.write_text("{}", encoding="utf-8"),
+    )
+    assert run_cli(["--check"]) == 0
+    out: str = capsys.readouterr().out
+    assert msg.CHECK_AUTHORIZING.format(key="yt_ru") in out
+    assert msg.CHECK_ALL_OK in out
 
 
 def test_auth_all_writes_bindings(

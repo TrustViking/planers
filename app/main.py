@@ -102,10 +102,6 @@ def _requested_run_mode(args: argparse.Namespace) -> RunMode | None:
 
 
 def _run(args: argparse.Namespace, paths: PlanerPaths) -> int:
-    mode: RunMode | None = _requested_run_mode(args)
-    if mode is None and not args.check and args.auth is None:
-        _say(msg.FULL_RUN_NOT_AVAILABLE_YET)
-        return int(ExitCode.CONFIG)
     dependencies: _Dependencies | None = _build_dependencies(paths)
     if dependencies is None:
         return int(ExitCode.CONFIG)
@@ -113,7 +109,9 @@ def _run(args: argparse.Namespace, paths: PlanerPaths) -> int:
         return _run_auth(args.auth, paths, dependencies)
     if args.check:
         return _run_check(paths, dependencies)
-    assert mode is not None  # развилка выше не оставляет другого варианта
+    mode: RunMode | None = _requested_run_mode(args)
+    if mode is None:
+        return _run_first(paths, dependencies)
     return _run_pipeline(mode, paths, dependencies)
 
 
@@ -178,6 +176,14 @@ def _auth_targets(
         )
         return None
     return (channel,)
+
+
+def _ensure_authorized(channel: ChannelConfig, paths: PlanerPaths, dependencies: _Dependencies) -> bool:
+    """Токена нет — авторизуем прямо сейчас (ТЗ §5.3 п.1-2), браузер откроется сам."""
+    if token_file_for(paths.secrets_dir, channel.id).is_file():
+        return True
+    _say(msg.CHECK_AUTHORIZING.format(key=channel.id))
+    return _authorize_channel(channel, paths, dependencies)
 
 
 def _authorize_channel(channel: ChannelConfig, paths: PlanerPaths, dependencies: _Dependencies) -> bool:
@@ -248,6 +254,14 @@ def _remember_binding(
     return True
 
 
+def _run_first(paths: PlanerPaths, dependencies: _Dependencies) -> int:
+    """Без флагов (двойной клик по planer.bat): авторизовать недостающее и проверить каналы."""
+    _say(msg.FIRST_RUN_HEADER)
+    exit_code: int = _run_check(paths, dependencies)
+    _say(msg.FULL_RUN_NOT_AVAILABLE_YET)
+    return exit_code
+
+
 def _run_check(paths: PlanerPaths, dependencies: _Dependencies) -> int:
     _say(msg.CHECK_HEADER.format(path=paths.channels_file))
     failed: int = 0
@@ -260,8 +274,7 @@ def _run_check(paths: PlanerPaths, dependencies: _Dependencies) -> int:
 
 
 def _check_channel(channel: ChannelConfig, paths: PlanerPaths, dependencies: _Dependencies) -> bool:
-    if not token_file_for(paths.secrets_dir, channel.id).is_file():
-        _say(msg.CHECK_NEEDS_AUTH.format(key=channel.id))
+    if not _ensure_authorized(channel, paths, dependencies):
         return False
     try:
         info: ChannelInfo = dependencies.platform.describe_channel(channel)
@@ -323,8 +336,7 @@ def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies
 def _bindings_verified(paths: PlanerPaths, dependencies: _Dependencies) -> bool:
     """Перед чтением и записью — токен каждого канала ведёт на тот же канал (ТЗ §5.3)."""
     for channel in dependencies.config.channels:
-        if not token_file_for(paths.secrets_dir, channel.id).is_file():
-            _say(msg.CHECK_NEEDS_AUTH.format(key=channel.id))
+        if not _ensure_authorized(channel, paths, dependencies):
             return False
         try:
             info: ChannelInfo = dependencies.platform.describe_channel(channel)

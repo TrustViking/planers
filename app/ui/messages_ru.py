@@ -10,9 +10,12 @@ HELP_CHECK: Final[str] = "проверить авторизацию и прав�
 HELP_AUTH: Final[str] = "заново авторизовать канал (ключ из channels.yaml) или all — все каналы"
 HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из promo"
 HELP_DEBUG: Final[str] = "подробный лог в консоли"
+FIRST_RUN_HEADER: Final[str] = (
+    "Запуск без ключей: проверяю каналы. Канал без авторизации будет авторизован сейчас."
+)
 FULL_RUN_NOT_AVAILABLE_YET: Final[str] = (
-    "Полный запуск (создание эфиров) появится в задаче 3b; "
-    "сейчас доступны --auth, --check, --dry-run и --status"
+    "Создание эфиров появится в задаче 3b. Пока планер умеет: авторизовать каналы, "
+    "проверить их (--check), показать план по пакетам (--dry-run) и что уже запланировано (--status)."
 )
 REGISTRY_UNREADABLE: Final[str] = "Журнал {path} не читается: {error}. Ничего не делалось."
 
@@ -89,6 +92,7 @@ CHECK_CHANNEL_LANGUAGE_NOTE: Final[str] = (
     "язык стрима задаёт оператор в channels.yaml."
 )
 CHECK_NEEDS_AUTH: Final[str] = "- {key}: нужна авторизация — запустите: planer.bat --auth {key}"
+CHECK_AUTHORIZING: Final[str] = "- {key}: токена нет, авторизую канал."
 CHECK_CHANNEL_FAILED: Final[str] = "- {key}: {code} ({message})"
 CHECK_ALL_OK: Final[str] = "Все каналы на месте, трансляции включены."
 CHECK_HAS_PROBLEMS: Final[str] = "Часть каналов не прошла проверку — см. строки выше."
