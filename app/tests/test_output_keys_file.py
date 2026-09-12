@@ -31,6 +31,7 @@ def _channel(channel_id: str, account_name: str, language: str) -> ChannelConfig
         privacy=Privacy.PUBLIC,
         auto_start=True,
         set_thumbnail=True,
+        category_id="22",
     )
 
 

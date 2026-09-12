@@ -196,7 +196,7 @@ def planer_error_outcome(name: str, code: str, detail: str) -> PairOutcome:
 
 def build_warning_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
     """Предупреждения (§7.4 п.4): эфир в силе, код выхода не меняется."""
-    return [
+    lines: list[str] = [
         msg.WARNING_LINE.format(
             prefix=_slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name),
             step=msg.WARNING_STEP_TEXT.get(warning.step, warning.step),
@@ -206,6 +206,9 @@ def build_warning_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
         for item in planned
         for warning in item.warnings
     ]
+    if any(item.facts is not None and item.facts.live_chat_id for item in planned):
+        lines.append(msg.WARNING_LIVE_CHAT)      # один раз на запуск, а не на каждый эфир
+    return lines
 
 
 def _unique(lines: Iterable[str]) -> list[str]:
@@ -232,14 +235,22 @@ def _mismatches(item: PlannedBroadcast, facts: BroadcastFacts) -> list[tuple[str
     found: list[tuple[str, str, str]] = []
     _add_if_different(found, msg.MISMATCH_FIELD_TITLE, item.expected.title, normalize_title(facts.title))
     _add_description(found, item, facts)
-    _add_if_different(
-        found,
-        msg.MISMATCH_FIELD_START,
-        item.expected.start_minute.isoformat(),
-        facts.start_utc.isoformat() if facts.start_utc else MISSING_VALUE,
-    )
+    if facts.start_utc is not None:
+        # нет времени — сравнивать не с чем; прочерк владелец читал бы как расхождение
+        _add_if_different(
+            found,
+            msg.MISMATCH_FIELD_START,
+            item.expected.start_minute.isoformat(),
+            facts.start_utc.isoformat(),
+        )
     _add_if_different(found, msg.MISMATCH_FIELD_MARKER, item.expected.marker, facts.stream_marker or MISSING_VALUE)
     _add_if_different(found, msg.MISMATCH_FIELD_LANGUAGE, item.language, facts.default_language or MISSING_VALUE)
+    _add_if_different(
+        found,
+        msg.MISMATCH_FIELD_CATEGORY,
+        item.channel.category_id,
+        facts.category_id or MISSING_VALUE,
+    )
     if facts.made_for_kids:
         found.append((msg.MISMATCH_FIELD_AUDIENCE, msg.AUDIENCE_NOT_FOR_KIDS, msg.AUDIENCE_FOR_KIDS))
     return found

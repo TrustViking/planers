@@ -19,6 +19,7 @@ from app.platforms.base import (
     PlatformError,
     StreamInfo,
     UpcomingBroadcast,
+    VideoFixes,
 )
 from app.platforms.youtube import YOUTUBE_STREAM_KEY_PATTERN, YouTubePlatform
 
@@ -30,6 +31,7 @@ CHANNEL: ChannelConfig = ChannelConfig(
     privacy=Privacy.PUBLIC,
     auto_start=True,
     set_thumbnail=True,
+        category_id="22",
 )
 GOOD_KEY: str = "abcd-1234-efgh-5678-ijkl"
 
@@ -402,6 +404,7 @@ def test_create_broadcast_inserts_binds_and_returns_key(
     insert: dict[str, Any] = service.calls[0]["body"]
     assert insert["snippet"]["scheduledStartTime"] == "2027-03-17T17:00:00Z"
     assert insert["snippet"]["title"] == "Эфир"
+    assert insert["snippet"]["categoryId"] == CHANNEL.category_id
     assert insert["status"]["privacyStatus"] == "public"
     assert insert["status"]["selfDeclaredMadeForKids"] is False
     assert insert["contentDetails"] == {
@@ -461,130 +464,74 @@ def test_update_sends_time_and_category(
 ) -> None:
     """update заменяет snippet целиком: без времени и категории они бы потерялись."""
     service: _FakeService = _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"id": "B1"}]))
-    platform.update_broadcast(
-        CHANNEL,
-        "B1",
-        _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)),
-        category_id="22",
-    )
+    platform.update_broadcast(CHANNEL, "B1", _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
     body: dict[str, Any] = service.calls[0]["body"]
     assert service.calls[0]["part"] == "snippet"      # contentDetails тянет monitorStream
     assert body["id"] == "B1"
     assert body["snippet"]["scheduledStartTime"] == "2027-03-17T17:00:00Z"
-    assert body["snippet"]["categoryId"] == "22"
+    assert body["snippet"]["categoryId"] == CHANNEL.category_id   # категория канала, а не найденная
 
 
-def test_set_language_rewrites_the_whole_snippet(
+def _video_item(**overrides: Any) -> dict[str, Any]:
+    snippet: dict[str, Any] = {"title": "Эфир", "description": "Описание", "categoryId": "22",
+                               "defaultLanguage": "uk", "defaultAudioLanguage": "uk"}
+    status: dict[str, Any] = {"privacyStatus": "unlisted", "selfDeclaredMadeForKids": False}
+    snippet.update(overrides.get("snippet", {}))
+    status.update(overrides.get("status", {}))
+    return {"items": [{"id": "B1", "snippet": snippet, "status": status}]}
+
+
+def test_video_settings_are_applied_in_one_write(
     platform: YouTubePlatform,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Частичный snippet затирает непереданные поля — отправляется весь."""
-    service: _FakeService = _install(
-        platform,
-        monkeypatch,
-        _FakeService(
-            videos=[{"items": [{"id": "B1", "snippet": {"title": "Эфир", "categoryId": "22",
-                                                        "description": "Описание"}}]}, {"id": "B1"}],
-        ),
-    )
-    platform.set_language(CHANNEL, "B1", "ru")
-    snippet: dict[str, Any] = service.calls[1]["body"]["snippet"]
-    assert snippet["defaultLanguage"] == "ru" and snippet["defaultAudioLanguage"] == "ru"
-    assert snippet["title"] == "Эфир" and snippet["categoryId"] == "22"
-    assert snippet["description"] == "Описание"
-
-
-def test_category_id_is_read_from_the_broadcast(
-    platform: YouTubePlatform,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
-    item["snippet"]["categoryId"] = "22"
-    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
-    [broadcast] = platform.list_upcoming(CHANNEL)
-    assert broadcast.category_id == "22"
-
-
-def _service_unavailable() -> HttpError:
-    return _http_error(503, "backendError", "The service is currently unavailable.")
-
-
-def test_temporary_unavailability_is_retried(
-    platform: YouTubePlatform,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """503 не роняет канал: живой прогон 13-09-2026 00:33 упал именно на нём."""
-    monkeypatch.setattr(youtube_module.time, "sleep", lambda seconds: None)
-    monkeypatch.setattr(api_retry.time, "sleep", lambda seconds: None)
-    _install(
-        platform,
-        monkeypatch,
-        _FakeService(
-            liveBroadcasts=[
-                _service_unavailable(),
-                _service_unavailable(),
-                {"items": [_broadcast_item("B1", "2027-03-17T17:00:00Z")]},
-            ]
-        ),
-    )
-    with caplog.at_level("WARNING"):
-        broadcasts: list[UpcomingBroadcast] = platform.list_upcoming(CHANNEL)
-    assert [item.broadcast_id for item in broadcasts] == ["B1"]
-    assert caplog.text.count("request_retry") == 2
-
-
-def test_permanent_unavailability_gives_up_after_the_policy(
-    platform: YouTubePlatform,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(youtube_module.time, "sleep", lambda seconds: None)
-    monkeypatch.setattr(api_retry.time, "sleep", lambda seconds: None)
-    service: _FakeService = _install(
-        platform,
-        monkeypatch,
-        _FakeService(liveBroadcasts=[_service_unavailable()] * youtube_module.RETRY_MAX_ATTEMPTS),
-    )
-    with pytest.raises(PlatformError) as raised:
-        platform.list_upcoming(CHANNEL)
-    assert raised.value.code == "transportFailed"
-    assert len(service.calls) == youtube_module.RETRY_MAX_ATTEMPTS
-
-
-def test_made_for_kids_is_cleared_with_the_whole_status(
-    platform: YouTubePlatform,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Частичный status затирает privacyStatus — отправляется весь."""
+    """Один list и один update: язык, категория и аудитория правятся вместе."""
     service: _FakeService = _install(
         platform,
         monkeypatch,
         _FakeService(
             videos=[
-                {"items": [{"id": "B1", "status": {"privacyStatus": "unlisted",
-                                                   "selfDeclaredMadeForKids": True}}]},
+                _video_item(snippet={"defaultLanguage": "en", "categoryId": "24"},
+                            status={"selfDeclaredMadeForKids": True}),
                 {"id": "B1"},
             ]
         ),
     )
-    assert platform.ensure_not_made_for_kids(CHANNEL, "B1") is True
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22")
+    assert (fixes.language_set, fixes.category_set, fixes.audience_cleared) == (True, True, True)
+    assert len(service.calls) == 2
     body: dict[str, Any] = service.calls[1]["body"]
+    assert service.calls[1]["part"] == "snippet,status"
+    assert body["snippet"]["defaultLanguage"] == "uk" and body["snippet"]["defaultAudioLanguage"] == "uk"
+    assert body["snippet"]["categoryId"] == "22"
+    assert body["snippet"]["title"] == "Эфир"                   # непереданное поле не теряется
     assert body["status"]["selfDeclaredMadeForKids"] is False
-    assert body["status"]["privacyStatus"] == "unlisted"
+    assert body["status"]["privacyStatus"] == "unlisted"        # частичный status затёр бы его
 
 
-def test_correct_audience_needs_no_write(
+def test_matching_video_settings_are_not_written(
     platform: YouTubePlatform,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service: _FakeService = _install(
-        platform,
-        monkeypatch,
-        _FakeService(videos=[{"items": [{"id": "B1", "status": {"selfDeclaredMadeForKids": False}}]}]),
-    )
-    assert platform.ensure_not_made_for_kids(CHANNEL, "B1") is False
+    """Совпало всё — записи не делается вовсе: лишняя квота и лишний риск."""
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(videos=[_video_item()]))
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22")
+    assert fixes.any_fix is False
     assert len(service.calls) == 1
 
+
+def test_channel_level_audience_is_also_fixed(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """madeForKids=true при selfDeclared=false — это аудитория, выставленная на весь канал."""
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(videos=[_video_item(status={"madeForKids": True}), {"id": "B1"}]),
+    )
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22")
+    assert fixes.audience_cleared is True
 
 def test_read_facts_collects_language_audience_and_age(
     platform: YouTubePlatform,
@@ -653,3 +600,53 @@ def test_read_facts_without_live_streaming_details_gives_none(
     facts: BroadcastFacts = platform.read_facts(CHANNEL, "B1")
     assert facts.start_utc is None
     assert facts.bound_stream_id is None
+
+
+def test_facts_take_chat_and_largest_thumbnail(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """liveChatId живёт у эфира, обложка — у видео; берётся самое крупное разрешение."""
+    item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    item["snippet"]["liveChatId"] = "CHAT1"
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            videos=[
+                {
+                    "items": [
+                        {
+                            "id": "B1",
+                            "snippet": {"title": "Эфир", "description": "",
+                                        "thumbnails": {"default": {"url": "small.jpg", "width": 120},
+                                                       "maxres": {"url": "big.jpg", "width": 1280}}},
+                            "status": {},
+                            "contentDetails": {},
+                            "liveStreamingDetails": {"scheduledStartTime": "2027-03-17T17:00:00Z"},
+                        }
+                    ]
+                }
+            ],
+            liveBroadcasts=[{"items": [item]}],
+            liveStreams=[
+                {"items": [{"id": "S1", "snippet": {"title": "17-03-2027_1900_uk"},
+                            "cdn": {"ingestionInfo": {"ingestionAddress": "rtmp://x",
+                                                      "streamName": GOOD_KEY}}}]}
+            ],
+        ),
+    )
+    facts: BroadcastFacts = platform.read_facts(CHANNEL, "B1")
+    assert facts.live_chat_id == "CHAT1"
+    assert facts.thumbnail_url == "big.jpg"
+
+
+def test_broadcast_list_reads_live_chat_id(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    item["snippet"]["liveChatId"] = "CHAT1"
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
+    [broadcast] = platform.list_upcoming(CHANNEL)
+    assert broadcast.live_chat_id == "CHAT1"

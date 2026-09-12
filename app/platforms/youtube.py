@@ -1,7 +1,7 @@
 """YouTube Data API v3 (ТЗ §7.3, §7.4): чтение и планирование эфиров.
 
 Чтение: describe_channel, list_upcoming, get_stream. Планирование: create_broadcast,
-update_broadcast, attach_stream, set_language. Любой сбой наружу — только PlatformError.
+update_broadcast, attach_stream, apply_video_settings. Любой сбой наружу — только PlatformError.
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from app.platforms.base import (
     PlatformLimits,
     StreamInfo,
     UpcomingBroadcast,
+    VideoFixes,
     broadcast_url_for,
 )
 
@@ -47,8 +48,7 @@ STREAM_PARTS: Final[str] = "snippet,cdn"
 BROADCAST_INSERT_PARTS: Final[str] = "snippet,status,contentDetails"
 BROADCAST_UPDATE_PARTS: Final[str] = "snippet"   # без contentDetails: он требует monitorStream
 BIND_PARTS: Final[str] = "id,contentDetails"
-VIDEO_PARTS: Final[str] = "snippet"
-VIDEO_STATUS_PARTS: Final[str] = "status"
+VIDEO_SETTINGS_PARTS: Final[str] = "snippet,status"   # один проход: язык, категория, аудитория
 VIDEO_FACTS_PARTS: Final[str] = "snippet,status,contentDetails,liveStreamingDetails"
 AGE_RESTRICTED_RATING: Final[str] = "ytAgeRestricted"
 RFC3339_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
@@ -213,16 +213,14 @@ class YouTubePlatform:
         channel: ChannelConfig,
         broadcast_id: str,
         spec: BroadcastSpec,
-        category_id: str | None = None,
     ) -> None:
-        """update заменяет переданную часть целиком: время и категорию отправляем всегда."""
+        """update заменяет часть целиком: время и категорию канала отправляем всегда."""
         snippet: dict[str, Any] = {
             "title": spec.title,
             "description": spec.description,
             "scheduledStartTime": _rfc3339(spec.start_minute),
+            "categoryId": channel.category_id,
         }
-        if category_id:
-            snippet["categoryId"] = category_id
         self._execute(
             channel,
             "liveBroadcasts.update",
@@ -233,46 +231,51 @@ class YouTubePlatform:
         )
         LOGGER.info("broadcast_updated channel=%s broadcast_id=%s", channel.id, broadcast_id)
 
-    def set_language(self, channel: ChannelConfig, broadcast_id: str, language: str) -> None:
-        """Только read-modify-write: частичный snippet затирает непереданные поля."""
-        snippet: dict[str, Any] = dict(self._video_part(channel, broadcast_id, VIDEO_PARTS, "snippet"))
+    def apply_video_settings(
+        self,
+        channel: ChannelConfig,
+        broadcast_id: str,
+        language: str,
+        category_id: str,
+    ) -> VideoFixes:
+        """Одно чтение и не более одной записи: у liveBroadcast этих полей нет (§7.4).
+
+        Части snippet и status отправляются целиком: частичная часть затирает
+        непереданные поля, в том числе privacyStatus.
+        """
+        item: dict[str, Any] = self._video_item(channel, broadcast_id, VIDEO_SETTINGS_PARTS)
+        snippet: dict[str, Any] = dict(_mapping(item, "snippet"))
+        status: dict[str, Any] = dict(_mapping(item, "status"))
+        fixes: VideoFixes = VideoFixes(
+            language_set=snippet.get("defaultLanguage") != language
+            or snippet.get("defaultAudioLanguage") != language,
+            category_set=snippet.get("categoryId") != category_id,
+            audience_cleared=status.get("selfDeclaredMadeForKids") is not False
+            or status.get("madeForKids") is True,
+        )
+        if not fixes.any_fix:
+            return fixes
         snippet["defaultLanguage"] = language
         snippet["defaultAudioLanguage"] = language
-        self._execute(
-            channel,
-            "videos.update",
-            lambda service: service.videos().update(
-                part=VIDEO_PARTS,
-                body={"id": broadcast_id, "snippet": snippet},
-            ),
-        )
-        LOGGER.info(
-            "broadcast_language_set channel=%s broadcast_id=%s language=%s",
-            channel.id,
-            broadcast_id,
-            language,
-        )
-
-    def ensure_not_made_for_kids(self, channel: ChannelConfig, broadcast_id: str) -> bool:
-        """True — флаг стоял «для детей» и снят. Только через videos: liveBroadcasts.update его не берёт."""
-        status: dict[str, Any] = dict(self._video_part(channel, broadcast_id, VIDEO_STATUS_PARTS, "status"))
-        if status.get("selfDeclaredMadeForKids") is False and status.get("madeForKids") is not True:
-            return False
+        snippet["categoryId"] = category_id
         status["selfDeclaredMadeForKids"] = False
         self._execute(
             channel,
             "videos.update",
             lambda service: service.videos().update(
-                part=VIDEO_STATUS_PARTS,
-                body={"id": broadcast_id, "status": status},
+                part=VIDEO_SETTINGS_PARTS,
+                body={"id": broadcast_id, "snippet": snippet, "status": status},
             ),
         )
         LOGGER.info(
-            "made_for_kids_cleared channel=%s broadcast_id=%s",
+            "video_settings_applied channel=%s broadcast_id=%s language=%s category=%s audience=%s",
             channel.id,
             broadcast_id,
+            fixes.language_set,
+            fixes.category_set,
+            fixes.audience_cleared,
         )
-        return True
+        return fixes
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         """Что по факту лежит на платформе: язык, аудитория и возраст видны только у videos."""
@@ -290,7 +293,8 @@ class YouTubePlatform:
         rating: dict[str, Any] = _mapping(_mapping(item, "contentDetails"), "contentRating")
         # запланированное время у ресурса videos лежит в liveStreamingDetails, не в snippet
         live_details: dict[str, Any] = _mapping(item, "liveStreamingDetails")
-        stream_id: str | None = self._bound_stream_of(channel, broadcast_id)
+        broadcast: UpcomingBroadcast | None = self._broadcast_of(channel, broadcast_id)
+        stream_id: str | None = broadcast.stream_id if broadcast else None
         stream: StreamInfo | None = self.get_stream(channel, stream_id) if stream_id else None
         return BroadcastFacts(
             broadcast_id=broadcast_id,
@@ -305,25 +309,21 @@ class YouTubePlatform:
             category_id=_optional_text(snippet, "categoryId"),
             bound_stream_id=stream_id,
             stream_marker=stream.title if stream is not None else None,
+            live_chat_id=broadcast.live_chat_id if broadcast else None,
+            thumbnail_url=_largest_thumbnail(_mapping(snippet, "thumbnails")),
         )
 
-    def _bound_stream_of(self, channel: ChannelConfig, broadcast_id: str) -> str | None:
-        """Поток эфира: у videos его нет, спрашиваем сам эфир."""
+    def _broadcast_of(self, channel: ChannelConfig, broadcast_id: str) -> UpcomingBroadcast | None:
+        """Поток и чат: у videos их нет, спрашиваем сам эфир."""
         response: dict[str, Any] = self._execute(
             channel,
             "liveBroadcasts.list",
             lambda service: service.liveBroadcasts().list(part=BROADCAST_PARTS, id=broadcast_id),
         )
         items: list[dict[str, Any]] = _items(response)
-        return _bound_stream_id(items[0]) if items else None
+        return _broadcast_from_item(items[0], channel.id) if items else None
 
-    def _video_part(
-        self,
-        channel: ChannelConfig,
-        broadcast_id: str,
-        part: str,
-        key: str,
-    ) -> dict[str, Any]:
+    def _video_item(self, channel: ChannelConfig, broadcast_id: str, part: str) -> dict[str, Any]:
         """videos.list по id эфира: read-modify-write без чтения невозможен."""
         response: dict[str, Any] = self._execute(
             channel,
@@ -333,7 +333,7 @@ class YouTubePlatform:
         items: list[dict[str, Any]] = _items(response)
         if not items:
             raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"videos.list is empty for {broadcast_id}")
-        return _mapping(items[0], key)
+        return items[0]
 
     def _attach_new_stream(
         self,
@@ -450,6 +450,23 @@ class YouTubePlatform:
         return response
 
 
+def _largest_thumbnail(thumbnails: dict[str, Any]) -> str | None:
+    """Самое крупное доступное разрешение; поле справочное, в сравнении не участвует."""
+    best_url: str | None = None
+    best_width: int = -1
+    for value in thumbnails.values():
+        if not isinstance(value, dict):
+            continue
+        url: Any = value.get("url")
+        width: Any = value.get("width")
+        if not isinstance(url, str) or not url:
+            continue
+        current: int = width if isinstance(width, int) else 0
+        if current > best_width:
+            best_url, best_width = url, current
+    return best_url
+
+
 def _optional_text(raw: dict[str, Any], key: str) -> str | None:
     value: Any = raw.get(key)
     return value if isinstance(value, str) and value else None
@@ -471,6 +488,7 @@ def _broadcast_body(channel: ChannelConfig, spec: BroadcastSpec) -> dict[str, An
             "title": spec.title,
             "description": spec.description,
             "scheduledStartTime": _rfc3339(spec.start_minute),
+            "categoryId": channel.category_id,
         },
         "status": {
             "privacyStatus": channel.privacy.value,
@@ -558,6 +576,7 @@ def _broadcast_from_item(item: dict[str, Any], channel_key: str) -> UpcomingBroa
         title=_text(snippet, "title", allow_empty=True),
         description=_text(snippet, "description", allow_empty=True),
         stream_id=_bound_stream_id(item),
+        live_chat_id=_optional_text(snippet, "liveChatId"),
         category_id=category_id if isinstance(category_id, str) and category_id else None,
     )
 

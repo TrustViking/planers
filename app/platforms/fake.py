@@ -19,6 +19,7 @@ from app.platforms.base import (
     PlatformLimits,
     StreamInfo,
     UpcomingBroadcast,
+    VideoFixes,
     broadcast_url_for,
 )
 
@@ -56,13 +57,15 @@ class FakePlatform:
         self.fail_describe: dict[str, PlatformError] = {}  # channel_id → ошибка describe_channel
         self.fail_update: dict[str, PlatformError] = {}    # broadcast_id → ошибка update_broadcast
         self.fail_attach: dict[str, PlatformError] = {}    # broadcast_id → ошибка attach_stream
-        self.fail_language: dict[str, PlatformError] = {}  # broadcast_id → ошибка set_language
+        self.fail_settings: dict[str, PlatformError] = {}  # broadcast_id → ошибка apply_video_settings
         self.fail_thumbnail: dict[str, PlatformError] = {}  # broadcast_id → ошибка set_thumbnail
-        self.fail_audience: dict[str, PlatformError] = {}   # broadcast_id → ошибка аудитории
         self.fail_facts: dict[str, PlatformError] = {}      # broadcast_id → ошибка read_facts
         self.made_for_kids: dict[str, bool] = {}           # broadcast_id → как стоит на площадке
         self.age_restricted: set[str] = set()              # broadcast_id с ytAgeRestricted
-        self.audience_calls: list[str] = []
+        self.settings_calls: list[str] = []      # обращения к ресурсу видео на чтение
+        self.settings_writes: list[str] = []     # и на запись
+        self.categories: dict[str, str] = {}     # broadcast_id → категория на площадке
+        self.live_chat_ids: dict[str, str] = {}  # broadcast_id → id чата, если он заведён
         self.facts_calls: list[str] = []
         self.facts_override: dict[str, BroadcastFacts] = {}  # broadcast_id → готовый ответ read_facts
         self.thumbnails: list[FakeCall] = []
@@ -214,24 +217,33 @@ class FakePlatform:
             stream_key=stream.stream_name,
         )
 
-    def set_language(self, channel: ChannelConfig, broadcast_id: str, language: str) -> None:
-        if broadcast_id in self.fail_language:
-            raise self.fail_language[broadcast_id]
+    def apply_video_settings(
+        self,
+        channel: ChannelConfig,
+        broadcast_id: str,
+        language: str,
+        category_id: str,
+    ) -> VideoFixes:
+        self.settings_calls.append(broadcast_id)
+        if broadcast_id in self.fail_settings:
+            raise self.fail_settings[broadcast_id]
+        fixes: VideoFixes = VideoFixes(
+            language_set=self.languages.get(broadcast_id) != language,
+            category_set=self.categories.get(broadcast_id) != category_id,
+            audience_cleared=self.made_for_kids.get(broadcast_id, False),
+        )
+        if not fixes.any_fix:
+            return fixes
         self.languages[broadcast_id] = language
+        self.categories[broadcast_id] = category_id
+        self.made_for_kids[broadcast_id] = False
+        self.settings_writes.append(broadcast_id)
+        return fixes
 
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
         if broadcast_id in self.fail_thumbnail:
             raise self.fail_thumbnail[broadcast_id]
         self.thumbnails.append(FakeCall(channel.id, broadcast_id, "", preview))
-
-    def ensure_not_made_for_kids(self, channel: ChannelConfig, broadcast_id: str) -> bool:
-        self.audience_calls.append(broadcast_id)
-        if broadcast_id in self.fail_audience:
-            raise self.fail_audience[broadcast_id]
-        if not self.made_for_kids.get(broadcast_id, False):
-            return False
-        self.made_for_kids[broadcast_id] = False
-        return True
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         self.facts_calls.append(broadcast_id)
@@ -256,9 +268,10 @@ class FakePlatform:
             age_restricted=broadcast_id in self.age_restricted,
             default_language=self.languages.get(broadcast_id),
             default_audio_language=self.languages.get(broadcast_id),
-            category_id=broadcast.category_id,
+            category_id=self.categories.get(broadcast_id, broadcast.category_id),
             bound_stream_id=broadcast.stream_id,
             stream_marker=stream.title if stream is not None else None,
+            live_chat_id=self.live_chat_ids.get(broadcast_id),
         )
 
     def _next_number(self) -> int:

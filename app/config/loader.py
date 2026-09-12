@@ -38,11 +38,12 @@ KEEP_DAYS_MINIMUM: Final[int] = 1
 DEFAULT_PRIVACY: Final[Privacy] = Privacy.PUBLIC
 DEFAULT_AUTO_START: Final[bool] = True
 DEFAULT_SET_THUMBNAIL: Final[bool] = True
+DEFAULT_CATEGORY_ID: Final[str] = "22"   # People & Blogs; справочник идентификаторов — у YouTube
 CHANNELS_KEY: Final[str] = "channels"
 TOP_LEVEL_KEYS: Final[frozenset[str]] = frozenset({"owner", "min_lead_minutes", "keep_days"})
 CHANNELS_TOP_LEVEL_KEYS: Final[frozenset[str]] = frozenset({CHANNELS_KEY})
 CHANNEL_KEYS: Final[frozenset[str]] = frozenset(
-    {"id", "platform", "account_name", "languages", "privacy", "auto_start", "set_thumbnail"}
+    {"id", "platform", "account_name", "languages", "privacy", "auto_start", "set_thumbnail", "category_id"}
 )
 
 
@@ -65,6 +66,7 @@ class ChannelConfig:
     privacy: Privacy
     auto_start: bool
     set_thumbnail: bool
+    category_id: str        # категория эфира на площадке; по справочнику YouTube не проверяется
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,7 @@ class _ConfigParser:
             privacy=self._privacy(mapping, prefix=prefix),
             auto_start=self._bool(mapping, "auto_start", prefix=prefix, default=DEFAULT_AUTO_START),
             set_thumbnail=self._bool(mapping, "set_thumbnail", prefix=prefix, default=DEFAULT_SET_THUMBNAIL),
+            category_id=self._category_id(mapping, prefix=prefix),
         )
 
     def _channel_id(self, mapping: dict[str, Any], *, prefix: str) -> str:
@@ -296,6 +299,13 @@ class _ConfigParser:
         if duplicates:
             raise self._error(key_path, msg.CONFIG_PROBLEM_LANGUAGE_DUPLICATE.format(value=duplicates[0]))
         return tuple(value)
+
+    def _category_id(self, mapping: dict[str, Any], *, prefix: str) -> str:
+        """Справочника категорий у планера нет: неизвестный id вернёт ошибку площадки."""
+        value: Any = mapping.get("category_id", DEFAULT_CATEGORY_ID)
+        if not isinstance(value, str) or not value.strip():
+            raise self._error(f"{prefix}category_id", msg.CONFIG_PROBLEM_NON_EMPTY_STRING)
+        return value
 
     def _privacy(self, mapping: dict[str, Any], *, prefix: str) -> Privacy:
         value: Any = mapping.get("privacy", DEFAULT_PRIVACY.value)

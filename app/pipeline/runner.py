@@ -50,8 +50,9 @@ from app.pipeline.plan import (
     BroadcastSpec,
     WARNING_STEP_AGE_RESTRICTED,
     WARNING_STEP_AUDIENCE,
+    WARNING_STEP_CATEGORY,
     WARNING_STEP_FACTS,
-    WARNING_STEP_LANGUAGE,
+    WARNING_STEP_SETTINGS,
     WARNING_STEP_THUMBNAIL,
     ChangedField,
     Decision,
@@ -66,6 +67,7 @@ from app.platforms.base import (
     BroadcastPlatform,
     CreatedBroadcast,
     PlatformError,
+    VideoFixes,
     broadcast_url_for,
 )
 from app.state.registry import FormStatus, Registry, RegistryError
@@ -443,7 +445,6 @@ class _Executor:
             mask_stream_key(created.stream_key),
         )
         self._set_thumbnail(item, created.broadcast_id)
-        self._set_language(item, created.broadcast_id)
 
     def _attach_stream(self, item: PlannedBroadcast) -> None:
         """Эфир есть, потока нет: привязываем поток и дальше ведём себя как с найденным."""
@@ -482,7 +483,6 @@ class _Executor:
             item.channel,
             broadcast_id,
             item.expected,
-            item.found.category_id if item.found else None,
         )
         LOGGER.info(
             "broadcast_updated slot_id=%s channel=%s broadcast_id=%s fields=%s",
@@ -518,7 +518,7 @@ class _Executor:
         broadcast_id: str | None = self._own_broadcast_id(item)
         if broadcast_id is None:
             return
-        self._ensure_audience(item, broadcast_id)
+        self._apply_video_settings(item, broadcast_id)
         self._read_facts(item, broadcast_id)
 
     @staticmethod
@@ -530,27 +530,29 @@ class _Executor:
             return None
         return item.broadcast_id or (item.found.broadcast_id if item.found else None)
 
-    def _ensure_audience(self, item: PlannedBroadcast, broadcast_id: str) -> None:
-        """Аудитория эфира всегда «не для детей»: настройка канала может её перебить."""
+    def _apply_video_settings(self, item: PlannedBroadcast, broadcast_id: str) -> None:
+        """Язык, категория и аудитория — одним проходом по ресурсу видео (§7.4)."""
         try:
-            was_fixed: bool = self._platform.ensure_not_made_for_kids(item.channel, broadcast_id)
+            fixes: VideoFixes = self._platform.apply_video_settings(
+                item.channel,
+                broadcast_id,
+                item.language,
+                item.channel.category_id,
+            )
         except PlatformError as error:
             LOGGER.warning(
-                "audience_check_failed slot_id=%s channel=%s code=%s",
+                "video_settings_failed slot_id=%s channel=%s code=%s",
                 item.slot_id,
                 item.channel.id,
                 error.code,
             )
-            item.warn(OutcomeWarning(WARNING_STEP_AUDIENCE, error.code, error.message))
+            item.warn(OutcomeWarning(WARNING_STEP_SETTINGS, error.code, error.message))
             return
-        if was_fixed:
-            LOGGER.info(
-                "made_for_kids_cleared slot_id=%s channel=%s broadcast_id=%s",
-                item.slot_id,
-                item.channel.id,
-                broadcast_id,
-            )
+        if fixes.audience_cleared:
             item.warn(OutcomeWarning(WARNING_STEP_AUDIENCE, "fixed"))
+        if fixes.category_set and item.found is not None:
+            # категория была другой только у найденного эфира: у созданного её ставит планер
+            item.warn(OutcomeWarning(WARNING_STEP_CATEGORY, item.channel.category_id))
 
     def _read_facts(self, item: PlannedBroadcast, broadcast_id: str) -> None:
         """Один раз на объект: что по факту лежит на платформе (§5.6)."""
@@ -584,19 +586,6 @@ class _Executor:
                 error.code,
             )
             item.warn(OutcomeWarning(WARNING_STEP_THUMBNAIL, error.code, error.message))
-
-    def _set_language(self, item: PlannedBroadcast, broadcast_id: str) -> None:
-        """Язык эфира — тоже не критично: ключ важнее."""
-        try:
-            self._platform.set_language(item.channel, broadcast_id, item.language)
-        except PlatformError as error:
-            LOGGER.warning(
-                "language_failed slot_id=%s channel=%s code=%s",
-                item.slot_id,
-                item.channel.id,
-                error.code,
-            )
-            item.warn(OutcomeWarning(WARNING_STEP_LANGUAGE, error.code, error.message))
 
     def _preview(self, item: PlannedBroadcast) -> bytes | None:
         """Случайное превью слота (§5.1) — если канал ставит превью и в слоте они есть."""

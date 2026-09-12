@@ -93,6 +93,7 @@ def build_config(
                 privacy=Privacy.PUBLIC,
                 auto_start=True,
                 set_thumbnail=True,
+        category_id="22",
             )
             for channel_id, languages in channels
         ),

@@ -29,6 +29,8 @@ EMPTY_MARKER: Final[str] = ""
 WARNING_STEP_THUMBNAIL: Final[str] = "thumbnail"
 WARNING_STEP_LANGUAGE: Final[str] = "language"
 WARNING_STEP_AUDIENCE: Final[str] = "audience"
+WARNING_STEP_CATEGORY: Final[str] = "category"
+WARNING_STEP_SETTINGS: Final[str] = "settings"
 WARNING_STEP_AGE_RESTRICTED: Final[str] = "age_restricted"
 WARNING_STEP_FACTS: Final[str] = "facts"
 

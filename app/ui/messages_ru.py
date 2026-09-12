@@ -154,6 +154,11 @@ MISMATCH_FIELD_START: Final[str] = "время старта"
 MISMATCH_FIELD_MARKER: Final[str] = "маркер потока"
 MISMATCH_FIELD_LANGUAGE: Final[str] = "язык"
 MISMATCH_FIELD_AUDIENCE: Final[str] = "аудитория"
+MISMATCH_FIELD_CATEGORY: Final[str] = "категория"
+WARNING_LIVE_CHAT: Final[str] = (
+    "- у эфиров включён живой чат. Через API он не отключается: если чат не нужен, "
+    "выключите его один раз в Студии на весь канал (Settings → Community)."
+)
 MISMATCH_DESCRIPTION: Final[str] = "{length} символов, начало «{head}»"
 AUDIENCE_NOT_FOR_KIDS: Final[str] = "не для детей"
 AUDIENCE_FOR_KIDS: Final[str] = "для детей"
@@ -161,6 +166,8 @@ WARNING_STEP_TEXT: Final[dict[str, str]] = {
     "thumbnail": "обложка не поставлена (нужен подтверждённый канал); эфир и ключ в силе",
     "language": "язык эфира не записан; эфир и ключ в силе",
     "audience": "аудитория эфира была «для детей» (настройка канала) — планер снял её; проверьте настройки канала",
+    "category": "категория эфира была другой — планер поставил ту, что в channels.yaml",
+    "settings": "не удалось применить настройки эфира (язык, категория, аудитория); эфир и ключ в силе",
     "age_restricted": "на эфире стоит возрастное ограничение 18+; через API оно не снимается — снимите вручную в Студии",
     "facts": "не удалось перечитать эфир после планирования; на сам эфир это не влияет",
 }
