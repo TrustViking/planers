@@ -15,6 +15,7 @@ from typing import Final
 
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import FILE_STAMP_FORMAT
+from app.core.text import normalize_description, normalize_title
 from app.package.promo import AcceptedPackage, PromoScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
@@ -23,7 +24,7 @@ from app.pipeline.plan import Decision, OutcomeError, PlannedBroadcast
 from app.state.registry import FormStatus
 from app.pipeline.reconciler import MarkedBroadcast
 from app.pipeline.selection import Selection, SkippedSlot, SkipReason
-from app.platforms.base import PlatformError, broadcast_url_for
+from app.platforms.base import BroadcastFacts, PlatformError, broadcast_url_for
 from app.ui import messages_ru as msg
 
 REPORT_FILE_TEMPLATE: Final[str] = "{stamp}_report.md"
@@ -31,6 +32,7 @@ REPORT_ENCODING: Final[str] = "utf-8"
 MISSING_VALUE: Final[str] = "-"
 # OutcomeError.origin для сбоев самого планера; расшифровка — PLANER_ERROR_TEXT в messages_ru.
 PLANER_ORIGIN: Final[str] = "planer"
+MISMATCH_HEAD_CHARS: Final[int] = 200   # описание в отчёт целиком не выводится
 
 
 class RunMode(str, Enum):
@@ -124,6 +126,7 @@ class RunReport:
     orphans: list[OrphanLine] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
     keys_file_path: str | None = None
     notice: str | None = None
 
@@ -211,6 +214,59 @@ def _unique(lines: Iterable[str]) -> list[str]:
     for line in lines:
         seen.setdefault(line, None)
     return list(seen)
+
+
+def build_mismatch_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
+    """Что хотели и что лежит на платформе (§5.6). Совпало всё — раздела в отчёте нет."""
+    lines: list[str] = []
+    for item in planned:
+        if item.facts is None:
+            continue
+        prefix: str = _slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name)
+        lines.extend(msg.MISMATCH_LINE.format(prefix=prefix, field=field, wanted=wanted, actual=actual)
+                     for field, wanted, actual in _mismatches(item, item.facts))
+    return lines
+
+
+def _mismatches(item: PlannedBroadcast, facts: BroadcastFacts) -> list[tuple[str, str, str]]:
+    found: list[tuple[str, str, str]] = []
+    _add_if_different(found, msg.MISMATCH_FIELD_TITLE, item.expected.title, normalize_title(facts.title))
+    _add_description(found, item, facts)
+    _add_if_different(
+        found,
+        msg.MISMATCH_FIELD_START,
+        item.expected.start_minute.isoformat(),
+        facts.start_utc.isoformat() if facts.start_utc else MISSING_VALUE,
+    )
+    _add_if_different(found, msg.MISMATCH_FIELD_MARKER, item.expected.marker, facts.stream_marker or MISSING_VALUE)
+    _add_if_different(found, msg.MISMATCH_FIELD_LANGUAGE, item.language, facts.default_language or MISSING_VALUE)
+    if facts.made_for_kids:
+        found.append((msg.MISMATCH_FIELD_AUDIENCE, msg.AUDIENCE_NOT_FOR_KIDS, msg.AUDIENCE_FOR_KIDS))
+    return found
+
+
+def _add_description(found: list[tuple[str, str, str]], item: PlannedBroadcast, facts: BroadcastFacts) -> None:
+    """Описание целиком в отчёт не выводится: длина и начало каждой стороны."""
+    wanted: str = item.expected.description
+    actual: str = normalize_description(facts.description)
+    if wanted == actual:
+        return
+    found.append(
+        (
+            msg.MISMATCH_FIELD_DESCRIPTION,
+            msg.MISMATCH_DESCRIPTION.format(length=len(wanted), head=_head(wanted)),
+            msg.MISMATCH_DESCRIPTION.format(length=len(actual), head=_head(actual)),
+        )
+    )
+
+
+def _head(text: str) -> str:
+    return text[:MISMATCH_HEAD_CHARS].replace(chr(10), ' ')
+
+
+def _add_if_different(found: list[tuple[str, str, str]], field: str, wanted: str, actual: str) -> None:
+    if wanted != actual:
+        found.append((field, wanted, actual))
 
 
 def _form_state(item: PlannedBroadcast) -> FormState | None:
@@ -310,6 +366,8 @@ def _append_run_body(lines: list[str], report: RunReport) -> None:
     _append_section(lines, msg.REPORT_SECTION_SKIPPED, report.skipped)
     if report.warnings:      # раздела нет, когда предупреждать не о чем
         _append_section(lines, msg.REPORT_SECTION_WARNINGS, report.warnings)
+    if report.mismatches:    # совпало всё — раздела нет
+        _append_section(lines, msg.REPORT_SECTION_MISMATCHES, report.mismatches)
     _append_section(lines, msg.REPORT_SECTION_ERRORS, errors)
     lines.append(
         msg.REPORT_TOTAL.format(

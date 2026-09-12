@@ -34,6 +34,7 @@ from app.output.report import (
     RunReport,
     build_package_lines,
     build_skipped_lines,
+    build_mismatch_lines,
     build_warning_lines,
     outcome_from_marked,
     outcome_from_planned,
@@ -46,6 +47,10 @@ from app.package.model import PackageError, read_preview
 from app.package.promo import PromoScan, scan_promo
 from app.paths import PlanerPaths
 from app.pipeline.plan import (
+    BroadcastSpec,
+    WARNING_STEP_AGE_RESTRICTED,
+    WARNING_STEP_AUDIENCE,
+    WARNING_STEP_FACTS,
     WARNING_STEP_LANGUAGE,
     WARNING_STEP_THUMBNAIL,
     ChangedField,
@@ -56,7 +61,13 @@ from app.pipeline.plan import (
 )
 from app.pipeline.reconciler import MarkedScan, OrphanBroadcast, Reconciler, split_marker
 from app.pipeline.selection import Selection, build_planned
-from app.platforms.base import BroadcastPlatform, CreatedBroadcast, PlatformError, broadcast_url_for
+from app.platforms.base import (
+    BroadcastFacts,
+    BroadcastPlatform,
+    CreatedBroadcast,
+    PlatformError,
+    broadcast_url_for,
+)
 from app.state.registry import FormStatus, Registry, RegistryError
 
 __all__ = ["ExitCode", "RunMode", "RunOutcome", "RunProblem", "run"]
@@ -66,6 +77,17 @@ LOGGER = get_logger("runner")
 ERROR_ORIGIN_PACKAGE: Final[str] = "package"
 ERROR_CODE_REGISTRY_SAVE: Final[str] = "registrySaveFailed"
 ERROR_CODE_KEYS_WRITE: Final[str] = "keysWriteFailed"
+MISSING_FIELD: Final[str] = "-"
+DESCRIPTION_HEAD_CHARS: Final[int] = 80
+# Ключи строк broadcast_expected и broadcast_actual — один набор на обе.
+SPEC_LOG_KEYS: Final[tuple[str, ...]] = (
+    "start",
+    "marker",
+    "title",
+    "title_len",
+    "description_len",
+    "description_head",
+)
 
 
 class ExitCode(IntEnum):
@@ -182,6 +204,7 @@ def _run_promo(context: _RunContext) -> RunOutcome:
         outcomes=outcomes,
         orphans=[_orphan_line(orphan) for orphan in orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
+        mismatches=build_mismatch_lines(selection.planned),
         warnings=build_warning_lines(selection.planned),
         keys_file_path=_display_path(context.paths, keys_path),
         notice=context.notice,
@@ -315,6 +338,56 @@ def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> No
         )
 
 
+def _describe_spec(spec: BroadcastSpec | None) -> dict[str, object]:
+    """Набор ключей для broadcast_expected и broadcast_actual — считается здесь, в одном месте."""
+    if spec is None:
+        return {key: MISSING_FIELD for key in SPEC_LOG_KEYS}
+    return {
+        "start": spec.start_minute.isoformat(),
+        "marker": spec.marker or MISSING_FIELD,
+        "title": _quoted(spec.title),
+        "title_len": len(spec.title),
+        "description_len": len(spec.description),
+        "description_head": _quoted(spec.description[:DESCRIPTION_HEAD_CHARS]),
+    }
+
+
+def _describe_facts(facts: BroadcastFacts) -> dict[str, object]:
+    return {
+        "privacy": facts.privacy_status or MISSING_FIELD,
+        "made_for_kids": facts.made_for_kids,
+        "age_restricted": facts.age_restricted,
+        "default_language": facts.default_language or MISSING_FIELD,
+        "default_audio_language": facts.default_audio_language or MISSING_FIELD,
+        "category_id": facts.category_id or MISSING_FIELD,
+        "bound_stream_id": facts.bound_stream_id or MISSING_FIELD,
+        "stream_marker": facts.stream_marker or MISSING_FIELD,
+    }
+
+
+def _quoted(text: str) -> str:
+    """Значение с пробелами — в кавычках: строка лога должна разбираться как key=value."""
+    return '\"' + _one_line(text) + '\"'
+
+
+def _one_line(text: str) -> str:
+    """Переводы строк — в \\n: строка лога должна оставаться одной строкой."""
+    return text.replace(chr(13), '').replace(chr(10), '\\n')
+
+
+def _log_line(item: PlannedBroadcast, fields: dict[str, object]) -> str:
+    identity: dict[str, object] = {"slot_id": item.slot_id, "channel": item.channel.id}
+    return " ".join(f"{key}={value}" for key, value in (identity | fields).items())
+
+
+def _log_broadcast_fields(item: PlannedBroadcast) -> None:
+    """Что хотели, что было в списке эфиров и что лежит на платформе — для разбора расхождений."""
+    LOGGER.info("broadcast_expected %s", _log_line(item, _describe_spec(item.expected)))
+    LOGGER.info("broadcast_actual %s", _log_line(item, _describe_spec(item.actual)))
+    if item.facts is not None:
+        LOGGER.info("broadcast_facts %s", _log_line(item, _describe_facts(item.facts)))
+
+
 class _Executor:
     """Действия полного запуска по решениям сверки (§7.3, §7.4); сбой объекта изолирован."""
 
@@ -325,6 +398,7 @@ class _Executor:
     def execute(self, item: PlannedBroadcast) -> None:
         try:
             self._dispatch(item)
+            self._finish(item)
         except PlatformError as error:
             LOGGER.warning("pair_failed slot_id=%s channel=%s code=%s", item.slot_id, item.channel.id, error.code)
             item.error = OutcomeError(origin=item.channel.platform.value, code=error.code, message=error.message)
@@ -438,6 +512,62 @@ class _Executor:
             item.found.broadcast_id,
             mask_stream_key(item.found_stream.stream_name),
         )
+
+    def _finish(self, item: PlannedBroadcast) -> None:
+        """Аудитория и снимок фактов — по каждому эфиру, который планер считает своим."""
+        broadcast_id: str | None = self._own_broadcast_id(item)
+        if broadcast_id is None:
+            return
+        self._ensure_audience(item, broadcast_id)
+        self._read_facts(item, broadcast_id)
+
+    @staticmethod
+    def _own_broadcast_id(item: PlannedBroadcast) -> str | None:
+        """Эфир планера: создан, привязан, исправлен или подтверждён. Прочие — не наше дело."""
+        if item.error is not None or item.is_too_late:
+            return None
+        if item.decision not in (Decision.CREATE, Decision.RECREATE, Decision.UPDATE, Decision.MATCH):
+            return None
+        return item.broadcast_id or (item.found.broadcast_id if item.found else None)
+
+    def _ensure_audience(self, item: PlannedBroadcast, broadcast_id: str) -> None:
+        """Аудитория эфира всегда «не для детей»: настройка канала может её перебить."""
+        try:
+            was_fixed: bool = self._platform.ensure_not_made_for_kids(item.channel, broadcast_id)
+        except PlatformError as error:
+            LOGGER.warning(
+                "audience_check_failed slot_id=%s channel=%s code=%s",
+                item.slot_id,
+                item.channel.id,
+                error.code,
+            )
+            item.warn(OutcomeWarning(WARNING_STEP_AUDIENCE, error.code, error.message))
+            return
+        if was_fixed:
+            LOGGER.info(
+                "made_for_kids_cleared slot_id=%s channel=%s broadcast_id=%s",
+                item.slot_id,
+                item.channel.id,
+                broadcast_id,
+            )
+            item.warn(OutcomeWarning(WARNING_STEP_AUDIENCE, "fixed"))
+
+    def _read_facts(self, item: PlannedBroadcast, broadcast_id: str) -> None:
+        """Один раз на объект: что по факту лежит на платформе (§5.6)."""
+        try:
+            item.facts = self._platform.read_facts(item.channel, broadcast_id)
+        except PlatformError as error:
+            LOGGER.warning(
+                "facts_read_failed slot_id=%s channel=%s code=%s",
+                item.slot_id,
+                item.channel.id,
+                error.code,
+            )
+            item.warn(OutcomeWarning(WARNING_STEP_FACTS, error.code, error.message))
+            return
+        _log_broadcast_fields(item)
+        if item.facts.age_restricted:
+            item.warn(OutcomeWarning(WARNING_STEP_AGE_RESTRICTED, "ytAgeRestricted", item.broadcast_url or ""))
 
     def _set_thumbnail(self, item: PlannedBroadcast, broadcast_id: str) -> None:
         """Превью не критично (ТЗ §7.4 п.4): эфир и ключ остаются в силе."""

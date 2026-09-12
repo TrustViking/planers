@@ -15,13 +15,22 @@ from typing import Final
 from app.config.loader import ChannelConfig
 from app.core.text import normalize_description, normalize_title, safe_trim
 from app.package.model import FormSpec, Package, Slot
-from app.platforms.base import PlatformLimits, StreamInfo, UpcomingBroadcast, broadcast_url_for
+from app.platforms.base import (
+    BroadcastFacts,
+    PlatformLimits,
+    StreamInfo,
+    UpcomingBroadcast,
+    broadcast_url_for,
+)
 from app.state.registry import FormStatus, Registration, Registry
 
 EMPTY_MARKER: Final[str] = ""
 # Шаги, сбой которых не отменяет эфир (ТЗ §7.4 п.4); тексты — в messages_ru.
 WARNING_STEP_THUMBNAIL: Final[str] = "thumbnail"
 WARNING_STEP_LANGUAGE: Final[str] = "language"
+WARNING_STEP_AUDIENCE: Final[str] = "audience"
+WARNING_STEP_AGE_RESTRICTED: Final[str] = "age_restricted"
+WARNING_STEP_FACTS: Final[str] = "facts"
 
 
 class ChangedField(str, Enum):
@@ -117,6 +126,7 @@ class PlannedBroadcast:
     found: UpcomingBroadcast | None = None
     found_stream: StreamInfo | None = None
     actual: BroadcastSpec | None = None
+    facts: BroadcastFacts | None = None   # что лежит на платформе после действий (§5.6)
 
     # --- решение сверки
     decision: Decision = Decision.CREATE

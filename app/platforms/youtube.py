@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
@@ -21,6 +22,7 @@ from app.google.auth import AuthError, load_credentials, token_file_for
 from app.observability.logging_setup import get_logger, mask_stream_key
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
+    BroadcastFacts,
     ChannelInfo,
     CreatedBroadcast,
     PlatformError,
@@ -46,6 +48,9 @@ BROADCAST_INSERT_PARTS: Final[str] = "snippet,status,contentDetails"
 BROADCAST_UPDATE_PARTS: Final[str] = "snippet"   # без contentDetails: он требует monitorStream
 BIND_PARTS: Final[str] = "id,contentDetails"
 VIDEO_PARTS: Final[str] = "snippet"
+VIDEO_STATUS_PARTS: Final[str] = "status"
+VIDEO_FACTS_PARTS: Final[str] = "snippet,status,contentDetails"
+AGE_RESTRICTED_RATING: Final[str] = "ytAgeRestricted"
 RFC3339_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
 INGESTION_TYPE: Final[str] = "rtmp"
 STREAM_RESOLUTION: Final[str] = "variable"
@@ -230,15 +235,7 @@ class YouTubePlatform:
 
     def set_language(self, channel: ChannelConfig, broadcast_id: str, language: str) -> None:
         """Только read-modify-write: частичный snippet затирает непереданные поля."""
-        response: dict[str, Any] = self._execute(
-            channel,
-            "videos.list",
-            lambda service: service.videos().list(part=VIDEO_PARTS, id=broadcast_id),
-        )
-        items: list[dict[str, Any]] = _items(response)
-        if not items:
-            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"videos.list is empty for {broadcast_id}")
-        snippet: dict[str, Any] = dict(_mapping(items[0], "snippet"))
+        snippet: dict[str, Any] = dict(self._video_part(channel, broadcast_id, VIDEO_PARTS, "snippet"))
         snippet["defaultLanguage"] = language
         snippet["defaultAudioLanguage"] = language
         self._execute(
@@ -255,6 +252,86 @@ class YouTubePlatform:
             broadcast_id,
             language,
         )
+
+    def ensure_not_made_for_kids(self, channel: ChannelConfig, broadcast_id: str) -> bool:
+        """True — флаг стоял «для детей» и снят. Только через videos: liveBroadcasts.update его не берёт."""
+        status: dict[str, Any] = dict(self._video_part(channel, broadcast_id, VIDEO_STATUS_PARTS, "status"))
+        if status.get("selfDeclaredMadeForKids") is False and status.get("madeForKids") is not True:
+            return False
+        status["selfDeclaredMadeForKids"] = False
+        self._execute(
+            channel,
+            "videos.update",
+            lambda service: service.videos().update(
+                part=VIDEO_STATUS_PARTS,
+                body={"id": broadcast_id, "status": status},
+            ),
+        )
+        LOGGER.info(
+            "made_for_kids_cleared channel=%s broadcast_id=%s",
+            channel.id,
+            broadcast_id,
+        )
+        return True
+
+    def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
+        """Что по факту лежит на платформе: язык, аудитория и возраст видны только у videos."""
+        response: dict[str, Any] = self._execute(
+            channel,
+            "videos.list",
+            lambda service: service.videos().list(part=VIDEO_FACTS_PARTS, id=broadcast_id),
+        )
+        items: list[dict[str, Any]] = _items(response)
+        if not items:
+            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"videos.list is empty for {broadcast_id}")
+        item: dict[str, Any] = items[0]
+        snippet: dict[str, Any] = _mapping(item, "snippet")
+        status: dict[str, Any] = _mapping(item, "status")
+        rating: dict[str, Any] = _mapping(_mapping(item, "contentDetails"), "contentRating")
+        stream_id: str | None = self._bound_stream_of(channel, broadcast_id)
+        stream: StreamInfo | None = self.get_stream(channel, stream_id) if stream_id else None
+        return BroadcastFacts(
+            broadcast_id=broadcast_id,
+            title=_text(snippet, "title", allow_empty=True),
+            description=_text(snippet, "description", allow_empty=True),
+            start_utc=_parse_start(snippet.get("scheduledStartTime")),
+            privacy_status=_optional_text(status, "privacyStatus"),
+            made_for_kids=_optional_bool(status, "madeForKids"),
+            age_restricted=rating.get("ytRating") == AGE_RESTRICTED_RATING,
+            default_language=_optional_text(snippet, "defaultLanguage"),
+            default_audio_language=_optional_text(snippet, "defaultAudioLanguage"),
+            category_id=_optional_text(snippet, "categoryId"),
+            bound_stream_id=stream_id,
+            stream_marker=stream.title if stream is not None else None,
+        )
+
+    def _bound_stream_of(self, channel: ChannelConfig, broadcast_id: str) -> str | None:
+        """Поток эфира: у videos его нет, спрашиваем сам эфир."""
+        response: dict[str, Any] = self._execute(
+            channel,
+            "liveBroadcasts.list",
+            lambda service: service.liveBroadcasts().list(part=BROADCAST_PARTS, id=broadcast_id),
+        )
+        items: list[dict[str, Any]] = _items(response)
+        return _bound_stream_id(items[0]) if items else None
+
+    def _video_part(
+        self,
+        channel: ChannelConfig,
+        broadcast_id: str,
+        part: str,
+        key: str,
+    ) -> dict[str, Any]:
+        """videos.list по id эфира: read-modify-write без чтения невозможен."""
+        response: dict[str, Any] = self._execute(
+            channel,
+            "videos.list",
+            lambda service: service.videos().list(part=part, id=broadcast_id),
+        )
+        items: list[dict[str, Any]] = _items(response)
+        if not items:
+            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"videos.list is empty for {broadcast_id}")
+        return _mapping(items[0], key)
 
     def _attach_new_stream(
         self,
@@ -332,6 +409,27 @@ class YouTubePlatform:
         return service
 
     def _execute(self, channel: ChannelConfig, operation: str, request_builder: Any) -> dict[str, Any]:
+        """Временная недоступность площадки (5xx) — не повод ронять канал: повторяем."""
+        for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+            try:
+                return self._execute_once(channel, operation, request_builder)
+            except PlatformError as error:
+                if error.code != ERROR_TRANSPORT or attempt >= RETRY_MAX_ATTEMPTS:
+                    raise
+                delay_sec: float = RETRY_POLICY.compute_delay(attempt)
+                LOGGER.warning(
+                    "request_retry operation=%s channel=%s attempt=%d/%d delay_sec=%.1f code=%s",
+                    operation,
+                    channel.id,
+                    attempt,
+                    RETRY_MAX_ATTEMPTS,
+                    delay_sec,
+                    error.code,
+                )
+                time.sleep(delay_sec)
+        raise PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.id}: retries exhausted")
+
+    def _execute_once(self, channel: ChannelConfig, operation: str, request_builder: Any) -> dict[str, Any]:
         service: Any = self._service(channel)
         try:
             response: Any = execute_with_retry(
@@ -348,6 +446,16 @@ class YouTubePlatform:
         if not isinstance(response, dict):
             raise PlatformError(ERROR_BAD_RESPONSE, f"{operation} returned {type(response).__name__}")
         return response
+
+
+def _optional_text(raw: dict[str, Any], key: str) -> str | None:
+    value: Any = raw.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_bool(raw: dict[str, Any], key: str) -> bool | None:
+    value: Any = raw.get(key)
+    return value if isinstance(value, bool) else None
 
 
 def _rfc3339(value: datetime) -> str:
@@ -433,7 +541,8 @@ def _broadcast_from_item(item: dict[str, Any], channel_key: str) -> UpcomingBroa
     start_text: Any = snippet.get("scheduledStartTime")
     start_utc: datetime | None = _parse_start(start_text)
     if start_utc is None:
-        LOGGER.warning(
+        # у канала бывает дефолтный эфир без времени старта — это норма, не проблема
+        LOGGER.debug(
             "broadcast_without_start channel=%s broadcast_id=%s value=%r",
             channel_key,
             broadcast_id,

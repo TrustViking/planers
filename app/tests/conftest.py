@@ -55,6 +55,7 @@ def build_slot_spec(
     *,
     previews: int = 1,
     title: str | None = None,
+    description: str | None = None,
 ) -> dict[str, Any]:
     """Слот манифеста §5.1; start — те же дата и время по Киеву (зимнее смещение +02:00)."""
     slot_id: str = build_slot_id(date_text, time_text, language)
@@ -67,7 +68,7 @@ def build_slot_spec(
         "start": start.isoformat(),
         "language": language,
         "title": title or f"Эфир {slot_id}",
-        "description": "Описание эфира",
+        "description": description or "Описание эфира",
         "previews": [f"previews/{slot_id}_{index}.jpg" for index in range(1, previews + 1)],
         "sources": ["https://www.youtube.com/watch?v=abcdefghijk"],
     }

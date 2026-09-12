@@ -56,6 +56,29 @@ class StreamInfo:
 
 
 @dataclass(frozen=True)
+class BroadcastFacts:
+    """Что по факту лежит на платформе после действий планера.
+
+    Язык, аудитория и возрастное ограничение в ответе liveBroadcasts.list не приходят:
+    их видно только у ресурса videos с тем же id. Без этого разбирать расхождения нечем.
+    """
+
+    broadcast_id: str
+    title: str
+    description: str
+    start_utc: datetime | None
+    privacy_status: str | None
+    made_for_kids: bool | None
+    age_restricted: bool          # ytRating == ytAgeRestricted; через API только читается
+    default_language: str | None
+    default_audio_language: str | None
+    category_id: str | None
+    bound_stream_id: str | None
+    stream_marker: str | None
+    thumbnail_url: str | None = None
+
+
+@dataclass(frozen=True)
 class CreatedBroadcast:
     broadcast_id: str
     broadcast_url: str
@@ -128,6 +151,14 @@ class BroadcastPlatform(Protocol):
 
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
         """Обложка эфира (§7.4 п.4). Сбой не отменяет эфир — решает вызывающий."""
+        ...
+
+    def ensure_not_made_for_kids(self, channel: ChannelConfig, broadcast_id: str) -> bool:
+        """Аудитория эфира — всегда «не для детей». True, если флаг пришлось снимать."""
+        ...
+
+    def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
+        """Что лежит на платформе: для разбора расхождений (§5.6)."""
         ...
 
 

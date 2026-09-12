@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import random
+import re
+
+import pytest
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +14,7 @@ from app.output.report import FormState, OutcomeKind, PackageLineStatus
 from app.paths import PlanerPaths
 from app.pipeline.plan import PlannedBroadcast
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
-from app.platforms.base import PlatformError, UpcomingBroadcast
+from app.platforms.base import BroadcastFacts, PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
 from app.state.registry import FormStatus, Registration, Registry
 from app.tests.conftest import FORM_SPEC, FakeFormSender
@@ -425,6 +428,149 @@ def test_one_failed_object_does_not_block_the_others(
     assert _loaded(planer_paths, UK_KEY) is None
     assert _loaded(planer_paths, "18-03-2027_1900_ru|yt_ru") is not None
     assert len(fake_platform.created) == 1
+
+def test_made_for_kids_is_fixed_and_warned(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Настройка канала может перебить флаг: планер снимает его и говорит об этом владельцу."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.promo_dir, slots=[spec])
+    found: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT,
+    )
+    fake_platform.made_for_kids[found.broadcast_id] = True
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.OK
+    assert fake_platform.made_for_kids[found.broadcast_id] is False
+    assert "аудитория эфира была «для детей»" in (outcome.report_text or "")
+
+
+def test_audience_failure_is_a_warning(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    fake_platform.fail_audience["fakebc00001"] = PlatformError("forbidden", "нельзя")
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.OK
+    assert _loaded(planer_paths, UK_KEY) is not None
+    assert outcome.report is not None and outcome.report.warnings
+
+
+def test_age_restricted_broadcast_is_reported_but_not_an_error(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Возрастное ограничение через API не снимается — только сказать владельцу."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.promo_dir, slots=[spec])
+    found: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT,
+    )
+    fake_platform.age_restricted.add(found.broadcast_id)
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.OK
+    assert "возрастное ограничение 18+" in (outcome.report_text or "")
+
+
+def test_facts_are_read_once_per_object(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(
+        planer_paths.promo_dir,
+        slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "ru")],
+    )
+    _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert len(fake_platform.facts_calls) == 2
+    assert len(set(fake_platform.facts_calls)) == 2
+
+
+def test_facts_are_not_read_for_too_late_and_ambiguous(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """too_late и AMBIGUOUS — не эфиры планера: их не трогают."""
+    soon: dict[str, Any] = make_slot("16-03-2027", "12:30", "uk")
+    ambiguous: dict[str, Any] = make_slot("18-03-2027", "19:00", "ru")
+    make_package(planer_paths.promo_dir, slots=[soon, ambiguous])
+    start: datetime = datetime.fromisoformat("2027-03-18T19:00:00+02:00")
+    fake_platform.seed_broadcast("yt_ru", start, "Ручной 1", "", marker=None)
+    fake_platform.seed_broadcast("yt_ru", start, "Ручной 2", "", marker="Мой поток")
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert fake_platform.facts_calls == []
+    assert fake_platform.audience_calls == []
+    assert outcome.report is not None
+
+
+def test_matching_broadcast_has_no_mismatch_section(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None and outcome.report.mismatches == []
+    assert "Расхождения с платформой" not in (outcome.report_text or "")
+
+
+def test_description_mismatch_is_reported_shortened(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Описание в отчёт целиком не выводится: длина и начало."""
+    long_text: str = "Очень длинное описание эфира. " * 40
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk", description=long_text)
+    make_package(planer_paths.promo_dir, slots=[spec])
+    found: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", UK_START, spec["title"], long_text, marker=UK_SLOT,
+    )
+    # у ресурса видео описание другое — в списке эфиров этого не видно
+    fake_platform.facts_override[found.broadcast_id] = BroadcastFacts(
+        broadcast_id=found.broadcast_id,
+        title=spec["title"],
+        description="Совсем другое описание",
+        start_utc=UK_START,
+        privacy_status="public",
+        made_for_kids=False,
+        age_restricted=False,
+        default_language="uk",
+        default_audio_language="uk",
+        category_id="22",
+        bound_stream_id="fakestream0001",
+        stream_marker=UK_SLOT,
+    )
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    text: str = outcome.report_text or ""
+    assert "Расхождения с платформой" in text
+    assert "описание — хотели:" in text
+    assert long_text.strip() not in text          # целиком не выводится
+
+
+def test_expected_and_actual_log_lines_share_keys(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Наборы ключей не должны разъезжаться: сравнивать строки иначе бессмысленно."""
+    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    with caplog.at_level("INFO"):
+        _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    lines: dict[str, str] = {
+        message.split(" ", 1)[0]: message
+        for message in caplog.messages
+        if message.startswith(("broadcast_expected", "broadcast_actual", "broadcast_facts"))
+    }
+    assert set(lines) == {"broadcast_expected", "broadcast_actual", "broadcast_facts"}
+    keys: dict[str, list[str]] = {
+        name: re.findall(r"(?:^| )([a-z_]+)=", message)
+        for name, message in lines.items()
+    }
+    assert keys["broadcast_expected"] == keys["broadcast_actual"]
+    assert keys["broadcast_facts"][:2] == keys["broadcast_expected"][:2]   # slot_id, channel
+    assert "description_head" in keys["broadcast_expected"]
+    assert "made_for_kids" in keys["broadcast_facts"]
 
 def test_all_past_package_stays_and_is_reported(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,

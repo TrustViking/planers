@@ -147,9 +147,22 @@ OUTCOME_STREAM_ATTACHED: Final[str] = (
 )
 WARNING_LINE: Final[str] = "- {prefix}: {step} — {code} ({message})"
 # ключи — WARNING_STEP_* (app/pipeline/plan.py)
+MISMATCH_LINE: Final[str] = "{prefix}: {field} — хотели: {wanted}; на платформе: {actual}"
+MISMATCH_FIELD_TITLE: Final[str] = "название"
+MISMATCH_FIELD_DESCRIPTION: Final[str] = "описание"
+MISMATCH_FIELD_START: Final[str] = "время старта"
+MISMATCH_FIELD_MARKER: Final[str] = "маркер потока"
+MISMATCH_FIELD_LANGUAGE: Final[str] = "язык"
+MISMATCH_FIELD_AUDIENCE: Final[str] = "аудитория"
+MISMATCH_DESCRIPTION: Final[str] = "{length} символов, начало «{head}»"
+AUDIENCE_NOT_FOR_KIDS: Final[str] = "не для детей"
+AUDIENCE_FOR_KIDS: Final[str] = "для детей"
 WARNING_STEP_TEXT: Final[dict[str, str]] = {
     "thumbnail": "обложка не поставлена (нужен подтверждённый канал); эфир и ключ в силе",
     "language": "язык эфира не записан; эфир и ключ в силе",
+    "audience": "аудитория эфира была «для детей» (настройка канала) — планер снял её; проверьте настройки канала",
+    "age_restricted": "на эфире стоит возрастное ограничение 18+; через API оно не снимается — снимите вручную в Студии",
+    "facts": "не удалось перечитать эфир после планирования; на сам эфир это не влияет",
 }
 OUTCOME_AMBIGUOUS: Final[str] = (
 
@@ -192,6 +205,7 @@ REPORT_SECTION_ORPHANS: Final[str] = "## Перенесён или отменё�
 REPORT_SECTION_SCHEDULED: Final[str] = "## Запланировано на каналах ({count})"
 REPORT_SECTION_SKIPPED: Final[str] = "## Пропущено"
 REPORT_SECTION_WARNINGS: Final[str] = "## Предупреждения"
+REPORT_SECTION_MISMATCHES: Final[str] = "## Расхождения с платформой"
 REPORT_SECTION_ERRORS: Final[str] = "## Ошибки"
 REPORT_TOTAL: Final[str] = (
     "Итог: создано {created}, исправлено {fixed}, копий {matched}, пропущено {skipped}, "

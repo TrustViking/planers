@@ -12,7 +12,14 @@ from app.config.loader import ChannelConfig, Platform, Privacy
 from app.google import api_retry
 from app.platforms import youtube as youtube_module
 from app.pipeline.plan import BroadcastSpec
-from app.platforms.base import ChannelInfo, CreatedBroadcast, PlatformError, StreamInfo, UpcomingBroadcast
+from app.platforms.base import (
+    BroadcastFacts,
+    ChannelInfo,
+    CreatedBroadcast,
+    PlatformError,
+    StreamInfo,
+    UpcomingBroadcast,
+)
 from app.platforms.youtube import YOUTUBE_STREAM_KEY_PATTERN, YouTubePlatform
 
 CHANNEL: ChannelConfig = ChannelConfig(
@@ -238,8 +245,9 @@ def test_broadcast_without_start_is_skipped(
     item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
     item["snippet"].pop("scheduledStartTime")
     _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         assert platform.list_upcoming(CHANNEL) == []
+    # дефолтный эфир канала без времени старта — норма, поэтому debug, а не warning
     assert "broadcast_without_start" in caplog.text
 
 
@@ -344,10 +352,12 @@ def test_transport_failure_becomes_platform_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(api_retry.time, "sleep", lambda seconds: None)   # без пауз между попытками
+    monkeypatch.setattr(youtube_module.time, "sleep", lambda seconds: None)
+    attempts: int = youtube_module.RETRY_MAX_ATTEMPTS * youtube_module.RETRY_MAX_ATTEMPTS
     _install(
         platform,
         monkeypatch,
-        _FakeService(liveBroadcasts=[ConnectionError("нет сети")] * youtube_module.RETRY_MAX_ATTEMPTS),
+        _FakeService(liveBroadcasts=[ConnectionError("нет сети")] * attempts),
     )
     with pytest.raises(PlatformError) as raised:
         platform.list_upcoming(CHANNEL)
@@ -494,3 +504,125 @@ def test_category_id_is_read_from_the_broadcast(
     [broadcast] = platform.list_upcoming(CHANNEL)
     assert broadcast.category_id == "22"
 
+
+def _service_unavailable() -> HttpError:
+    return _http_error(503, "backendError", "The service is currently unavailable.")
+
+
+def test_temporary_unavailability_is_retried(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """503 не роняет канал: живой прогон 13-09-2026 00:33 упал именно на нём."""
+    monkeypatch.setattr(youtube_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(api_retry.time, "sleep", lambda seconds: None)
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            liveBroadcasts=[
+                _service_unavailable(),
+                _service_unavailable(),
+                {"items": [_broadcast_item("B1", "2027-03-17T17:00:00Z")]},
+            ]
+        ),
+    )
+    with caplog.at_level("WARNING"):
+        broadcasts: list[UpcomingBroadcast] = platform.list_upcoming(CHANNEL)
+    assert [item.broadcast_id for item in broadcasts] == ["B1"]
+    assert caplog.text.count("request_retry") == 2
+
+
+def test_permanent_unavailability_gives_up_after_the_policy(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(youtube_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(api_retry.time, "sleep", lambda seconds: None)
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveBroadcasts=[_service_unavailable()] * youtube_module.RETRY_MAX_ATTEMPTS),
+    )
+    with pytest.raises(PlatformError) as raised:
+        platform.list_upcoming(CHANNEL)
+    assert raised.value.code == "transportFailed"
+    assert len(service.calls) == youtube_module.RETRY_MAX_ATTEMPTS
+
+
+def test_made_for_kids_is_cleared_with_the_whole_status(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Частичный status затирает privacyStatus — отправляется весь."""
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            videos=[
+                {"items": [{"id": "B1", "status": {"privacyStatus": "unlisted",
+                                                   "selfDeclaredMadeForKids": True}}]},
+                {"id": "B1"},
+            ]
+        ),
+    )
+    assert platform.ensure_not_made_for_kids(CHANNEL, "B1") is True
+    body: dict[str, Any] = service.calls[1]["body"]
+    assert body["status"]["selfDeclaredMadeForKids"] is False
+    assert body["status"]["privacyStatus"] == "unlisted"
+
+
+def test_correct_audience_needs_no_write(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(videos=[{"items": [{"id": "B1", "status": {"selfDeclaredMadeForKids": False}}]}]),
+    )
+    assert platform.ensure_not_made_for_kids(CHANNEL, "B1") is False
+    assert len(service.calls) == 1
+
+
+def test_read_facts_collects_language_audience_and_age(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Язык, аудитория и возраст видны только у videos, потока — у самого эфира."""
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            videos=[
+                {
+                    "items": [
+                        {
+                            "id": "B1",
+                            "snippet": {"title": "Эфир", "description": "Описание",
+                                        "defaultLanguage": "ru", "defaultAudioLanguage": "ru",
+                                        "categoryId": "22", "scheduledStartTime": "2027-03-17T17:00:00Z"},
+                            "status": {"privacyStatus": "unlisted", "madeForKids": False},
+                            "contentDetails": {"contentRating": {"ytRating": "ytAgeRestricted"}},
+                        }
+                    ]
+                }
+            ],
+            liveBroadcasts=[{"items": [_broadcast_item("B1", "2027-03-17T17:00:00Z")]}],
+            liveStreams=[
+                {
+                    "items": [
+                        {"id": "S1", "snippet": {"title": "17-03-2027_1900_uk"},
+                         "cdn": {"ingestionInfo": {"ingestionAddress": "rtmp://x", "streamName": GOOD_KEY}}}
+                    ]
+                }
+            ],
+        ),
+    )
+    facts: BroadcastFacts = platform.read_facts(CHANNEL, "B1")
+    assert (facts.default_language, facts.default_audio_language) == ("ru", "ru")
+    assert facts.made_for_kids is False
+    assert facts.age_restricted is True
+    assert (facts.privacy_status, facts.category_id) == ("unlisted", "22")
+    assert (facts.bound_stream_id, facts.stream_marker) == ("S1", "17-03-2027_1900_uk")

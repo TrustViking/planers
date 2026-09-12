@@ -12,6 +12,7 @@ from typing import Final
 from app.config.loader import ChannelConfig
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
+    BroadcastFacts,
     ChannelInfo,
     CreatedBroadcast,
     PlatformError,
@@ -57,6 +58,13 @@ class FakePlatform:
         self.fail_attach: dict[str, PlatformError] = {}    # broadcast_id → ошибка attach_stream
         self.fail_language: dict[str, PlatformError] = {}  # broadcast_id → ошибка set_language
         self.fail_thumbnail: dict[str, PlatformError] = {}  # broadcast_id → ошибка set_thumbnail
+        self.fail_audience: dict[str, PlatformError] = {}   # broadcast_id → ошибка аудитории
+        self.fail_facts: dict[str, PlatformError] = {}      # broadcast_id → ошибка read_facts
+        self.made_for_kids: dict[str, bool] = {}           # broadcast_id → как стоит на площадке
+        self.age_restricted: set[str] = set()              # broadcast_id с ytAgeRestricted
+        self.audience_calls: list[str] = []
+        self.facts_calls: list[str] = []
+        self.facts_override: dict[str, BroadcastFacts] = {}  # broadcast_id → готовый ответ read_facts
         self.thumbnails: list[FakeCall] = []
         self.attached: list[FakeCall] = []
         self.languages: dict[str, str] = {}                # broadcast_id → записанный язык
@@ -215,6 +223,43 @@ class FakePlatform:
         if broadcast_id in self.fail_thumbnail:
             raise self.fail_thumbnail[broadcast_id]
         self.thumbnails.append(FakeCall(channel.id, broadcast_id, "", preview))
+
+    def ensure_not_made_for_kids(self, channel: ChannelConfig, broadcast_id: str) -> bool:
+        self.audience_calls.append(broadcast_id)
+        if broadcast_id in self.fail_audience:
+            raise self.fail_audience[broadcast_id]
+        if not self.made_for_kids.get(broadcast_id, False):
+            return False
+        self.made_for_kids[broadcast_id] = False
+        return True
+
+    def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
+        self.facts_calls.append(broadcast_id)
+        if broadcast_id in self.fail_facts:
+            raise self.fail_facts[broadcast_id]
+        override: BroadcastFacts | None = self.facts_override.get(broadcast_id)
+        if override is not None:
+            return override
+        broadcast: UpcomingBroadcast | None = self._broadcasts.get(channel.id, {}).get(broadcast_id)
+        if broadcast is None:
+            raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.id}")
+        stream: StreamInfo | None = (
+            self._streams.get(channel.id, {}).get(broadcast.stream_id) if broadcast.stream_id else None
+        )
+        return BroadcastFacts(
+            broadcast_id=broadcast_id,
+            title=broadcast.title,
+            description=broadcast.description,
+            start_utc=broadcast.start_utc,
+            privacy_status=channel.privacy.value,
+            made_for_kids=self.made_for_kids.get(broadcast_id, False),
+            age_restricted=broadcast_id in self.age_restricted,
+            default_language=self.languages.get(broadcast_id),
+            default_audio_language=self.languages.get(broadcast_id),
+            category_id=broadcast.category_id,
+            bound_stream_id=broadcast.stream_id,
+            stream_marker=stream.title if stream is not None else None,
+        )
 
     def _next_number(self) -> int:
         self._counter += 1
