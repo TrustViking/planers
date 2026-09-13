@@ -10,6 +10,8 @@ HELP_CHECK: Final[str] = "проверить авторизацию и прав�
 HELP_AUTH: Final[str] = "заново авторизовать канал (ключ из channels.yaml) или all — все каналы"
 HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из promo"
 HELP_DEBUG: Final[str] = "подробный лог в консоли"
+HELP_VERSION: Final[str] = "показать номер версии и выйти"
+VERSION_TEXT: Final[str] = "Планер {version}"
 
 # --- конфиг (ТЗ §5.2)
 CONFIG_CREATED_FROM_EXAMPLE: Final[str] = (
@@ -201,7 +203,7 @@ ORPHAN_LINE: Final[str] = "{date} {time} {language} -> {account_name} — {url} 
 SCHEDULED_LINE: Final[str] = "{prefix} — {url}"
 
 # --- отчёт logs\{дата}_{время}_report.md (ТЗ §5.6): подробности, можно переслать оператору
-REPORT_TITLE: Final[str] = "# Планер — отчёт {generated_at}"
+REPORT_TITLE: Final[str] = "# Планер {version} — отчёт {generated_at}"
 REPORT_TITLE_DRY_RUN: Final[str] = " (dry-run)"
 REPORT_NOTICE: Final[str] = "Внимание: {notice}"
 REPORT_ITEM: Final[str] = "- {text}"

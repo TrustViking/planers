@@ -55,8 +55,9 @@ __pycache__/
 pip-wheel-metadata/
 *.egg-info/
 .eggs/
-build/
-dist/
+# PyInstaller / Inno Setup output: build\, dist\planer, dist\installer (build_local.bat / build_release.bat)
+/build/
+/dist/
 
 .coverage
 coverage.xml
@@ -72,6 +73,8 @@ htmlcov/
 venv/
 ENV/
 .venv_*/
+# build environment: requirements.txt + pyinstaller, never .venv_planers (CLAUDE.md)
+/.venv_build/
 .venv-*/
 .poetry/
 

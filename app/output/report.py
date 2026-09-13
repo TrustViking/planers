@@ -27,6 +27,7 @@ from app.pipeline.reconciler import MarkedBroadcast
 from app.pipeline.selection import Selection, SkippedSlot, SkipReason
 from app.platforms.base import BroadcastFacts, PlatformError, broadcast_url_for
 from app.ui import messages_ru as msg
+from app.version import APP_VERSION
 
 REPORT_FILE_TEMPLATE: Final[str] = "{stamp}_report.md"
 REPORT_ENCODING: Final[str] = "utf-8"
@@ -436,7 +437,7 @@ def build_skipped_lines(scan: PromoScan, selection: Selection, config: PlanerCon
 
 
 def _header_lines(report: RunReport) -> list[str]:
-    title: str = msg.REPORT_TITLE.format(generated_at=report.generated_at_text)
+    title: str = msg.REPORT_TITLE.format(version=APP_VERSION, generated_at=report.generated_at_text)
     if report.mode is RunMode.DRY_RUN:
         title += msg.REPORT_TITLE_DRY_RUN
     lines: list[str] = [title]

@@ -37,11 +37,12 @@ from app.platforms.fake import FakePlatform
 from app.tests.conftest import build_config, build_slot
 from app.tests.conftest import build_planned as build_planned_object
 from app.ui import messages_ru as msg
+from app.version import APP_VERSION
 
 STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 
 # Пример из ТЗ §5.6: итог и ошибки сверху, справка ниже, пустых разделов нет.
-TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00
+TZ_SAMPLE_REPORT: str = f"""# Планер {APP_VERSION} — отчёт 13-09-2026 12:00
 
 Итог: создано 2, исправлено 1, совпадает 1, пропущено 3, ошибок 1. Файл ключей: keystreams\\keys.txt
 
@@ -71,12 +72,12 @@ TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00
 - plan_07-09-2026_11-09-2026_gen06-09-2026-1000.bcast — все слоты в прошлом, ничего из него не планируется
 """
 
-EMPTY_REPORT: str = """# Планер — отчёт 16-03-2027 12:00
+EMPTY_REPORT: str = f"""# Планер {APP_VERSION} — отчёт 16-03-2027 12:00
 
 Итог: создано 0, исправлено 0, совпадает 0, пропущено 0, ошибок 0.
 """
 
-DRY_RUN_REPORT: str = """# Планер — отчёт 16-03-2027 12:00 (dry-run)
+DRY_RUN_REPORT: str = f"""# Планер {APP_VERSION} — отчёт 16-03-2027 12:00 (dry-run)
 Внимание: Площадка — заглушка
 
 Итог: создано 1, исправлено 0, совпадает 0, пропущено 0, ошибок 0.
@@ -85,7 +86,7 @@ DRY_RUN_REPORT: str = """# Планер — отчёт 16-03-2027 12:00 (dry-run
 - 17-03-2027 19:00 uk -> Test UA — эфира нет, будет создан — не выполнено (dry-run)
 """
 
-STATUS_REPORT: str = """# Планер — отчёт 16-03-2027 12:00
+STATUS_REPORT: str = f"""# Планер {APP_VERSION} — отчёт 16-03-2027 12:00
 
 Итог: запланировано 1, ошибок 1. Файл ключей: keystreams\\keys.txt
 

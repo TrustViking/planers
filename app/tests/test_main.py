@@ -17,6 +17,7 @@ from app.platforms.base import ChannelInfo, PlatformError
 from app.platforms.fake import FakePlatform
 from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
+from app.version import APP_VERSION
 
 CONFIG_YAML: str = """keep_days: 30
 """
@@ -126,6 +127,20 @@ def test_run_without_flags_on_empty_promo_exits_3(
     _ready(planer_root)
     assert run_cli([]) == 3
     assert "нет пакетов" in capsys.readouterr().out
+
+
+def test_version_flag_prints_the_single_version_and_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        run_cli(["--version"])
+    assert raised.value.code == 0
+    assert capsys.readouterr().out.strip() == f"Планер {APP_VERSION}"
+
+
+def test_run_started_log_line_carries_the_version(planer_root: Path) -> None:
+    assert run_cli(["--dry-run"]) == 2                     # примеры только что скопированы — сеть не нужна
+    [log_file] = list((planer_root / "logs").glob("*_planer.log"))
+    [line] = [line for line in log_file.read_text(encoding="utf-8").splitlines() if "run_started" in line]
+    assert f"run_started version={APP_VERSION} " in line
 
 
 def test_missing_configs_copy_examples_and_exit_2(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:

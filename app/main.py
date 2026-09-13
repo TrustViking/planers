@@ -36,6 +36,7 @@ from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
 from app.platforms.youtube import YouTubePlatform
 from app.state.channels import ChannelBinding, ChannelBindings, ChannelsStateError
 from app.ui import messages_ru as msg
+from app.version import APP_VERSION
 
 LOGGER = get_logger("main")
 
@@ -54,6 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(prog="planer", description=msg.CLI_DESCRIPTION)
     parser.add_argument("--dry-run", action="store_true", help=msg.HELP_DRY_RUN)
     parser.add_argument("--debug", action="store_true", help=msg.HELP_DEBUG)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=msg.VERSION_TEXT.format(version=APP_VERSION),
+        help=msg.HELP_VERSION,
+    )
     modes: argparse._MutuallyExclusiveGroup = parser.add_mutually_exclusive_group()
     modes.add_argument("--check", action="store_true", help=msg.HELP_CHECK)
     modes.add_argument("--auth", metavar="CHANNEL_KEY", help=msg.HELP_AUTH)
@@ -78,7 +85,14 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     paths: PlanerPaths = build_paths(resolve_root())
     ensure_dirs(paths)
     log_path: Path = setup_logging(paths.logs_dir, debug=args.debug)
-    LOGGER.info("run_started root=%s dry_run=%s status=%s log=%s", paths.root, args.dry_run, args.status, log_path)
+    LOGGER.info(
+        "run_started version=%s root=%s dry_run=%s status=%s log=%s",
+        APP_VERSION,
+        paths.root,
+        args.dry_run,
+        args.status,
+        log_path,
+    )
     try:
         exit_code: int = _run(args, paths, log_path)
         LOGGER.info("run_finished exit_code=%d", exit_code)
