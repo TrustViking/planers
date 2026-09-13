@@ -34,6 +34,8 @@ MISSING_VALUE: Final[str] = "-"
 # OutcomeError.origin для сбоев самого планера; расшифровка — PLANER_ERROR_TEXT в messages_ru.
 PLANER_ORIGIN: Final[str] = "planer"
 MISMATCH_HEAD_CHARS: Final[int] = 200   # описание в отчёт целиком не выводится
+# Постоянные особенности площадки: не про этот запуск, поэтому только в отчёте, в конце (ТЗ §5.6).
+PLATFORM_NOTE_LINES: Final[tuple[str, ...]] = (msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY)
 
 
 class RunMode(str, Enum):
@@ -156,6 +158,16 @@ class RunReport:
     keys_file_path: str | None = None
     notice: str | None = None
 
+    @property
+    def run_warnings(self) -> list[str]:
+        """Предупреждения этого запуска — в консоль и в отчёт."""
+        return [line for line in self.warnings if line not in PLATFORM_NOTE_LINES]
+
+    @property
+    def notes(self) -> list[str]:
+        """Постоянные особенности площадки из warnings — только в отчёт, разделом в конце."""
+        return [line for line in self.warnings if line in PLATFORM_NOTE_LINES]
+
 
 @dataclass(frozen=True)
 class RunTotals:
@@ -257,7 +269,15 @@ def planer_error_outcome(name: str, code: str, detail: str) -> PairOutcome:
 
 
 def build_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequence[str] = ()) -> list[str]:
-    """Предупреждения (§7.4 п.4): эфир в силе, код выхода не меняется."""
+    """Два списка одним результатом: предупреждения запуска, затем постоянные особенности площадки.
+
+    Разделяют их RunReport.run_warnings и RunReport.notes по PLATFORM_NOTE_LINES.
+    """
+    return build_run_warning_lines(planned, diagnostics) + build_platform_note_lines(planned)
+
+
+def build_run_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequence[str] = ()) -> list[str]:
+    """Предупреждения этого запуска (§7.4 п.4): эфир в силе, код выхода не меняется."""
     lines: list[str] = [
         msg.WARNING_LINE.format(
             prefix=_slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name),
@@ -268,11 +288,17 @@ def build_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequen
         for item in planned
         for warning in item.warnings
     ]
-    if any(item.facts is not None and item.facts.live_chat_id for item in planned):
-        lines.append(msg.WARNING_LIVE_CHAT)      # один раз на запуск, а не на каждый эфир
-    if any(item.has_kept_key for item in planned):
-        lines.append(msg.WARNING_KEPT_KEY)       # тоже один раз: правило общее для всех эфиров
     lines.extend(msg.WARNING_FORM_DIAGNOSTIC.format(path=path) for path in diagnostics)
+    return lines
+
+
+def build_platform_note_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
+    """Так устроена площадка, это не про сегодняшний запуск: по строке на особенность, а не на эфир."""
+    lines: list[str] = []
+    if any(item.facts is not None and item.facts.live_chat_id for item in planned):
+        lines.append(msg.WARNING_LIVE_CHAT)
+    if any(item.has_kept_key for item in planned):
+        lines.append(msg.WARNING_KEPT_KEY)
     return lines
 
 
@@ -427,10 +453,11 @@ def _append_run_body(lines: list[str], report: RunReport, totals: RunTotals) -> 
         for kind in OutcomeKind
     }
     lines.extend(_total_lines(report, totals))
+    _append_section(lines, msg.REPORT_SECTION_NOT_DELIVERED, not_delivered_texts(report))
     _append_section(lines, msg.REPORT_SECTION_ERRORS, [
         _outcome_text(outcome, is_dry_run=is_dry_run) for outcome in report.outcomes if outcome.kind in ERROR_OUTCOME_KINDS
     ])
-    _append_section(lines, msg.REPORT_SECTION_WARNINGS, report.warnings)
+    _append_section(lines, msg.REPORT_SECTION_WARNINGS, report.run_warnings)
     _append_section(lines, msg.REPORT_SECTION_MISMATCHES, report.mismatches)
     created: list[str] = texts[OutcomeKind.CREATED] + texts[OutcomeKind.STREAM_ATTACHED]
     _append_section(lines, msg.REPORT_SECTION_CREATED.format(count=totals.created), created)
@@ -443,6 +470,19 @@ def _append_run_body(lines: list[str], report: RunReport, totals: RunTotals) -> 
     )
     _append_section(lines, msg.REPORT_SECTION_SKIPPED, [skip_text(line) for line in report.skipped])
     _append_section(lines, msg.REPORT_SECTION_PACKAGES, [render_package_line(line) for line in report.packages])
+    _append_section(lines, msg.REPORT_SECTION_NOTES, report.notes)
+
+
+def not_delivered_texts(report: RunReport) -> list[str]:
+    """Новый ключ, который форма не подтвердила: эфир стоит, а стример ключа не получил (§7.5).
+
+    Отдельный раздел только для глаз: исход остаётся в «Создано», счётчики build_totals не меняются.
+    """
+    return [
+        msg.NOT_DELIVERED_LINE.format(prefix=outcome_prefix(outcome), reason=form_reason_text(outcome.form_error))
+        for outcome in report.outcomes
+        if outcome.form is FormState.FAILED
+    ]
 
 
 def _total_lines(report: RunReport, totals: RunTotals) -> list[str]:

@@ -88,11 +88,11 @@ temp/
 /output/
 /outputs/
 downloads/
-data/
+/data/
 docs/
 image/
 /state/
-tools/
+/tools/
 
 ########################################
 # IDE / OS / local workspace stuff

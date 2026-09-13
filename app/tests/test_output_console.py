@@ -32,19 +32,19 @@ from app.ui import messages_ru as msg
 
 ROOT: Path = Path("D:/planer")
 CONSOLE_LINE_LIMIT: int = 15
+SAMPLE_CONSOLE_LINES: int = 12   # заголовок, пустая, 6 счётчиков, пустая, 3 пути
 PACKAGE: str = "plan_17-03-2027_18-03-2027_gen11-09-2026-1658.bcast"
 
-# Макет задачи 4e: один созданный эфир, три пропуска без канала, одно предупреждение.
+# Макет задачи 4e/4g: один созданный эфир, три пропуска без канала; живой чат — постоянная
+# особенность площадки, в консоль не попадает, поэтому блока «внимание» нет.
 SAMPLE_CONSOLE: str = """Планер — 13-09-2026 13:20
 
   пакеты          1   слотов 4, моих 1
   создано         1   17-03-2027 19:00 ru -> Osvald.X, ключ передан в форму
   исправлено      0
   совпадает       0
-  пропущено       3   нет каналов: en, uk
+  пропущено       3   нет канала: en (2), uk (1)
   ошибок          0
-
-  внимание: у эфиров включён живой чат, отключается только в Студии на весь канал (Settings -> Community)
 
   ключи   keystreams\\keys.txt
   отчёт   logs\\13-09-2026_132051_report.md
@@ -87,7 +87,17 @@ def _render(report: RunReport) -> str:
 def test_full_run_matches_the_layout() -> None:
     text: str = _render(_sample_report())
     assert text.replace("/", "\\") == SAMPLE_CONSOLE
-    assert len(text.splitlines()) <= CONSOLE_LINE_LIMIT
+    assert len(text.splitlines()) == SAMPLE_CONSOLE_LINES <= CONSOLE_LINE_LIMIT
+
+
+def test_platform_notes_never_reach_the_console() -> None:
+    """Живой чат и прежний ключ — так устроена площадка: печатаются только в отчёте."""
+    run_warning: str = "18-03-2027 20:00 ru -> Osvald.X: обложка не поставлена — forbidden (канал не подтверждён)"
+    report: RunReport = _sample_report(warnings=[run_warning, msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY])
+    text: str = _render(report)
+    assert f"  внимание: {run_warning}" in text.splitlines()
+    assert "живой чат" not in text and "ключ прежний" not in text
+    assert text.count("внимание:") == 1
 
 
 def test_console_has_no_markdown_and_no_icons() -> None:
@@ -151,7 +161,13 @@ def test_skipped_are_grouped_by_reason() -> None:
             SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "hu"),
         ]
     )
-    assert "  пропущено       3   уже прошло: 1; до старта меньше 60 минут: 1; нет каналов: hu" in _render(report)
+    assert "  пропущено       3   уже прошло: 1; до старта меньше 60 минут: 1; нет канала: hu (1)" in _render(report)
+
+
+def test_no_channel_skips_are_counted_per_language() -> None:
+    """Сумма по языкам сходится со счётчиком: три пропуска — en (2) и uk (1), а не «en, uk»."""
+    lines: list[str] = _render(_sample_report()).splitlines()
+    assert "  пропущено       3   нет канала: en (2), uk (1)" in lines
 
 
 def test_dry_run_has_its_own_title_and_labels() -> None:

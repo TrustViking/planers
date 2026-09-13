@@ -19,6 +19,8 @@ from app.output.report import (
     SkipKind,
     SkippedLine,
     build_package_lines,
+    build_platform_note_lines,
+    build_run_warning_lines,
     build_skipped_lines,
     build_totals,
     build_warning_lines,
@@ -42,6 +44,9 @@ STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00
 
 Итог: создано 2, исправлено 1, совпадает 1, пропущено 3, ошибок 1. Файл ключей: keystreams\\keys.txt
+
+## Ключ не дошёл до стримера
+- 18-09-2026 19:00 uk -> Іван UA — форма не подтвердила запись ответа (notConfirmed); эфир на канале стоит — передайте ключ стримеру из keys.txt вручную
 
 ## Ошибки
 - 19-09-2026 19:00 uk -> Іван UA — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)
@@ -221,7 +226,7 @@ def test_errors_and_warnings_come_before_reference_sections() -> None:
             _slot_outcome(OutcomeKind.CREATED, form=FormState.SENT),
             _slot_outcome(OutcomeKind.ERROR, error=OutcomeError("youtube", "forbidden", "нельзя")),
         ],
-        warnings=["предупреждение"],
+        warnings=["предупреждение", msg.WARNING_LIVE_CHAT],
         mismatches=["расхождение"],
         skipped=[SkippedLine(SkipKind.PAST, "15-03-2027", "19:00", "uk")],
     )
@@ -233,7 +238,49 @@ def test_errors_and_warnings_come_before_reference_sections() -> None:
         "## Создано (1)",
         "## Пропущено",
         "## Пакеты",
+        msg.REPORT_SECTION_NOTES,
     ]
+    failed: RunReport = RunReport(
+        RunMode.FULL,
+        "16-03-2027 12:00",
+        outcomes=[_slot_outcome(OutcomeKind.CREATED, form=FormState.FAILED, form_error="transportFailed: HTTP 503")],
+    )
+    failed_headers: list[str] = [line for line in render_report(failed).splitlines() if line.startswith("## ")]
+    assert failed_headers == ["## Ключ не дошёл до стримера", "## Создано (1)"]
+
+
+def test_not_delivered_section_only_when_form_failed() -> None:
+    """Ключ, не дошедший до стримера, — сразу под итогом; счётчики и раздел «Создано» прежние."""
+    sent: RunReport = RunReport(RunMode.FULL, "16-03-2027 12:00", outcomes=[_slot_outcome(OutcomeKind.CREATED, form=FormState.SENT)])
+    assert "Ключ не дошёл до стримера" not in render_report(sent)
+    failed: RunReport = RunReport(
+        RunMode.FULL,
+        "16-03-2027 12:00",
+        outcomes=[
+            _slot_outcome(OutcomeKind.CREATED, form=FormState.SENT),
+            _slot_outcome(OutcomeKind.STREAM_ATTACHED, date="18-03-2027", form=FormState.FAILED, form_error="missingOption: 18.03.2027"),
+        ],
+    )
+    lines: list[str] = render_report(failed).splitlines()
+    assert lines[2] == "Итог: создано 2, исправлено 0, совпадает 0, пропущено 0, ошибок 0."
+    assert lines[4] == "## Ключ не дошёл до стримера"
+    assert lines[5].startswith("- 18-03-2027 19:00 uk -> Test UA — в форме нет нужного варианта ответа (18.03.2027)")
+    assert "## Создано (2)" in lines
+    assert build_totals(failed).errors == 0
+
+
+def test_platform_notes_are_the_last_section_of_the_report() -> None:
+    report: RunReport = RunReport(
+        RunMode.FULL,
+        "16-03-2027 12:00",
+        warnings=["обложка не поставлена", msg.WARNING_KEPT_KEY, msg.WARNING_LIVE_CHAT],
+    )
+    assert report.run_warnings == ["обложка не поставлена"]
+    assert report.notes == [msg.WARNING_KEPT_KEY, msg.WARNING_LIVE_CHAT]
+    text: str = render_report(report)
+    assert text.index("## Предупреждения") < text.index(msg.REPORT_SECTION_NOTES)
+    assert text.rstrip("\n").endswith(f"- {msg.WARNING_LIVE_CHAT}")
+    assert text.count(msg.WARNING_KEPT_KEY) == 1
 
 
 def test_totals_are_counted_once_for_report_and_console() -> None:
@@ -300,6 +347,8 @@ def test_kept_key_warning_is_written_once_per_run() -> None:
     assert msg.WARNING_KEPT_KEY not in build_warning_lines([created])
     attached: PlannedBroadcast = _with_new_key(20, Decision.MATCH)   # поток привязан: ключ новый
     assert msg.WARNING_KEPT_KEY not in build_warning_lines([attached])
+    assert msg.WARNING_KEPT_KEY not in build_run_warning_lines([*kept, created])   # особенность, а не предупреждение
+    assert build_platform_note_lines([*kept, created]) == [msg.WARNING_KEPT_KEY]
 
 
 def test_package_and_skipped_lines_from_scan_and_selection(

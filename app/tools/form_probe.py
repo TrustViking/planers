@@ -1,6 +1,7 @@
 """Пробник Google-формы (задача 4f): подтверждение отправки и поведение при повторах.
 
 Запуск из корня репо: python -m app.tools.form_probe
+Опыт E, закрытая форма: python -m app.tools.form_probe --closed-form — только чтение структуры, ни одной отправки.
 
 Только тренировочная форма: адрес берётся из манифеста самого свежего пакета в promo\\, а после
 редиректа идентификатор формы сверяется с TRAINING_FORM_ID — при несовпадении ничего не отправляется.
@@ -10,9 +11,11 @@ submitter; постит пробник сам, потому что ему нуж
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +25,7 @@ import requests
 
 from app.core.dates import FILE_STAMP_FORMAT
 from app.form.base import FormError
-from app.form.discovery import REQUEST_TIMEOUT_SEC, FormDiscovery, FormQuestion, FormStructure
+from app.form.discovery import REQUEST_TIMEOUT_SEC, FormDiscovery, FormQuestion, FormStructure, HttpSession
 from app.form.submitter import (
     CONFIRMATION_MARKERS,
     FIELD_ACCOUNT_NAME,
@@ -52,6 +55,7 @@ ENTRY_PATTERN: Final[re.Pattern[str]] = re.compile(r"entry\.\d+")
 SCRIPT_LANGUAGE_PATTERN: Final[re.Pattern[str]] = re.compile(r"/js/k=freebird\.v\.([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]+)?)\.")
 LANG_ATTRIBUTE_PATTERN: Final[re.Pattern[str]] = re.compile(r"<html[^>]*\blang=\"([^\"]+)\"", re.IGNORECASE)
 FBZX_NAME: Final[str] = "fbzx"
+CLOSED_FORM_FLAG: Final[str] = "--closed-form"
 PAUSE_SEC: Final[float] = 2.0
 EXIT_OK: Final[int] = 0
 EXIT_REFUSED: Final[int] = 2
@@ -82,7 +86,8 @@ EXPERIMENTS: Final[tuple[Submission, ...]] = (
     Submission("C", 2, "PROBE-C", "cccc-cccc-cccc-cccc-0002"),
     Submission("D", 1, "PROBE-D", "dddd-dddd-dddd-dddd-dddd", is_required_dropped=True),
 )
-# Сколько строк ждать в таблице ответов, если форма не схлопывает повторы.
+# Сколько строк ждать в таблице ответов, если форма не схлопывает повторы. Сверено владельцем 13-09-2026
+# по отправкам 16:27: PROBE-A 2, PROBE-B 2, PROBE-C 2, PROBE-D 0 — форма повторы не схлопывает (ТЗ §7.5).
 EXPECTED_ROWS: Final[tuple[tuple[str, str], ...]] = (
     ("PROBE-A", "2 строки, ключ aaaa-aaaa-aaaa-aaaa-aaaa (1 строка — Google схлопнул одинаковые ответы с общим fbzx)"),
     ("PROBE-B", "2 строки, ключ bbbb-bbbb-bbbb-bbbb-bbbb (у каждой отправки свой fbzx)"),
@@ -118,8 +123,57 @@ class _Context:
     logs_dir: Path
 
 
-def main() -> int:
+class ReadOnlySession:
+    """Опыт E: сессия, которая умеет только GET — отправка невозможна при любом исходе чтения."""
+
+    def __init__(self, session: requests.Session) -> None:
+        self._session: requests.Session = session
+
+    def get(self, url: str, timeout: float, allow_redirects: bool) -> requests.Response:
+        return self._session.get(url, timeout=timeout, allow_redirects=allow_redirects)
+
+    def post(self, url: str, data: dict[str, list[str]], timeout: float, headers: Mapping[str, str]) -> requests.Response:
+        raise ProbeRefused(f"режим --closed-form ничего не отправляет: POST {url} запрещён")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(prog="form_probe", description=__doc__)
+    parser.add_argument(
+        CLOSED_FORM_FLAG,
+        action="store_true",
+        help="опыт E: форма закрыта владельцем — только прочитать структуру, ничего не отправлять",
+    )
+    args: argparse.Namespace = parser.parse_args(argv)
     paths: PlanerPaths = build_paths(resolve_root())
+    if args.closed_form:
+        return _probe_closed_form(paths)
+    return _run_experiments(paths)
+
+
+def _probe_closed_form(paths: PlanerPaths) -> int:
+    """Опыт E: закрытая форма не должна выглядеть как доставка — до POST дело доходить не должно (§7.5)."""
+    try:
+        form: FormSpec = _latest_form(paths)
+        session: ReadOnlySession = ReadOnlySession(requests.Session())
+        final: requests.Response = session.get(form.url, timeout=REQUEST_TIMEOUT_SEC, allow_redirects=True)
+        _require_training_url(final.url)
+        print(f"E: страница формы HTTP {final.status_code}, адрес после редиректа {final.url}")
+        structure: FormStructure = _new_discovery(session, paths.logs_dir).structure(form.url)
+        _require_training_form(structure)
+    except FormError as error:
+        print(f"E: структура НЕ прочитана — код {error.code}: {error.message}")
+        print(f"E: страница сохранена: {error.diagnostic_path or MISSING}")
+        print("E: POST не выполнялся")
+        return EXIT_OK
+    except (ProbeRefused, OSError) as error:
+        print(f"ОТКАЗ: {error}")
+        return EXIT_REFUSED
+    print(f"E: структура прочитана — вопросов {len(structure.questions)}, разделов {structure.page_count}")
+    print("E: POST не выполнялся (режим только чтения)")
+    return EXIT_OK
+
+
+def _run_experiments(paths: PlanerPaths) -> int:
     try:
         form: FormSpec = _latest_form(paths)
         session: requests.Session = requests.Session()
@@ -157,19 +211,21 @@ def _latest_form(paths: PlanerPaths) -> FormSpec:
     return latest.form
 
 
-def _new_discovery(session: requests.Session, logs_dir: Path) -> FormDiscovery:
+def _new_discovery(session: HttpSession, logs_dir: Path) -> FormDiscovery:
     return FormDiscovery(session, logs_dir, datetime.now().astimezone())
 
 
 def _require_training_form(structure: FormStructure) -> None:
     """Предохранитель: после редиректа — только тренировочная форма, иначе ни одной отправки."""
     for url in (structure.view_url, structure.response_url):
-        match: re.Match[str] | None = FORM_ID_PATTERN.search(url)
-        form_id: str = match.group(1) if match else MISSING
-        if form_id != TRAINING_FORM_ID:
-            raise ProbeRefused(
-                f"форма {form_id} ({url}) — не тренировочная {TRAINING_FORM_ID}; ничего не отправлено"
-            )
+        _require_training_url(url)
+
+
+def _require_training_url(url: str) -> None:
+    match: re.Match[str] | None = FORM_ID_PATTERN.search(url)
+    form_id: str = match.group(1) if match else MISSING
+    if form_id != TRAINING_FORM_ID:
+        raise ProbeRefused(f"форма {form_id} ({url}) — не тренировочная {TRAINING_FORM_ID}; ничего не отправлено")
 
 
 def _submit(context: _Context, submission: Submission) -> Observation:

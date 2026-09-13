@@ -41,7 +41,7 @@ def _slot_map(*slots: Slot) -> dict[str, Slot]:
 
 
 def _select(slot_map: dict[str, Slot], config: PlanerConfig, now: datetime) -> Selection:
-    """Реальный production-путь: пакет-источник один на все слоты; журнал отбору не нужен."""
+    """Реальный production-путь: пакет-источник один на все слоты; ничего, кроме пакета и конфига, отбору не нужно."""
     sources: dict[str, Package] = {slot_id: _PACKAGE for slot_id in slot_map}
     return build_planned(slot_map, sources, config, FakePlatform().limits, now)
 

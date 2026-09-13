@@ -20,7 +20,7 @@ FORM_CODE_OK: Final[str] = ""
 class FormSendResult:
     confirmed: bool                      # ответ формы подтверждён (§7.5 п.5)
     code: str = FORM_CODE_OK             # код исхода; пусто при успехе
-    error: str | None = None             # причина неудачи для журнала и отчёта
+    error: str | None = None             # причина неудачи для лога и отчёта
     diagnostic_path: Path | None = None  # сохранённый HTML: без него [ПРОВЕРИТЬ] не закрыть
 
 
@@ -49,7 +49,7 @@ class FormSender(Protocol):
 
 
 class NoopFormSender:
-    """Форма не отправляется: form_status остаётся pending. Остаётся для тестов."""
+    """Форма не отправляется: ключ остаётся непереданным. Остаётся для тестов."""
 
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         return FormSendResult(confirmed=False)

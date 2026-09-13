@@ -424,7 +424,7 @@ def test_unexpected_stream_key_is_an_error(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Ключ не того вида — эфир не засчитан: в журнал не пишем, форму не шлём (§7.4 п.2)."""
+    """Ключ не того вида — эфир не засчитан: ключ не берём, форму не шлём (§7.4 п.2)."""
     _install(
         platform,
         monkeypatch,

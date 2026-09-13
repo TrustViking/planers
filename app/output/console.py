@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
@@ -140,9 +141,14 @@ def _skipped_detail(skipped: list[SkippedLine]) -> str:
     too_late: list[SkippedLine] = [line for line in skipped if line.kind is SkipKind.TOO_LATE]
     if too_late:
         parts.append(msg.CONSOLE_SKIP_TOO_LATE.format(minutes=too_late[0].minutes, count=len(too_late)))
-    languages: list[str] = sorted({line.language for line in skipped if line.kind is SkipKind.NO_CHANNEL})
-    if languages:
-        parts.append(msg.CONSOLE_SKIP_NO_CHANNEL.format(languages=msg.CONSOLE_DETAIL_JOINER.join(languages)))
+    no_channel: Counter[str] = Counter(line.language for line in skipped if line.kind is SkipKind.NO_CHANNEL)
+    if no_channel:
+        # по числу слотов на язык: сумма сходится со счётчиком «пропущено»
+        languages: str = msg.CONSOLE_DETAIL_JOINER.join(
+            msg.CONSOLE_SKIP_LANGUAGE_COUNT.format(language=language, count=no_channel[language])
+            for language in sorted(no_channel)
+        )
+        parts.append(msg.CONSOLE_SKIP_NO_CHANNEL.format(languages=languages))
     return msg.CONSOLE_SKIP_JOINER.join(parts)
 
 
@@ -157,7 +163,8 @@ def _attention_lines(report: RunReport) -> list[str]:
     lines.extend(msg.CONSOLE_PACKAGE_ERROR.format(text=text) for text in package_problem_texts(report))
     if report.notice:
         lines.append(msg.CONSOLE_WARNING.format(text=report.notice))
-    lines.extend(msg.CONSOLE_WARNING.format(text=text) for text in report.warnings)
+    # только предупреждения запуска: постоянные особенности площадки (report.notes) — в отчёте
+    lines.extend(msg.CONSOLE_WARNING.format(text=text) for text in report.run_warnings)
     return lines
 
 

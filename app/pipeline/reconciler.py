@@ -158,7 +158,7 @@ class Reconciler:
         return self._orphans(channel, broadcasts, slot_ids)
 
     def _decide(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> None:
-        """Эфира на площадке нет — CREATE, что бы ни помнил журнал: действие одно и то же."""
+        """Эфира на площадке нет — CREATE: памяти о прошлых запусках у планера нет, действие одно и то же."""
         found, stream, is_ambiguous = self._find(item, broadcasts)
         if is_ambiguous:
             item.decision = Decision.AMBIGUOUS
