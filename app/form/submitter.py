@@ -5,11 +5,14 @@
 """
 from __future__ import annotations
 
+import html
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlencode
 
 from app.form.base import (
     FORM_CODE_MISSING_OPTION,
@@ -44,12 +47,23 @@ FIELD_STREAM_KEY: Final[str] = "stream_key"
 FIELD_STREAM_URL: Final[str] = "stream_url"
 PLATFORM_CODE: Final[str] = "youtube"
 
-# Маркеры «ответ записан» в теле ответа — единственный источник (§7.5 п.5).
+# Маркеры «ответ записан» — единственный источник (§7.5 п.5). Структурного признака успеха
+# у Google нет: FB_PUBLIC_LOAD_DATA_ на странице успеха и на странице ошибки совпадает побайтово,
+# различается только видимый текст. Сравнение — по вхождению в тело в нижнем регистре,
+# без точки на конце. Класс freebirdFormviewerViewResponseConfirmationMessage в вёрстке
+# Google больше не встречается и маркером не считается.
 CONFIRMATION_MARKERS: Final[tuple[str, ...]] = (
-    "freebirdFormviewerViewResponseConfirmationMessage",
-    "Ваш ответ записан",
-    "Your response has been recorded",
+    "your response has been recorded",   # основной: язык ответа планер задаёт сам (RESPONSE_LANGUAGE)
+    "відповідь було записано",           # живой прогон 13-09-2026: «Вашу відповідь було записано.» (язык по IP)
+    "ответ записан",                     # русская страница Google: «Ваш ответ записан.»
 )
+# Язык страницы ответа: без него Google выбирает язык по IP, и текст подтверждения угадывать приходится.
+RESPONSE_LANGUAGE: Final[str] = "en"
+HEADER_ACCEPT_LANGUAGE: Final[str] = "Accept-Language"
+QUERY_LANGUAGE: Final[str] = "hl"
+QUERY_SEPARATOR: Final[str] = "?"
+QUERY_JOINER: Final[str] = "&"
+TITLE_PATTERN: Final[re.Pattern[str]] = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 FIELD_FVV: Final[str] = "fvv"
 FIELD_PAGE_HISTORY: Final[str] = "pageHistory"
 FIELD_FBZX: Final[str] = "fbzx"
@@ -98,19 +112,33 @@ class GoogleFormSender:
         pages: list[int],
     ) -> FormSendResult:
         body: dict[str, list[str]] = _build_body(structure, answers, pages)
+        url: str = _with_response_language(structure.response_url)
         LOGGER.info(
             "form_post url=%s slot_id=%s pages=%s fields=%d stream_key=%s",
-            structure.response_url,
+            url,
             planned.slot_id,
             PAGE_SEPARATOR.join(str(page) for page in pages),
             len(answers),
             mask_stream_key(planned.stream_key),
         )
-        response: HttpResponse = self._post_with_retry(structure.response_url, body)
+        response: HttpResponse = self._post_with_retry(url, body)
         if _is_confirmed(response.text):
-            LOGGER.info("form_confirmed slot_id=%s channel=%s", planned.slot_id, planned.channel.id)
+            LOGGER.info(
+                "form_confirmed slot_id=%s channel=%s http_status=%d",
+                planned.slot_id,
+                planned.channel.id,
+                response.status_code,
+            )
             return FormSendResult(confirmed=True)
         path: Path | None = self._discovery.save_diagnostic(response.text, planned.form.url, "response")
+        LOGGER.warning(
+            "form_not_confirmed slot_id=%s channel=%s http_status=%d page_title=%r saved=%s",
+            planned.slot_id,
+            planned.channel.id,
+            response.status_code,
+            _page_title(response.text),
+            path,
+        )
         raise FormError(FORM_CODE_NOT_CONFIRMED, f"HTTP {response.status_code}", path)
 
     def _post_with_retry(self, url: str, body: dict[str, list[str]]) -> HttpResponse:
@@ -118,7 +146,12 @@ class GoogleFormSender:
         last_error: str = ""
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
-                response: HttpResponse = self._session.post(url, data=body, timeout=REQUEST_TIMEOUT_SEC)
+                response: HttpResponse = self._session.post(
+                    url,
+                    data=body,
+                    timeout=REQUEST_TIMEOUT_SEC,
+                    headers={HEADER_ACCEPT_LANGUAGE: RESPONSE_LANGUAGE},
+                )
             except OSError as error:
                 last_error = str(error)
             else:
@@ -296,5 +329,20 @@ def _build_body(
     return body
 
 
+def _with_response_language(url: str) -> str:
+    """hl=en в строке запроса — вместе с Accept-Language задаёт язык страницы ответа (§7.5 п.5)."""
+    separator: str = QUERY_JOINER if QUERY_SEPARATOR in url else QUERY_SEPARATOR
+    return url + separator + urlencode({QUERY_LANGUAGE: RESPONSE_LANGUAGE})
+
+
 def _is_confirmed(body: str) -> bool:
-    return any(marker in body for marker in CONFIRMATION_MARKERS)
+    lowered: str = body.lower()
+    return any(marker in lowered for marker in CONFIRMATION_MARKERS)
+
+
+def _page_title(body: str) -> str:
+    """Заголовок страницы ответа — в лог, чтобы разбор не требовал открывать сохранённый файл."""
+    match: re.Match[str] | None = TITLE_PATTERN.search(body)
+    if match is None:
+        return ""
+    return " ".join(html.unescape(match.group(1)).split())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ class _FakeSession:
         self._responses: list[_FakeResponse] = list(responses)
         self.get_calls: list[str] = []
         self.post_calls: list[tuple[str, dict[str, list[str]]]] = []
+        self.post_headers: list[dict[str, str]] = []
 
     def get(self, url: str, timeout: float, allow_redirects: bool) -> _FakeResponse:
         self.get_calls.append(url)
@@ -40,8 +42,15 @@ class _FakeSession:
             raise self._responses.pop(0)
         return self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
 
-    def post(self, url: str, data: dict[str, list[str]], timeout: float) -> _FakeResponse:
+    def post(
+        self,
+        url: str,
+        data: dict[str, list[str]],
+        timeout: float,
+        headers: Mapping[str, str],
+    ) -> _FakeResponse:
         self.post_calls.append((url, data))
+        self.post_headers.append(dict(headers))
         return self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -91,7 +92,13 @@ class HttpSession(Protocol):
     def get(self, url: str, timeout: float, allow_redirects: bool) -> HttpResponse:
         ...
 
-    def post(self, url: str, data: dict[str, list[str]], timeout: float) -> HttpResponse:
+    def post(
+        self,
+        url: str,
+        data: dict[str, list[str]],
+        timeout: float,
+        headers: Mapping[str, str],
+    ) -> HttpResponse:
         ...
 
 

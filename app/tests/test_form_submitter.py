@@ -33,7 +33,14 @@ from app.tests.test_form_discovery import (
 ConfigFactory = Callable[..., PlanerConfig]
 SlotFactory = Callable[..., Slot]
 KYIV: timezone = timezone(timedelta(hours=2))
-CONFIRMED_BODY: str = f"<html>{CONFIRMATION_MARKERS[0]}</html>"
+RESPONSE_URL: str = "https://docs.google.com/forms/d/e/ABC/formResponse?hl=en"
+FORM_TITLE: str = "TEST_Регистрация стрима (Stream registration)"
+# Страницы ответа Google: тело — как на живой странице, различается только видимый текст.
+CONFIRMED_BODY: str = f'<html><head><title>{FORM_TITLE}</title></head><body><div class="vHW8K">Your response has been recorded.</div></body></html>'
+UKRAINIAN_CONFIRMED_BODY: str = f'<html><head><title>{FORM_TITLE}</title></head><body><div class="vHW8K">Вашу відповідь було записано.</div></body></html>'
+RUSSIAN_CONFIRMED_BODY: str = f'<html><head><title>{FORM_TITLE}</title></head><body><div class="vHW8K">Ваш ответ записан</div></body></html>'
+ERROR_BODY: str = f"<html><head><title>{FORM_TITLE}</title></head><body><div>Повторіть спробу</div></body></html>"
+LEGACY_CLASS_BODY: str = '<html><div class="freebirdFormviewerViewResponseConfirmationMessage"></div></html>'
 STREAM_URL: str = "rtmp://A.rtmp.youtube.com/live2"
 STREAM_KEY: str = "abcd-abcd-abcd-abcd-abcd"
 
@@ -85,7 +92,7 @@ def test_body_contains_expected_entries(
 
     assert result.confirmed is True
     [(url, body)] = session.post_calls
-    assert url == "https://docs.google.com/forms/d/e/ABC/formResponse"
+    assert url == RESPONSE_URL                                             # язык ответа задаёт планер
     assert body["entry.1"] == ["Русский ( Russian)"]                       # язык из form.values
     assert body["entry.2"] == ["Account yt_ru"]                            # название канала
     assert body["entry.3"] == ["17.03.2027 Дата стрима (время стрима указано в объявлении)"]
@@ -206,7 +213,8 @@ def test_client_error_is_not_retried(
 ) -> None:
     session: _FakeSession = _session("<html>нет</html>", status_code=400)
     result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
-    assert result.code == FORM_CODE_NOT_CONFIRMED
+    assert (result.confirmed, result.code) == (False, FORM_CODE_NOT_CONFIRMED)
+    assert result.error == "HTTP 400"
     assert len(session.post_calls) == 1
 
 
@@ -273,3 +281,81 @@ def test_out_of_range_page_is_never_sent(
     assert sender.send(_planned(make_config, make_slot_object)).confirmed is True
     [(_, body)] = session.post_calls
     assert body["pageHistory"] == ["0,1"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [CONFIRMED_BODY, UKRAINIAN_CONFIRMED_BODY, RUSSIAN_CONFIRMED_BODY],
+    ids=["english", "ukrainian_live_13_09_2026", "russian"],
+)
+def test_confirmation_text_is_recognised_in_any_expected_language(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    body: str,
+) -> None:
+    """Живой прогон 13-09-2026: форма ответ приняла, а страница пришла на украинском — это подтверждение."""
+    session: _FakeSession = _session(body)
+    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    assert (result.confirmed, result.diagnostic_path) == (True, None)
+    assert session.post_calls and len(session.post_calls) == 1
+
+
+def test_confirmation_ignores_case_and_final_dot() -> None:
+    import app.form.submitter as submitter_module
+
+    assert submitter_module._is_confirmed("<div>YOUR RESPONSE HAS BEEN RECORDED</div>") is True
+    assert all(marker == marker.lower() and not marker.endswith(".") for marker in CONFIRMATION_MARKERS)
+
+
+def test_error_page_is_not_confirmed_and_logged_with_title(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session: _FakeSession = _session(ERROR_BODY)
+    with caplog.at_level("WARNING"):
+        result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    assert (result.confirmed, result.code) == (False, FORM_CODE_NOT_CONFIRMED)
+    assert result.diagnostic_path is not None and result.diagnostic_path.exists()
+    assert "Повторіть спробу" in result.diagnostic_path.read_text(encoding="utf-8")
+    [line] = [message for message in caplog.messages if message.startswith("form_not_confirmed")]
+    assert "http_status=200" in line and FORM_TITLE in line
+
+
+def test_success_is_logged_with_http_status(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session: _FakeSession = _session(CONFIRMED_BODY)
+    with caplog.at_level("INFO"):
+        _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    [line] = [message for message in caplog.messages if message.startswith("form_confirmed")]
+    assert "http_status=200" in line
+
+
+def test_legacy_confirmation_class_is_not_a_confirmation(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+) -> None:
+    """Класса freebirdFormviewerViewResponseConfirmationMessage в вёрстке Google больше нет."""
+    session: _FakeSession = _session(LEGACY_CLASS_BODY)
+    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    assert (result.confirmed, result.code) == (False, FORM_CODE_NOT_CONFIRMED)
+
+
+def test_post_asks_for_english_response_and_get_is_untouched(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+) -> None:
+    session: _FakeSession = _session(CONFIRMED_BODY)
+    _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    [(url, _)] = session.post_calls
+    assert url == RESPONSE_URL
+    assert session.post_headers == [{"Accept-Language": "en"}]
+    assert session.get_calls == [SHORT_URL]                  # страница формы читается как раньше
