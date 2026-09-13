@@ -47,17 +47,25 @@ FIELD_STREAM_KEY: Final[str] = "stream_key"
 FIELD_STREAM_URL: Final[str] = "stream_url"
 PLATFORM_CODE: Final[str] = "youtube"
 
-# Маркеры «ответ записан» — единственный источник (§7.5 п.5). Структурного признака успеха
-# у Google нет: FB_PUBLIC_LOAD_DATA_ на странице успеха и на странице ошибки совпадает побайтово,
-# различается только видимый текст. Сравнение — по вхождению в тело в нижнем регистре,
-# без точки на конце. Класс freebirdFormviewerViewResponseConfirmationMessage в вёрстке
-# Google больше не встречается и маркером не считается.
+# Подтверждение отправки (§7.5 п.5) — структурное, от языка страницы не зависит. Опыт 13-09-2026 16:27
+# (app/tools/form_probe.py, страницы — app/tests/data/): страница успеха — заглушка без полей формы,
+# в ней нет ни одного entry.<цифры> и нет fbzx; страница отказа — перерисованный раздел формы с полем
+# entry.<цифры> и скрытым fbzx (иначе её нельзя было бы дозаполнить), пришла с HTTP 400.
+# Успех = HTTP 200 + страница Google Forms (FB_PUBLIC_LOAD_DATA_) + ни entry.<цифры>, ни fbzx:
+# пустой или чужой ответ 200 доставкой ключа не считается.
+CONFIRMED_HTTP_STATUS: Final[int] = 200
+ENTRY_FIELD_PATTERN: Final[re.Pattern[str]] = re.compile(r"entry\.\d+")
+FORM_PAGE_MARKER: Final[str] = "FB_PUBLIC_LOAD_DATA_"
+# Текстовые маркеры «ответ записан» — только сигнал в лог рядом со структурным признаком: решение они
+# не принимают, язык страницы Google выбирает сам. Сравнение — по вхождению в нижнем регистре, без точки.
 CONFIRMATION_MARKERS: Final[tuple[str, ...]] = (
-    "your response has been recorded",   # основной: язык ответа планер задаёт сам (RESPONSE_LANGUAGE)
-    "відповідь було записано",           # живой прогон 13-09-2026: «Вашу відповідь було записано.» (язык по IP)
+    "your response has been recorded",   # опыт 16:27: с hl=en все семь страниц пришли на английском
+    "відповідь було записано",           # живой прогон 03:01 (POST ещё без hl=en): «Вашу відповідь було записано.»
     "ответ записан",                     # русская страница Google: «Ваш ответ записан.»
 )
-# Язык страницы ответа: без него Google выбирает язык по IP, и текст подтверждения угадывать приходится.
+# Язык страницы ответа просим английский: hl=en и Accept-Language безвредны, но гарантии Google не даёт —
+# в 03:01 (без них) страница пришла на украинском по IP, в опыте 16:27 (с ними) — на английском.
+# Поэтому подтверждение от языка не зависит.
 RESPONSE_LANGUAGE: Final[str] = "en"
 HEADER_ACCEPT_LANGUAGE: Final[str] = "Accept-Language"
 QUERY_LANGUAGE: Final[str] = "hl"
@@ -73,6 +81,24 @@ FIRST_PAGE: Final[int] = 0
 RETRY_ATTEMPTS: Final[int] = 3
 RETRY_BASE_DELAY_SEC: Final[float] = 1.0
 TRANSIENT_STATUS_MINIMUM: Final[int] = 500
+
+
+@dataclass(frozen=True)
+class Confirmation:
+    """Оба сигнала страницы ответа: решает структурный, текстовый маркер — только в лог."""
+
+    is_confirmed: bool
+    http_status: int
+    entry_fields: int          # вхождений entry.<цифры>: у страницы отказа есть, у успеха нет
+    has_fbzx: bool
+    is_form_page: bool         # это страница Google Forms, а не пустой или чужой ответ
+    marker: str | None         # какой из CONFIRMATION_MARKERS совпал; None — ни один
+
+    def log_fields(self) -> str:
+        return (
+            f"http_status={self.http_status} entry_fields={self.entry_fields} fbzx={self.has_fbzx} "
+            f"form_page={self.is_form_page} marker={self.marker!r}"
+        )
 
 
 @dataclass(frozen=True)
@@ -122,20 +148,21 @@ class GoogleFormSender:
             mask_stream_key(planned.stream_key),
         )
         response: HttpResponse = self._post_with_retry(url, body)
-        if _is_confirmed(response.text):
+        confirmation: Confirmation = read_confirmation(response.status_code, response.text)
+        if confirmation.is_confirmed:
             LOGGER.info(
-                "form_confirmed slot_id=%s channel=%s http_status=%d",
+                "form_confirmed slot_id=%s channel=%s %s",
                 planned.slot_id,
                 planned.channel.id,
-                response.status_code,
+                confirmation.log_fields(),
             )
             return FormSendResult(confirmed=True)
         path: Path | None = self._discovery.save_diagnostic(response.text, planned.form.url, "response")
         LOGGER.warning(
-            "form_not_confirmed slot_id=%s channel=%s http_status=%d page_title=%r saved=%s",
+            "form_not_confirmed slot_id=%s channel=%s %s page_title=%r saved=%s",
             planned.slot_id,
             planned.channel.id,
-            response.status_code,
+            confirmation.log_fields(),
             _page_title(response.text),
             path,
         )
@@ -330,14 +357,25 @@ def _build_body(
 
 
 def _with_response_language(url: str) -> str:
-    """hl=en в строке запроса — вместе с Accept-Language задаёт язык страницы ответа (§7.5 п.5)."""
+    """hl=en в строке запроса — вместе с Accept-Language просит английскую страницу ответа; гарантии нет (§7.5 п.5)."""
     separator: str = QUERY_JOINER if QUERY_SEPARATOR in url else QUERY_SEPARATOR
     return url + separator + urlencode({QUERY_LANGUAGE: RESPONSE_LANGUAGE})
 
 
-def _is_confirmed(body: str) -> bool:
+def read_confirmation(http_status: int, body: str) -> Confirmation:
+    """Записан ли ответ (§7.5 п.5): по структуре страницы, а не по её языку."""
+    entry_fields: int = len(ENTRY_FIELD_PATTERN.findall(body))
+    has_fbzx: bool = FIELD_FBZX in body
+    is_form_page: bool = FORM_PAGE_MARKER in body
     lowered: str = body.lower()
-    return any(marker in lowered for marker in CONFIRMATION_MARKERS)
+    return Confirmation(
+        is_confirmed=http_status == CONFIRMED_HTTP_STATUS and is_form_page and entry_fields == 0 and not has_fbzx,
+        http_status=http_status,
+        entry_fields=entry_fields,
+        has_fbzx=has_fbzx,
+        is_form_page=is_form_page,
+        marker=next((marker for marker in CONFIRMATION_MARKERS if marker in lowered), None),
+    )
 
 
 def _page_title(body: str) -> str:

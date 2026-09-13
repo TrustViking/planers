@@ -16,7 +16,7 @@ from app.form.base import (
     FormSendResult,
 )
 from app.form.discovery import FormDiscovery, FormStructure, SectionJump
-from app.form.submitter import CONFIRMATION_MARKERS, GoogleFormSender
+from app.form.submitter import CONFIRMATION_MARKERS, Confirmation, GoogleFormSender, read_confirmation
 from app.package.model import Slot
 from app.pipeline.plan import PlannedBroadcast
 from app.tests.conftest import build_planned
@@ -35,11 +35,13 @@ SlotFactory = Callable[..., Slot]
 KYIV: timezone = timezone(timedelta(hours=2))
 RESPONSE_URL: str = "https://docs.google.com/forms/d/e/ABC/formResponse?hl=en"
 FORM_TITLE: str = "TEST_Регистрация стрима (Stream registration)"
-# Страницы ответа Google: тело — как на живой странице, различается только видимый текст.
-CONFIRMED_BODY: str = f'<html><head><title>{FORM_TITLE}</title></head><body><div class="vHW8K">Your response has been recorded.</div></body></html>'
-UKRAINIAN_CONFIRMED_BODY: str = f'<html><head><title>{FORM_TITLE}</title></head><body><div class="vHW8K">Вашу відповідь було записано.</div></body></html>'
-RUSSIAN_CONFIRMED_BODY: str = f'<html><head><title>{FORM_TITLE}</title></head><body><div class="vHW8K">Ваш ответ записан</div></body></html>'
-ERROR_BODY: str = f"<html><head><title>{FORM_TITLE}</title></head><body><div>Повторіть спробу</div></body></html>"
+# Настоящие страницы ответа тренировочной формы, опыт app/tools/form_probe.py 13-09-2026 16:27:
+# успех — отправка A1 (HTTP 200), отказ — опыт D1 без обязательного «Stream-URL (YT)» (HTTP 400).
+DATA_DIR: Path = Path(__file__).parent / "data"
+SUCCESS_PAGE: str = (DATA_DIR / "form_response_success.html").read_text(encoding="utf-8")
+REFUSAL_PAGE: str = (DATA_DIR / "form_response_refusal.html").read_text(encoding="utf-8")
+ENGLISH_CONFIRMATION: str = "Your response has been recorded."
+CONFIRMED_BODY: str = SUCCESS_PAGE
 LEGACY_CLASS_BODY: str = '<html><div class="freebirdFormviewerViewResponseConfirmationMessage"></div></html>'
 STREAM_URL: str = "rtmp://A.rtmp.youtube.com/live2"
 STREAM_KEY: str = "abcd-abcd-abcd-abcd-abcd"
@@ -177,7 +179,7 @@ def test_response_without_marker_is_not_confirmed(
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
 ) -> None:
-    """Google отвечает 200 и на ошибку — подтверждением считается только маркер."""
+    """Ответ 200, но это не страница формы — доставкой ключа не считается."""
     session: _FakeSession = _session("<html>что-то пошло не так</html>")
     result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
     assert result.confirmed is False
@@ -283,45 +285,77 @@ def test_out_of_range_page_is_never_sent(
     assert body["pageHistory"] == ["0,1"]
 
 
+def test_real_success_page_is_confirmed() -> None:
+    confirmation: Confirmation = read_confirmation(200, SUCCESS_PAGE)
+    assert confirmation.is_confirmed is True
+    assert (confirmation.entry_fields, confirmation.has_fbzx, confirmation.is_form_page) == (0, False, True)
+    assert confirmation.marker == "your response has been recorded"
+
+
+def test_real_refusal_page_is_not_confirmed() -> None:
+    """Страница отказа — перерисованный раздел формы: в ней есть поле entry. и скрытый fbzx."""
+    confirmation: Confirmation = read_confirmation(400, REFUSAL_PAGE)
+    assert confirmation.is_confirmed is False
+    assert confirmation.entry_fields >= 1 and confirmation.has_fbzx is True
+    assert confirmation.marker is None
+
+
+def test_refusal_page_is_not_confirmed_even_with_http_200() -> None:
+    """Решает структура страницы: отказ с кодом 200 тоже не подтверждение."""
+    assert read_confirmation(200, REFUSAL_PAGE).is_confirmed is False
+
+
 @pytest.mark.parametrize(
-    "body",
-    [CONFIRMED_BODY, UKRAINIAN_CONFIRMED_BODY, RUSSIAN_CONFIRMED_BODY],
-    ids=["english", "ukrainian_live_13_09_2026", "russian"],
+    "visible_text",
+    ["Вашу відповідь було записано.", "Ваш ответ записан.", "Válaszát rögzítettük."],
+    ids=["ukrainian_live_03_01", "russian", "no_marker_matches"],
 )
-def test_confirmation_text_is_recognised_in_any_expected_language(
+def test_success_page_is_confirmed_whatever_its_language(
     tmp_path: Path,
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
-    body: str,
+    caplog: pytest.LogCaptureFixture,
+    visible_text: str,
 ) -> None:
-    """Живой прогон 13-09-2026: форма ответ приняла, а страница пришла на украинском — это подтверждение."""
-    session: _FakeSession = _session(body)
-    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    """Регрессия 13-09-2026 03:01: форма ответ записала, а страница пришла не на том языке."""
+    assert SUCCESS_PAGE.count(ENGLISH_CONFIRMATION) == 1
+    page: str = SUCCESS_PAGE.replace(ENGLISH_CONFIRMATION, visible_text)
+    session: _FakeSession = _session(page)
+    with caplog.at_level("INFO"):
+        result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
     assert (result.confirmed, result.diagnostic_path) == (True, None)
-    assert session.post_calls and len(session.post_calls) == 1
+    [line] = [message for message in caplog.messages if message.startswith("form_confirmed")]
+    assert "entry_fields=0 fbzx=False form_page=True" in line
 
 
-def test_confirmation_ignores_case_and_final_dot() -> None:
-    import app.form.submitter as submitter_module
+def test_success_page_without_any_marker_is_confirmed() -> None:
+    """Ни один текстовый маркер не совпал — подтверждение всё равно по структуре."""
+    page: str = SUCCESS_PAGE.replace(ENGLISH_CONFIRMATION, "Válaszát rögzítettük.")
+    confirmation: Confirmation = read_confirmation(200, page)
+    assert (confirmation.is_confirmed, confirmation.marker) == (True, None)
 
-    assert submitter_module._is_confirmed("<div>YOUR RESPONSE HAS BEEN RECORDED</div>") is True
+
+def test_marker_is_a_log_signal_only_and_ignores_case() -> None:
+    confirmation: Confirmation = read_confirmation(200, "<div>YOUR RESPONSE HAS BEEN RECORDED</div>")
+    assert confirmation.marker == "your response has been recorded"
+    assert confirmation.is_confirmed is False                    # не страница формы — не доставка
     assert all(marker == marker.lower() and not marker.endswith(".") for marker in CONFIRMATION_MARKERS)
 
 
-def test_error_page_is_not_confirmed_and_logged_with_title(
+def test_error_page_is_not_confirmed_and_logged_with_both_signals(
     tmp_path: Path,
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    session: _FakeSession = _session(ERROR_BODY)
+    session: _FakeSession = _session(REFUSAL_PAGE, status_code=400)
     with caplog.at_level("WARNING"):
         result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
-    assert (result.confirmed, result.code) == (False, FORM_CODE_NOT_CONFIRMED)
+    assert (result.confirmed, result.code, result.error) == (False, FORM_CODE_NOT_CONFIRMED, "HTTP 400")
     assert result.diagnostic_path is not None and result.diagnostic_path.exists()
-    assert "Повторіть спробу" in result.diagnostic_path.read_text(encoding="utf-8")
+    assert "This is a required question" in result.diagnostic_path.read_text(encoding="utf-8")
     [line] = [message for message in caplog.messages if message.startswith("form_not_confirmed")]
-    assert "http_status=200" in line and FORM_TITLE in line
+    assert "http_status=400" in line and "fbzx=True" in line and "marker=None" in line and FORM_TITLE in line
 
 
 def test_success_is_logged_with_http_status(
@@ -334,7 +368,7 @@ def test_success_is_logged_with_http_status(
     with caplog.at_level("INFO"):
         _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
     [line] = [message for message in caplog.messages if message.startswith("form_confirmed")]
-    assert "http_status=200" in line
+    assert "http_status=200 entry_fields=0 fbzx=False form_page=True marker='your response has been recorded'" in line
 
 
 def test_legacy_confirmation_class_is_not_a_confirmation(
