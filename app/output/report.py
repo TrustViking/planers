@@ -119,7 +119,6 @@ class OrphanLine:
 class RunReport:
     mode: RunMode
     generated_at_text: str
-    owner: str
     packages: list[ReportPackageLine] = field(default_factory=list)
     outcomes: list[PairOutcome] = field(default_factory=list)
     orphans: list[OrphanLine] = field(default_factory=list)
@@ -183,7 +182,7 @@ def platform_error_outcome(channel: ChannelConfig, error: PlatformError) -> Pair
 
 
 def planer_error_outcome(name: str, code: str, detail: str) -> PairOutcome:
-    """Сбой самого планера: не записан журнал, не записан файл ключей."""
+    """Сбой самого планера: например, не записан файл ключей."""
     return PairOutcome(
         kind=OutcomeKind.ERROR,
         account_name=name,
@@ -334,7 +333,7 @@ def build_skipped_lines(scan: PromoScan, selection: Selection, config: PlanerCon
 
 
 def _header_lines(report: RunReport) -> list[str]:
-    title: str = msg.REPORT_TITLE.format(generated_at=report.generated_at_text, owner=report.owner)
+    title: str = msg.REPORT_TITLE.format(generated_at=report.generated_at_text)
     if report.mode is RunMode.DRY_RUN:
         title += msg.REPORT_TITLE_DRY_RUN
     lines: list[str] = [title]

@@ -40,7 +40,7 @@ DEFAULT_AUTO_START: Final[bool] = True
 DEFAULT_SET_THUMBNAIL: Final[bool] = True
 DEFAULT_CATEGORY_ID: Final[str] = "22"   # People & Blogs; справочник идентификаторов — у YouTube
 CHANNELS_KEY: Final[str] = "channels"
-TOP_LEVEL_KEYS: Final[frozenset[str]] = frozenset({"owner", "min_lead_minutes", "keep_days"})
+TOP_LEVEL_KEYS: Final[frozenset[str]] = frozenset({"min_lead_minutes", "keep_days"})
 CHANNELS_TOP_LEVEL_KEYS: Final[frozenset[str]] = frozenset({CHANNELS_KEY})
 CHANNEL_KEYS: Final[frozenset[str]] = frozenset(
     {"id", "platform", "account_name", "languages", "privacy", "auto_start", "set_thumbnail", "category_id"}
@@ -71,7 +71,6 @@ class ChannelConfig:
 
 @dataclass(frozen=True)
 class PlanerConfig:
-    owner: str
     min_lead_minutes: int
     keep_days: int
     channels: tuple[ChannelConfig, ...]
@@ -90,7 +89,6 @@ class PlanerConfig:
 
 @dataclass(frozen=True)
 class _Settings:
-    owner: str
     min_lead_minutes: int
     keep_days: int
 
@@ -103,7 +101,6 @@ def load_channels(path: Path) -> tuple[ChannelConfig, ...]:
 def load_planer_config(config_file: Path, channels_file: Path) -> PlanerConfig:
     settings: _Settings = _ConfigParser(config_file).parse_settings(_read_yaml(config_file))
     return PlanerConfig(
-        owner=settings.owner,
         min_lead_minutes=settings.min_lead_minutes,
         keep_days=settings.keep_days,
         channels=load_channels(channels_file),
@@ -169,7 +166,6 @@ class _ConfigParser:
             allowed=TOP_LEVEL_KEYS,
         )
         return _Settings(
-            owner=self._text(root, "owner", prefix=""),
             min_lead_minutes=self._int(
                 root,
                 "min_lead_minutes",

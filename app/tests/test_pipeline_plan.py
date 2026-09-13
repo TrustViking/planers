@@ -9,7 +9,6 @@ from app.package.model import Slot
 from app.pipeline.plan import BroadcastSpec, ChangedField, Decision, OutcomeError, PlannedBroadcast
 from app.platforms.base import CreatedBroadcast, PlatformLimits, StreamInfo, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
-from app.state.registry import FormStatus, Registration
 from app.tests.conftest import build_planned
 
 ConfigFactory = Callable[..., PlanerConfig]
@@ -116,10 +115,9 @@ def test_long_title_is_trimmed_on_both_sides(make_slot_object: SlotFactory, now:
     assert actual.diff(expected) == ()
 
 
-def test_key_is_slot_and_channel(make_config: ConfigFactory, make_slot_object: SlotFactory, now: datetime) -> None:
+def test_fields_come_from_slot_and_channel(make_config: ConfigFactory, make_slot_object: SlotFactory, now: datetime) -> None:
     slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
     item: PlannedBroadcast = build_planned(slot, make_config().channels[0])
-    assert item.key == f"{slot.slot_id}|yt_ua"
     assert (item.slot_id, item.language, item.date, item.time) == (slot.slot_id, "uk", slot.date, slot.time)
     assert item.account_name == "Account yt_ua"
     assert item.form is slot.form
@@ -183,28 +181,6 @@ def test_kept_key_is_match_or_update_without_new_key(
     item.error = None
     item.take_new_key(CREATED)                         # привязка потока: ключ новый
     assert item.has_kept_key is False
-
-
-def test_registration_records_this_run_only(
-    make_config: ConfigFactory,
-    make_slot_object: SlotFactory,
-    now: datetime,
-) -> None:
-    """Журнал — запись о сделанном: previous_broadcast_ids всегда пуст, статус формы — этого запуска."""
-    recorded_at: datetime = datetime(2027, 3, 16, 12, 0)
-    channel: Any = make_config().channels[0]
-    kept: PlannedBroadcast = _with_found_key(build_planned(make_slot_object(now + timedelta(days=1), "uk"), channel))
-    kept_registration: Registration = kept.to_registration(recorded_at)
-    assert (kept_registration.form_status, kept_registration.form_sent_at) == (FormStatus.NOT_SENT, None)
-    assert (kept_registration.previous_broadcast_ids, kept_registration.created_at) == ([], recorded_at)
-    assert kept_registration.stream_key == "abcd-abcd-abcd-abcd-abcd"
-    fresh: PlannedBroadcast = build_planned(make_slot_object(now + timedelta(days=2), "uk"), channel)
-    fresh.take_new_key(CREATED)
-    assert fresh.to_registration(recorded_at).form_status is FormStatus.PENDING
-    fresh.is_form_sent = True
-    fresh.form_sent_at = recorded_at
-    sent: Registration = fresh.to_registration(recorded_at)
-    assert (sent.form_status, sent.form_sent_at, sent.stream_key) == (FormStatus.SENT, recorded_at, CREATED.stream_key)
 
 
 def test_package_fields_survive_platform_data(

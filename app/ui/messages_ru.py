@@ -14,7 +14,6 @@ FIRST_RUN_HEADER: Final[str] = (
     "Запуск без ключей: проверяю каналы и планирую эфиры по пакетам. "
     "Канал без авторизации будет авторизован сейчас."
 )
-REGISTRY_UNREADABLE: Final[str] = "Журнал {path} не читается: {error}. Ничего не делалось."
 
 # --- конфиг (ТЗ §5.2)
 CONFIG_CREATED_FROM_EXAMPLE: Final[str] = (
@@ -198,20 +197,18 @@ CHANGED_FIELDS_JOINER: Final[str] = " и "
 # ключи — OutcomeError.origin: значения Platform (app/config/loader.py) и источники планера
 ERROR_ORIGIN_TEXT: Final[dict[str, str]] = {
     "youtube": "YouTube",
-    "registry": "журнал",
     "package": "пакет",
 }
 PLANER_ERROR_TEXT_ORIGINS: Final[frozenset[str]] = frozenset({"planer"})
 PLANER_ERROR_TEXT: Final[dict[str, str]] = {
     "noBoundStream": "у найденного эфира нет привязанного потока — ключ получить нельзя; привяжите поток или удалите эфир",
-    "registrySaveFailed": "журнал не записан: {detail}",
     "keysWriteFailed": "файл ключей не записан: {detail}",
 }
 ORPHAN_LINE: Final[str] = "- {date} {time} {language} → {account_name} — {url} — эфир не удалён"
 SCHEDULED_LINE: Final[str] = "{prefix} — {url}"
 
 # --- отчёт (ТЗ §5.6)
-REPORT_TITLE: Final[str] = "# Планер — отчёт {generated_at}, владелец: {owner}"
+REPORT_TITLE: Final[str] = "# Планер — отчёт {generated_at}"
 REPORT_TITLE_DRY_RUN: Final[str] = " (dry-run)"
 REPORT_NOTICE: Final[str] = "⚠ {notice}"
 REPORT_SECTION_PACKAGES: Final[str] = "## Пакеты"

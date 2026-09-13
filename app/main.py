@@ -351,8 +351,6 @@ def _bindings_verified(paths: PlanerPaths, dependencies: _Dependencies) -> bool:
 def _print_outcome(outcome: RunOutcome, paths: PlanerPaths) -> None:
     if outcome.problem is RunProblem.PROMO_EMPTY:
         _say(msg.PROMO_EMPTY.format(path=paths.promo_dir))
-    elif outcome.problem is RunProblem.REGISTRY_UNREADABLE:
-        _say(msg.REGISTRY_UNREADABLE.format(path=paths.registry_file, error=outcome.problem_detail))
     if outcome.report_text is not None:
         _say(outcome.report_text)
     if outcome.report_path is not None:

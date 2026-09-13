@@ -34,7 +34,7 @@ from app.ui import messages_ru as msg
 STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 
 # Пример из ТЗ §5.6 с согласованными счётчиками (в ТЗ строки разделов даны выборочно).
-TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00, владелец: Иван
+TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00
 
 ## Пакеты
 - plan_14-09-2026_25-09-2026_gen13-09-2026-1015.bcast — принят, слотов 24, из них под мои языки 9
@@ -61,7 +61,7 @@ TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00, вл�
 Итог: создано 2, исправлено 1, копий 1, пропущено 3, ошибок 1. Файл ключей: keystreams\\keys.txt
 """
 
-EMPTY_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, владелец: Тест
+EMPTY_REPORT: str = """# Планер — отчёт 16-03-2027 12:00
 
 ## Пакеты
 
@@ -78,7 +78,7 @@ EMPTY_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, влад�
 Итог: создано 0, исправлено 0, копий 0, пропущено 0, ошибок 0.
 """
 
-DRY_RUN_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, владелец: Тест (dry-run)
+DRY_RUN_REPORT: str = """# Планер — отчёт 16-03-2027 12:00 (dry-run)
 ⚠ Площадка — заглушка
 
 ## Пакеты
@@ -97,7 +97,7 @@ DRY_RUN_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, вла�
 Итог: создано 1, исправлено 0, копий 0, пропущено 0, ошибок 0.
 """
 
-STATUS_REPORT: str = """# Планер — отчёт 16-03-2027 12:00, владелец: Тест
+STATUS_REPORT: str = """# Планер — отчёт 16-03-2027 12:00
 
 ## Запланировано на каналах (1)
 - 17-03-2027 19:00 uk → Test UA — https://www.youtube.com/watch?v=abc
@@ -119,7 +119,6 @@ def test_render_matches_tz_structure() -> None:
     report: RunReport = RunReport(
         mode=RunMode.FULL,
         generated_at_text="13-09-2026 12:00",
-        owner="Иван",
         packages=[
             ReportPackageLine(
                 "plan_14-09-2026_25-09-2026_gen13-09-2026-1015.bcast",
@@ -164,14 +163,13 @@ def test_render_matches_tz_structure() -> None:
 
 
 def test_empty_sections_render_with_zero() -> None:
-    assert render_report(RunReport(RunMode.FULL, "16-03-2027 12:00", "Тест")) == EMPTY_REPORT
+    assert render_report(RunReport(RunMode.FULL, "16-03-2027 12:00")) == EMPTY_REPORT
 
 
 def test_dry_run_marks_title_and_every_outcome() -> None:
     report: RunReport = RunReport(
         RunMode.DRY_RUN,
         "16-03-2027 12:00",
-        "Тест",
         outcomes=[_slot_outcome(OutcomeKind.CREATED)],
         notice="Площадка — заглушка",
     )
@@ -182,7 +180,6 @@ def test_status_report_structure() -> None:
     report: RunReport = RunReport(
         RunMode.STATUS,
         "16-03-2027 12:00",
-        "Тест",
         outcomes=[
             _slot_outcome(OutcomeKind.MATCHED, broadcast_url="https://www.youtube.com/watch?v=abc"),
             PairOutcome(OutcomeKind.ERROR, "Test RU", error=OutcomeError("youtube", "quotaExceeded", "квота исчерпана")),
@@ -196,7 +193,6 @@ def test_orphans_section_appears_after_matched() -> None:
     report: RunReport = RunReport(
         RunMode.FULL,
         "16-03-2027 12:00",
-        "Тест",
         orphans=[OrphanLine("19-03-2027", "12:00", "uk", "Test UA", "https://www.youtube.com/watch?v=old")],
     )
     text: str = render_report(report)
@@ -212,7 +208,6 @@ def test_matched_fixed_ambiguous_and_planer_error_texts() -> None:
     report: RunReport = RunReport(
         RunMode.FULL,
         "16-03-2027 12:00",
-        "Тест",
         outcomes=[
             _slot_outcome(OutcomeKind.MATCHED, broadcast_url="u1"),
             _slot_outcome(OutcomeKind.FIXED, changed_fields=("title", "description")),

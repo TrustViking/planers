@@ -24,7 +24,6 @@ from app.platforms.base import (
     UpcomingBroadcast,
     broadcast_url_for,
 )
-from app.state.registry import FormStatus, Registration, Registry
 
 EMPTY_MARKER: Final[str] = ""
 # Шаги, сбой которых не отменяет эфир (ТЗ §7.4 п.4); тексты — в messages_ru.
@@ -63,7 +62,7 @@ class OutcomeWarning:
 
 @dataclass(frozen=True)
 class OutcomeError:
-    origin: str        # "youtube" (Platform) | "registry" | "package" | "planer"
+    origin: str        # "youtube" (Platform) | "package" | "planer"
     code: str
     message: str = ""
 
@@ -152,11 +151,6 @@ class PlannedBroadcast:
     warnings: list[OutcomeWarning] = field(default_factory=list)   # превью, язык эфира
 
     @property
-    def key(self) -> str:
-        """Ключ журнала — только отсюда."""
-        return Registry.key(self.slot.slot_id, self.channel.id)
-
-    @property
     def slot_id(self) -> str:
         return self.slot.slot_id
 
@@ -186,33 +180,6 @@ class PlannedBroadcast:
         if self.found is None:
             return None
         return broadcast_url_for(self.channel, self.found.broadcast_id)
-
-    def to_registration(self, recorded_at: datetime) -> Registration:
-        """Запись о сделанном (ТЗ §5.4): поля прежние, previous_broadcast_ids унаследовано и всегда пусто."""
-        return Registration(
-            slot_id=self.slot.slot_id,
-            channel_id=self.channel.id,
-            account_name=self.channel.account_name,
-            language=self.slot.language,
-            date=self.slot.date,
-            time=self.slot.time,
-            broadcast_id=self.broadcast_id,
-            broadcast_url=self.broadcast_url,
-            stream_url=self.stream_url,
-            stream_key=self.stream_key,
-            package_id=self.source_package.package_id,
-            created_at=recorded_at,
-            form_status=self.form_status,
-            form_sent_at=self.form_sent_at,
-            previous_broadcast_ids=[],
-            last_error=self.last_error,
-        )
-
-    @property
-    def form_status(self) -> FormStatus:
-        if self.is_form_sent:
-            return FormStatus.SENT
-        return FormStatus.PENDING if self.is_new_key else FormStatus.NOT_SENT
 
     def take_new_key(self, created: CreatedBroadcast) -> None:
         """Ключ получен в этом запуске — единственное место, где ставится is_new_key."""

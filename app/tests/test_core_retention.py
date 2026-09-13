@@ -39,8 +39,8 @@ def test_cleanup_removes_only_expired_files(planer_paths: PlanerPaths, now: date
 def test_cleanup_touches_only_promo_and_logs(planer_paths: PlanerPaths, now: datetime) -> None:
     """keystreams\\, state\\, config\\ и вложенные папки — не её дело."""
     keys: Path = _aged_file(planer_paths.keys_file, now, days=90)
-    registry: Path = _aged_file(planer_paths.registry_file, now, days=90)
+    bindings: Path = _aged_file(planer_paths.channels_state_file, now, days=90)
     nested: Path = _aged_file(planer_paths.promo_dir / "old" / "nested.bcast", now, days=90)
 
     assert cleanup_expired(planer_paths, KEEP_DAYS, now) == []
-    assert keys.exists() and registry.exists() and nested.exists()
+    assert keys.exists() and bindings.exists() and nested.exists()

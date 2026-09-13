@@ -22,7 +22,6 @@ from app.pipeline.plan import BroadcastSpec, PlannedBroadcast
 from app.platforms.base import PlatformLimits
 from app.paths import PlanerPaths, build_paths, ensure_dirs
 from app.platforms.fake import FakePlatform
-from app.state.registry import Registration
 
 KYIV_WINTER: timezone = timezone(timedelta(hours=2))
 FIXED_NOW: datetime = datetime(2027, 3, 16, 12, 0, tzinfo=KYIV_WINTER)
@@ -81,7 +80,6 @@ def build_config(
     keep_days: int = 30,
 ) -> PlanerConfig:
     return PlanerConfig(
-        owner="Тест",
         min_lead_minutes=min_lead_minutes,
         keep_days=keep_days,
         channels=tuple(

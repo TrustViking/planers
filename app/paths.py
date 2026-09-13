@@ -32,7 +32,6 @@ class PlanerPaths:
     client_secret_file: Path     # secrets\client_secret.json — паспорт программы (ТЗ §5.3)
     promo_dir: Path
     state_dir: Path
-    registry_file: Path
     channels_state_file: Path    # state\channels.json — привязки каналов (ТЗ §5.3)
     keystreams_dir: Path
     keys_file: Path
@@ -66,7 +65,6 @@ def build_paths(root: Path) -> PlanerPaths:
         client_secret_file=secrets_dir / "client_secret.json",
         promo_dir=root / "promo",
         state_dir=state_dir,
-        registry_file=state_dir / "registry.json",
         channels_state_file=state_dir / "channels.json",
         keystreams_dir=keystreams_dir,
         keys_file=keystreams_dir / "keys.txt",

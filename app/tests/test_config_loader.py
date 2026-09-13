@@ -20,7 +20,6 @@ from app.paths import PlanerPaths
 from app.ui import messages_ru as msg
 
 BASE_SETTINGS: dict[str, Any] = {
-    "owner": "Тест",
     "min_lead_minutes": 60,
     "keep_days": 30,
 }
@@ -50,8 +49,7 @@ def _channel(index: int) -> Callable[[dict[str, Any]], dict[str, Any]]:
 
 
 INVALID_SETTINGS: list[tuple[str, Callable[[dict[str, Any]], object], str]] = [
-    ("owner_empty", lambda c: c.update(owner=""), "owner"),
-    ("owner_missing", lambda c: c.pop("owner"), "owner"),
+    ("owner_removed", lambda c: c.update(owner="Иван"), "owner"),
     ("min_lead_negative", lambda c: c.update(min_lead_minutes=-1), "min_lead_minutes"),
     ("min_lead_text", lambda c: c.update(min_lead_minutes="60"), "min_lead_minutes"),
     ("keep_days_zero", lambda c: c.update(keep_days=0), "keep_days"),
@@ -84,7 +82,6 @@ INVALID_CHANNELS: list[tuple[str, Callable[[dict[str, Any]], object], str]] = [
 
 def test_repo_examples_load_together(repo_config_example: Path, repo_channels_example: Path) -> None:
     config: PlanerConfig = load_planer_config(repo_config_example, repo_channels_example)
-    assert config.owner == "Иван"
     assert config.min_lead_minutes == 60
     assert config.keep_days == 30
     assert [channel.id for channel in config.channels] == ["yt_ua", "yt_ru"]
@@ -96,7 +93,7 @@ def test_repo_examples_load_together(repo_config_example: Path, repo_channels_ex
 
 
 def test_optional_keys_take_defaults(tmp_path: Path) -> None:
-    settings: Path = _write_settings(tmp_path, {"owner": "Тест"})
+    settings: Path = _write_settings(tmp_path, {})
     channels: Path = _write_channels(
         tmp_path,
         {"channels": [{"id": "yt_ua", "platform": "youtube", "account_name": "Test UA", "languages": ["uk"]}]},
@@ -175,7 +172,7 @@ def test_missing_channels_file_is_reported(tmp_path: Path) -> None:
     assert raised.value.key_path == msg.CONFIG_ROOT_KEY
 
 
-@pytest.mark.parametrize("text", ["- a\n- b\n", "owner: [\n", ""], ids=["root_list", "broken_yaml", "empty_file"])
+@pytest.mark.parametrize("text", ["- a\n- b\n", "keep_days: [\n", ""], ids=["root_list", "broken_yaml", "empty_file"])
 def test_unreadable_root_is_rejected(tmp_path: Path, text: str) -> None:
     path: Path = tmp_path / "planer.yaml"
     path.write_text(text, encoding="utf-8")

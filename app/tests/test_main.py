@@ -17,7 +17,7 @@ from app.platforms.fake import FakePlatform
 from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
 
-CONFIG_YAML: str = """owner: "Тест"
+CONFIG_YAML: str = """keep_days: 30
 """
 CHANNELS_YAML: str = """channels:
   - id: yt_ua
@@ -111,7 +111,7 @@ def test_run_without_flags_is_the_full_cycle(
     assert msg.FIRST_RUN_HEADER in out
     assert "эфир создан, ключ получен" in out
     assert len(fake_platform_in_main.created) == 1
-    assert (planer_root / "state" / "registry.json").exists()
+    assert not (planer_root / "state" / "registry.json").exists()     # журнала больше нет
     assert "fake-0001" in (planer_root / "keystreams" / "keys.txt").read_text(encoding="utf-8")
 
 
@@ -212,7 +212,6 @@ def test_dry_run_on_valid_package(
     [report] = list((planer_root / "logs").glob("*_report.md"))
     assert "## Пакеты" in report.read_text(encoding="utf-8")
     assert path.exists()
-    assert not (planer_root / "state" / "registry.json").exists()
     assert not (planer_root / "keystreams" / "keys.txt").exists()
 
 
@@ -243,17 +242,6 @@ def test_status_writes_keys_file(
     out: str = capsys.readouterr().out
     assert "## Запланировано на каналах (0)" in out
     assert "Файл ключей: keystreams" in out
-
-
-def test_unreadable_registry_exits_2(
-    planer_root: Path,
-    fake_platform_in_main: FakePlatform,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _ready(planer_root)
-    (planer_root / "state" / "registry.json").write_text("{broken", encoding="utf-8")
-    assert run_cli(["--status"]) == 2
-    assert "не читается" in capsys.readouterr().out
 
 
 def test_check_reports_every_channel(

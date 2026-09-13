@@ -3,7 +3,7 @@
 main.py только разбирает флаги, строит зависимости и печатает результат.
 Рабочая единица — PlannedBroadcast: один эфир одного слота на одном канале.
 Отправка в форму — отдельным финальным проходом, только новые ключи этого запуска (§7.5).
-Журнал только загружается (битый файл останавливает запуск) и пишется — решений по нему нет.
+Истина об эфирах — на площадке: планер не держит своей памяти о прошлых запусках.
 """
 from __future__ import annotations
 
@@ -71,14 +71,12 @@ from app.platforms.base import (
     VideoFixes,
     broadcast_url_for,
 )
-from app.state.registry import Registry, RegistryError
 
 __all__ = ["ExitCode", "RunMode", "RunOutcome", "RunProblem", "run"]
 
 LOGGER = get_logger("runner")
 # OutcomeError.origin для ошибок самого планера и его файлов; тексты — messages_ru.
 ERROR_ORIGIN_PACKAGE: Final[str] = "package"
-ERROR_CODE_REGISTRY_SAVE: Final[str] = "registrySaveFailed"
 ERROR_CODE_KEYS_WRITE: Final[str] = "keysWriteFailed"
 MISSING_FIELD: Final[str] = "-"
 DESCRIPTION_HEAD_CHARS: Final[int] = 80
@@ -96,13 +94,12 @@ SPEC_LOG_KEYS: Final[tuple[str, ...]] = (
 class ExitCode(IntEnum):
     OK = 0            # всё, что можно было сделать, сделано
     ERRORS = 1        # есть ошибки
-    CONFIG = 2        # ошибка конфигурации/авторизации/журнала — ничего не делалось
+    CONFIG = 2        # ошибка конфигурации/авторизации — ничего не делалось
     PROMO_EMPTY = 3   # в promo\ нет пакетов
 
 
 class RunProblem(str, Enum):
     PROMO_EMPTY = "promo_empty"
-    REGISTRY_UNREADABLE = "registry_unreadable"
 
 
 @dataclass(frozen=True)
@@ -112,7 +109,6 @@ class RunOutcome:
     report_text: str | None = None
     report_path: Path | None = None
     problem: RunProblem | None = None
-    problem_detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -125,7 +121,6 @@ class _RunContext:
     now_utc: datetime
     rng: random.Random
     notice: str | None
-    registry: Registry
     form_diagnostics: list[str]   # пути сохранённых ответов формы (§7.5)
 
     @property
@@ -134,7 +129,7 @@ class _RunContext:
 
     @property
     def now_naive(self) -> datetime:
-        """Для журнала: местное время без смещения (так он читается обратно, §5.4)."""
+        """Для form_sent_at: местное время без смещения."""
         return self.now_local.replace(tzinfo=None)
 
     @property
@@ -157,19 +152,7 @@ def run(
     *,
     notice: str | None = None,
 ) -> RunOutcome:
-    try:
-        registry: Registry = Registry.load(paths.registry_file)
-    except RegistryError as error:
-        LOGGER.error("registry_unreadable path=%s reason=%s", paths.registry_file, error)
-        return RunOutcome(
-            report=None,
-            exit_code=int(ExitCode.CONFIG),
-            problem=RunProblem.REGISTRY_UNREADABLE,
-            problem_detail=str(error),
-        )
-    context: _RunContext = _RunContext(
-        mode, config, paths, platform, form_sender, now_utc, rng, notice, registry, []
-    )
+    context: _RunContext = _RunContext(mode, config, paths, platform, form_sender, now_utc, rng, notice, [])
     if mode is RunMode.STATUS:
         return _run_status(context)
     return _run_promo(context)
@@ -194,7 +177,7 @@ def _run_promo(context: _RunContext) -> RunOutcome:
     keys_path: Path | None = None
     extra_outcomes: list[PairOutcome] = []
     if context.is_full:
-        keys_path, extra_outcomes = _execute_full(context, scan, selection)
+        keys_path, extra_outcomes = _execute_full(context, selection)
     outcomes: list[PairOutcome] = [
         outcome_from_planned(item, is_dry_run=not context.is_full)
         for item in selection.planned
@@ -204,7 +187,6 @@ def _run_promo(context: _RunContext) -> RunOutcome:
     report: RunReport = RunReport(
         mode=context.mode,
         generated_at_text=context.generated_at_text,
-        owner=context.config.owner,
         packages=build_package_lines(scan, context.config),
         outcomes=outcomes,
         orphans=[_orphan_line(orphan) for orphan in orphans],
@@ -222,33 +204,23 @@ def _run_promo(context: _RunContext) -> RunOutcome:
 
 def _execute_full(
     context: _RunContext,
-    scan: PromoScan,
     selection: Selection,
 ) -> tuple[Path | None, list[PairOutcome]]:
-    """Действия → журнал → форма → журнал → keys.txt (§4, §7.5)."""
+    """Действия → форма → keys.txt (§4, §7.5)."""
     executor: _Executor = _Executor(context)
     for item in selection.planned:
         executor.execute(item)
-    for accepted in scan.packages:
-        context.registry.note_package(
-            accepted.package.package_id,
-            accepted.package.path.name,
-            context.now_naive,
-        )
-    outcomes: list[PairOutcome] = _save_registry(context, selection.planned)
     context.form_diagnostics.extend(_send_forms(context, selection.planned))
-    outcomes.extend(_save_registry(context, selection.planned))
-    keys_path, keys_errors = _write_keys(
+    keys_path, outcomes = _write_keys(
         context,
         # все будущие эфиры с ключом, включая слоты внутри min_lead_minutes (§5.5)
         [key_row_from_planned(item) for item in selection.planned if item.stream_key],
     )
-    outcomes.extend(keys_errors)
     return keys_path, outcomes
 
 
 def _run_status(context: _RunContext) -> RunOutcome:
-    """Без promo: эфиры с маркером планера на каналах → keys.txt и отчёт; журнал не пишется."""
+    """Без promo: эфиры с маркером планера на каналах → keys.txt и отчёт."""
     marked: MarkedScan = Reconciler(context.platform).marked_broadcasts(context.config.channels)
     rows: list[KeyRow] = [key_row_from_marked(item) for item in marked.broadcasts]
     outcomes: list[PairOutcome] = [outcome_from_marked(item) for item in marked.broadcasts]
@@ -258,7 +230,6 @@ def _run_status(context: _RunContext) -> RunOutcome:
     report: RunReport = RunReport(
         mode=RunMode.STATUS,
         generated_at_text=context.generated_at_text,
-        owner=context.config.owner,
         outcomes=outcomes,
         keys_file_path=_display_path(context.paths, keys_path),
         notice=context.notice,
@@ -291,7 +262,7 @@ def _display_path(paths: PlanerPaths, path: Path | None) -> str | None:
 
 
 def _form_error_text(result: FormSendResult) -> str | None:
-    """Код исхода в журнал: текст для владельца собирает report.py."""
+    """Код исхода в объект (last_error): текст для владельца собирает report.py."""
     if not result.code:
         return result.error
     return f"{result.code}: {result.error}" if result.error else result.code
@@ -306,19 +277,6 @@ def _orphan_line(orphan: OrphanBroadcast) -> OrphanLine:
         account_name=orphan.channel.account_name,
         broadcast_url=broadcast_url_for(orphan.channel, orphan.broadcast.broadcast_id),
     )
-
-
-def _save_registry(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[PairOutcome]:
-    """Запись о сделанном (§5.4): по каждому объекту с ключом, как он есть сейчас на площадке."""
-    for item in planned:
-        if item.stream_key:
-            context.registry.upsert(item.to_registration(context.now_naive))
-    try:
-        context.registry.save(context.paths.registry_file)
-    except OSError as error:
-        LOGGER.error("registry_save_failed path=%s reason=%s", context.paths.registry_file, error)
-        return [planer_error_outcome(context.paths.registry_file.name, ERROR_CODE_REGISTRY_SAVE, str(error))]
-    return []
 
 
 def _write_keys(context: _RunContext, rows: list[KeyRow]) -> tuple[Path | None, list[PairOutcome]]:
