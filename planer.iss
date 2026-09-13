@@ -2,10 +2,10 @@
 ;   ISCC /DAppVersion=<app\version.py> /DIncludeSecrets=0|1 planer.iss
 ; Источник файлов — dist\planer (то, что прошло смоук): planer.exe, _internal\, planer.bat, config\*.example.yaml.
 ;
-; Папка и права — как в installer.iss броадкастера: мастер спрашивает «для всех пользователей /
-; только для меня» (PrivilegesRequiredOverridesAllowed) и всегда показывает страницу выбора папки.
-; По умолчанию {autopf}\Planer: «только для меня» — %LOCALAPPDATA%\Programs\Planer,
-; «для всех» — C:\Program Files\Planer. Во frozen-режиме корень планера — папка exe
+; Права — как в installer.iss броадкастера: мастер спрашивает «для всех пользователей / только для меня»
+; (PrivilegesRequiredOverridesAllowed) и всегда показывает страницу выбора папки.
+; Папка по умолчанию — рядом с файлом установщика: {src}\Planer (setup в D:\_exe → D:\_exe\Planer).
+; При обновлении мастер предлагает папку прежней установки (UsePreviousAppDir). Во frozen-режиме корень планера — папка exe
 ; (app\paths.py::resolve_root), туда пишутся config\, secrets\, promo\, state\, keystreams\, logs\;
 ; в Program Files без прав администратора писать нельзя — ставить в папку с правом записи (например D:\_exe\Planer).
 ;
@@ -35,7 +35,7 @@ AppName=Планер
 AppVersion={#AppVersion}
 AppVerName=Планер {#AppVersion}
 AppPublisher=TrustViking
-DefaultDirName={autopf}\Planer
+DefaultDirName={src}\Planer
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog commandline
 DisableDirPage=no
