@@ -17,6 +17,7 @@ set "BUILD_PYTHON=%BUILD_VENV%\Scripts\python.exe"
 set "SPEC=%ROOT%\packaging\planer.spec"
 set "ISS=%ROOT%\packaging\planer.iss"
 set "DIST_APP=%ROOT%\dist\planer"
+set "APP_ICON=%ROOT%\planers.ico"
 set "DISCOVERY_DOC=%DIST_APP%\_internal\googleapiclient\discovery_cache\documents\youtube.v3.json"
 
 if "%PLANER_INCLUDE_SECRETS%"=="1" (
@@ -61,6 +62,12 @@ if not defined APP_VERSION (
 )
 echo [INFO] Version: %APP_VERSION%
 
+if not exist "%APP_ICON%" (
+  echo [ERROR] Icon not found: "%APP_ICON%"
+  call :finish 1
+  exit /b 1
+)
+
 if "%PLANER_INCLUDE_SECRETS%"=="1" if not exist "%ROOT%\secrets\client_secret.json" (
   echo [ERROR] secrets\client_secret.json not found - local installer needs it.
   call :finish 1
@@ -82,9 +89,10 @@ if not exist "%DISCOVERY_DOC%" (
   exit /b 1
 )
 
-rem Next to the exe: launcher and config examples (the program creates planer.yaml / channels.yaml from them).
+rem Next to the exe: launcher, icon for shortcuts and config examples (the program creates planer.yaml / channels.yaml from them).
 mkdir "%DIST_APP%\config" >nul 2>&1
 copy /Y "%ROOT%\packaging\planer.bat" "%DIST_APP%\planer.bat" >nul
+copy /Y "%APP_ICON%" "%DIST_APP%\planers.ico" >nul
 copy /Y "%ROOT%\config\planer.example.yaml" "%DIST_APP%\config\planer.example.yaml" >nul
 copy /Y "%ROOT%\config\channels.example.yaml" "%DIST_APP%\config\channels.example.yaml" >nul
 if not exist "%DIST_APP%\config\channels.example.yaml" (

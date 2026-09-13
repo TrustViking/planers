@@ -645,13 +645,14 @@ D:\_projects\planers\
 ├── logs\                          # ignored: логи и отчёты запусков (§5.6, §5.7)
 ├── packaging\
 │   ├── planer.spec                # PyInstaller: одна папка, точка входа app\main.py, из документов discovery — только youtube.v3.json
-│   ├── planer.iss                 # Inno Setup: установка для текущего пользователя, версия из app\version.py
+│   ├── planer.iss                 # Inno Setup как у броадкастера: «для всех / только для меня», выбор папки, иконка planers.ico
 │   └── planer.bat                 # пусковой батник поставки: рядом с planer.exe, код выхода и pause
 ├── planer.bat                     # девелоперский запуск через .venv_planers (§7.6)
 ├── build_release.bat              # сборка exe + инсталлятор без client_secret.json
 ├── build_local.bat                # то же + secrets\client_secret.json в инсталляторе; не публиковать
 ├── .venv_build\                   # ignored: сборочное окружение = requirements.txt + pyinstaller
 ├── build\, dist\                   # ignored: dist\planer — сборка, dist\installer — инсталлятор
+├── planers.ico                    # иконка exe, установщика и ярлыков
 ├── CLAUDE.md, README.md, TZ_planer.md
 └── requirements.txt
 ```
@@ -663,7 +664,7 @@ D:\_projects\planers\
 3. чистят `build\` и `dist\`, собирают `packaging\planer.spec` в `dist\planer\`, проверяют, что в сборке есть `_internal\googleapiclient\discovery_cache\documents\youtube.v3.json` (без него `build("youtube", "v3", cache_discovery=False)` у владельца упал бы), кладут рядом с exe `planer.bat` поставки и `config\*.example.yaml`;
 4. зовут Inno Setup (`ISCC`); готовый файл — `dist\installer\planer-setup-<версия>.exe` (release) или `planer-setup-local-<версия>.exe` (local). Нет Inno Setup — exe собран, печатается подсказка, код выхода 3.
 
-Что ставит инсталлятор. Каталог — `%LOCALAPPDATA%\Programs\Planer` (`{autopf}` при `PrivilegesRequired=lowest`): только для текущего пользователя, потому что во frozen-режиме корень планера — папка exe (`app\paths.py::resolve_root`), и туда пишутся `config\`, `secrets\`, `promo\`, `state\`, `keystreams\`, `logs\`; в Program Files обычный пользователь писать не может. `AppId` фиксированный — повторная установка обновляет, а не ставит вторую копию. Кладутся: `planer.exe` с `_internal\`, `planer.bat`, `config\planer.example.yaml` и `config\channels.example.yaml` (рабочие yaml создаёт программа при первом запуске и инсталлятор их не трогает), для local — `secrets\client_secret.json`; создаётся пустая `promo\`. Ярлыки: на рабочем столе — «Планер» на `planer.bat` (не на exe: окно закрылось бы сразу) и «Планер — пакеты» на `promo\`; в меню «Пуск» — «Планер» на `planer.bat`. Удаление снимает только положенное инсталлятором: рабочие yaml, токены в `secrets\`, `promo\`, `state\`, `keystreams\`, `logs\` остаются.
+Что ставит инсталлятор. Папка и права — как в `installer.iss` броадкастера: мастер спрашивает «для всех пользователей / только для меня» и всегда показывает страницу выбора папки; по умолчанию `{autopf}\Planer` — для «только для меня» это `%LOCALAPPDATA%\Programs\Planer`, для «для всех» — `C:\Program Files\Planer` (с запросом прав администратора). Во frozen-режиме корень планера — папка exe (`app\paths.py::resolve_root`), туда пишутся `config\`, `secrets\`, `promo\`, `state\`, `keystreams\`, `logs\`, поэтому ставить надо в папку, куда у пользователя есть право записи (например `D:\_exe\Planer`, как у броадкастера); в `C:\Program Files` без прав администратора планер писать не сможет — это обязательный пункт README владельца. `AppId` фиксированный — повторная установка обновляет, а не ставит вторую копию. Кладутся: `planer.exe` (с иконкой `planers.ico`) и `_internal\`, `planer.bat`, `planers.ico`, `config\planer.example.yaml` и `config\channels.example.yaml` (рабочие yaml создаёт программа при первом запуске и инсталлятор их не трогает), для local — `secrets\client_secret.json`; создаётся пустая `promo\`. Иконка установщика — тоже `planers.ico`. Ярлыки: на рабочем столе — «Планер» на `planer.bat` с иконкой `planers.ico` (не на exe: окно закрылось бы сразу) и «Планер — пакеты» на `promo\`; в меню «Пуск» — «Планер» на `planer.bat` с той же иконкой. Удаление снимает только положенное инсталлятором: рабочие yaml, токены в `secrets\`, `promo\`, `state\`, `keystreams\`, `logs\` остаются.
 
 ## 10. Нефункциональные требования
 

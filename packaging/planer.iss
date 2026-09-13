@@ -2,10 +2,12 @@
 ;   ISCC /DAppVersion=<app\version.py> /DIncludeSecrets=0|1 packaging\planer.iss
 ; Источник файлов — dist\planer (то, что прошло смоук): planer.exe, _internal\, planer.bat, config\*.example.yaml.
 ;
-; Установка только для текущего пользователя: во frozen-режиме корень планера — папка exe
-; (app\paths.py::resolve_root), туда пишутся config\, secrets\, promo\, state\, keystreams\, logs\.
-; В Program Files обычный пользователь писать не может, поэтому PrivilegesRequired=lowest
-; и {autopf} = %LOCALAPPDATA%\Programs.
+; Папка и права — как в installer.iss броадкастера: мастер спрашивает «для всех пользователей /
+; только для меня» (PrivilegesRequiredOverridesAllowed) и всегда показывает страницу выбора папки.
+; По умолчанию {autopf}\Planer: «только для меня» — %LOCALAPPDATA%\Programs\Planer,
+; «для всех» — C:\Program Files\Planer. Во frozen-режиме корень планера — папка exe
+; (app\paths.py::resolve_root), туда пишутся config\, secrets\, promo\, state\, keystreams\, logs\;
+; в Program Files без прав администратора писать нельзя — ставить в папку с правом записи (например D:\_exe\Planer).
 ;
 ; Удаление снимает только то, что положил инсталлятор. Рабочие planer.yaml / channels.yaml,
 ; токены в secrets\, promo\, state\, keystreams\, logs\ создаёт программа — они остаются.
@@ -35,6 +37,8 @@ AppVerName=Планер {#AppVersion}
 AppPublisher=TrustViking
 DefaultDirName={autopf}\Planer
 PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog commandline
+DisableDirPage=no
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
 OutputDir={#RepoRoot}\dist\installer
@@ -42,6 +46,7 @@ OutputBaseFilename={#SetupBaseName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile={#SourceDir}\planers.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName=Планер {#AppVersion}
@@ -60,6 +65,7 @@ Name: "{app}\promo"; Flags: uninsneveruninstall
 Source: "{#SourceDir}\planer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\planer.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\planers.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Только примеры: рабочие planer.yaml и channels.yaml создаёт программа (app\config\loader.py::ensure_configs_exist).
 Source: "{#SourceDir}\config\planer.example.yaml"; DestDir: "{app}\config"; Flags: ignoreversion
 Source: "{#SourceDir}\config\channels.example.yaml"; DestDir: "{app}\config"; Flags: ignoreversion
@@ -71,6 +77,6 @@ Source: "{#RepoRoot}\secrets\client_secret.json"; DestDir: "{app}\secrets"; Flag
 
 [Icons]
 ; Ярлыки — на planer.bat, а не на exe: без pause окно консоли закрылось бы вместе с программой.
-Name: "{autodesktop}\Планер"; Filename: "{app}\planer.bat"; WorkingDir: "{app}"; IconFilename: "{app}\planer.exe"
+Name: "{autodesktop}\Планер"; Filename: "{app}\planer.bat"; WorkingDir: "{app}"; IconFilename: "{app}\planers.ico"
 Name: "{autodesktop}\Планер — пакеты"; Filename: "{app}\promo"
-Name: "{autoprograms}\Планер"; Filename: "{app}\planer.bat"; WorkingDir: "{app}"; IconFilename: "{app}\planer.exe"
+Name: "{autoprograms}\Планер"; Filename: "{app}\planer.bat"; WorkingDir: "{app}"; IconFilename: "{app}\planers.ico"

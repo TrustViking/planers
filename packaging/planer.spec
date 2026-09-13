@@ -5,7 +5,7 @@ PyInstaller spec планера (ТЗ §9, этап 5). Собирается и�
 
 Режим — одна папка (COLLECT): onefile распаковывается во временный каталог при каждом запуске.
 Точка входа — app/main.py. Консольное приложение: сводку печатает в консоль, запускается из planer.bat.
-Номер версии — только из app/version.py.
+Номер версии — только из app/version.py. Иконка exe — planers.ico из корня репо (как icon= в broadcaster.spec).
 
 googleapiclient: build(..., cache_discovery=False) берёт встроенный документ описания API
 из googleapiclient/discovery_cache/documents/. Из ~600 документов (~100 МБ) в сборку идёт только
@@ -24,6 +24,7 @@ print(f"[planer.spec] APP_VERSION={APP_VERSION}")
 
 DISCOVERY_DOCUMENTS = "googleapiclient/discovery_cache/documents"
 YOUTUBE_DOCUMENT = "youtube.v3.json"
+APP_ICON = ROOT / "planers.ico"
 youtube_document = Path(googleapiclient.__file__).parent / "discovery_cache" / "documents" / YOUTUBE_DOCUMENT
 
 
@@ -63,6 +64,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="planer",
+    icon=str(APP_ICON),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
