@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import json
 import shutil
 from collections.abc import Callable
@@ -108,8 +109,10 @@ def test_run_without_flags_is_the_full_cycle(
     make_package(planer_root / "promo", slots=[make_slot("01-01-2099", "19:00", "uk")])
     assert run_cli([]) == 0
     out: str = capsys.readouterr().out
-    assert msg.FIRST_RUN_HEADER in out
-    assert "эфир создан, ключ получен" in out
+    assert out.startswith("Планер — ")
+    assert "01-01-2099 19:00 uk -> Test UA, ключ передан в форму" in out
+    assert "## " not in out                                            # markdown — только в отчёте
+    assert re.search(r"^  лог +logs\\\d{2}-\d{2}-\d{4}_\d{6}_planer\.log$", out, re.MULTILINE)
     assert len(fake_platform_in_main.created) == 1
     assert not (planer_root / "state" / "registry.json").exists()     # журнала больше нет
     assert "fake-0001" in (planer_root / "keystreams" / "keys.txt").read_text(encoding="utf-8")
@@ -205,12 +208,17 @@ def test_dry_run_on_valid_package(
     )
     assert run_cli(["--dry-run"]) == 0
     captured = capsys.readouterr()
-    assert f"{path.name} — принят, слотов 2, из них под мои языки 2" in captured.out
-    assert "- 01-01-2099 19:00 en → Test RU — эфира нет, будет создан — не выполнено (dry-run)" in captured.out
-    assert "- 01-01-2099 19:00 uk → Test UA — эфира нет, будет создан — не выполнено (dry-run)" in captured.out
+    assert "dry-run" in captured.out.splitlines()[0]
+    assert re.search(r"^  пакеты +1   слотов 2, моих 2$", captured.out, re.MULTILINE)
+    assert re.search(r"^  создать +2$", captured.out, re.MULTILINE)
+    assert "будет создан" not in captured.out                          # подробности — в отчёте
     assert "run_started" not in captured.err
     [report] = list((planer_root / "logs").glob("*_report.md"))
-    assert "## Пакеты" in report.read_text(encoding="utf-8")
+    report_text: str = report.read_text(encoding="utf-8")
+    assert f"{path.name} — принят, слотов 2, из них под мои языки 2" in report_text
+    assert "- 01-01-2099 19:00 en -> Test RU — эфира нет, будет создан — не выполнено (dry-run)" in report_text
+    assert "- 01-01-2099 19:00 uk -> Test UA — эфира нет, будет создан — не выполнено (dry-run)" in report_text
+    assert f"отчёт   logs\\{report.name}" in captured.out
     assert path.exists()
     assert not (planer_root / "keystreams" / "keys.txt").exists()
 
@@ -238,10 +246,10 @@ def test_status_writes_keys_file(
     assert run_cli(["--status"]) == 0
     keys_file: Path = planer_root / "keystreams" / "keys.txt"
     lines: list[str] = keys_file.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2 and all(line.startswith("# ") for line in lines)
+    assert len(lines) == 3 and all(line.startswith("# ") for line in lines)
     out: str = capsys.readouterr().out
-    assert "## Запланировано на каналах (0)" in out
-    assert "Файл ключей: keystreams" in out
+    assert re.search(r"^  запланировано +0$", out, re.MULTILINE)
+    assert re.search(r"^  ключи +keystreams", out, re.MULTILINE)
 
 
 def test_check_reports_every_channel(

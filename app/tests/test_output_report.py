@@ -15,10 +15,15 @@ from app.output.report import (
     ReportPackageLine,
     RunMode,
     RunReport,
+    RunTotals,
+    SkipKind,
+    SkippedLine,
     build_package_lines,
     build_skipped_lines,
+    build_totals,
     build_warning_lines,
     render_report,
+    skip_text,
     write_report,
 )
 from app.package.promo import PromoScan, scan_promo
@@ -33,79 +38,57 @@ from app.ui import messages_ru as msg
 
 STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 
-# Пример из ТЗ §5.6 с согласованными счётчиками (в ТЗ строки разделов даны выборочно).
+# Пример из ТЗ §5.6: итог и ошибки сверху, справка ниже, пустых разделов нет.
 TZ_SAMPLE_REPORT: str = """# Планер — отчёт 13-09-2026 12:00
 
-## Пакеты
-- plan_14-09-2026_25-09-2026_gen13-09-2026-1015.bcast — принят, слотов 24, из них под мои языки 9
-- plan_07-09-2026_11-09-2026_gen06-09-2026-1000.bcast — все слоты в прошлом, ничего из него не планируется
+Итог: создано 2, исправлено 1, совпадает 1, пропущено 3, ошибок 1. Файл ключей: keystreams\\keys.txt
+
+## Ошибки
+- 19-09-2026 19:00 uk -> Іван UA — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)
 
 ## Создано (2)
-- 16-09-2026 19:00 uk → Іван UA — эфир создан, ключ получен, форма ✅
-- 18-09-2026 19:00 uk → Іван UA — эфир создан, ключ получен, форма ❌ форма не подтвердила запись ответа (notConfirmed); повторно планер ключ не отправит — передайте его стримеру из keys.txt вручную
+- 16-09-2026 19:00 uk -> Іван UA — эфир создан, ключ передан в форму
+- 18-09-2026 19:00 uk -> Іван UA — эфир создан, ключ в форму НЕ передан — форма не подтвердила запись ответа (notConfirmed); повторно планер его не отправит, передайте ключ стримеру из keys.txt вручную
 
 ## Исправлено (1)
-- 17-09-2026 19:00 uk → Іван UA — на YouTube было другое описание; обновлено. Ключ и ссылка прежние
+- 17-09-2026 19:00 uk -> Іван UA — на YouTube было другое описание; обновлено. Ключ и ссылка прежние
 
 ## Уже запланировано, совпадает (1)
-- 16-09-2026 21:00 ru → Иван RU — https://www.youtube.com/watch?v=def456
+- 16-09-2026 21:00 ru -> Иван RU — https://www.youtube.com/watch?v=def456
 
 ## Пропущено
 - 14-09-2026 19:00 uk — уже прошло
 - 15-09-2026 19:00 en — нет канала для языка en
 - 13-09-2026 12:30 uk — до старта меньше 60 минут
 
-## Ошибки
-- 19-09-2026 19:00 uk → Іван UA — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)
-
-Итог: создано 2, исправлено 1, копий 1, пропущено 3, ошибок 1. Файл ключей: keystreams\\keys.txt
+## Пакеты
+- plan_14-09-2026_25-09-2026_gen13-09-2026-1015.bcast — принят, слотов 24, из них под мои языки 9
+- plan_07-09-2026_11-09-2026_gen06-09-2026-1000.bcast — все слоты в прошлом, ничего из него не планируется
 """
 
 EMPTY_REPORT: str = """# Планер — отчёт 16-03-2027 12:00
 
-## Пакеты
-
-## Создано (0)
-
-## Исправлено (0)
-
-## Уже запланировано, совпадает (0)
-
-## Пропущено
-
-## Ошибки
-
-Итог: создано 0, исправлено 0, копий 0, пропущено 0, ошибок 0.
+Итог: создано 0, исправлено 0, совпадает 0, пропущено 0, ошибок 0.
 """
 
 DRY_RUN_REPORT: str = """# Планер — отчёт 16-03-2027 12:00 (dry-run)
-⚠ Площадка — заглушка
+Внимание: Площадка — заглушка
 
-## Пакеты
+Итог: создано 1, исправлено 0, совпадает 0, пропущено 0, ошибок 0.
 
 ## Создано (1)
-- 17-03-2027 19:00 uk → Test UA — эфира нет, будет создан — не выполнено (dry-run)
-
-## Исправлено (0)
-
-## Уже запланировано, совпадает (0)
-
-## Пропущено
-
-## Ошибки
-
-Итог: создано 1, исправлено 0, копий 0, пропущено 0, ошибок 0.
+- 17-03-2027 19:00 uk -> Test UA — эфира нет, будет создан — не выполнено (dry-run)
 """
 
 STATUS_REPORT: str = """# Планер — отчёт 16-03-2027 12:00
 
-## Запланировано на каналах (1)
-- 17-03-2027 19:00 uk → Test UA — https://www.youtube.com/watch?v=abc
+Итог: запланировано 1, ошибок 1. Файл ключей: keystreams\\keys.txt
 
 ## Ошибки
 - Test RU — YouTube: quotaExceeded (квота исчерпана)
 
-Итог: запланировано 1, ошибок 1. Файл ключей: keystreams\\keys.txt
+## Запланировано на каналах (1)
+- 17-03-2027 19:00 uk -> Test UA — https://www.youtube.com/watch?v=abc
 """
 
 
@@ -153,16 +136,16 @@ def test_render_matches_tz_structure() -> None:
             ),
         ],
         skipped=[
-            "- 14-09-2026 19:00 uk — уже прошло",
-            "- 15-09-2026 19:00 en — нет канала для языка en",
-            "- 13-09-2026 12:30 uk — до старта меньше 60 минут",
+            SkippedLine(SkipKind.PAST, "14-09-2026", "19:00", "uk"),
+            SkippedLine(SkipKind.NO_CHANNEL, "15-09-2026", "19:00", "en"),
+            SkippedLine(SkipKind.TOO_LATE, "13-09-2026", "12:30", "uk", minutes=60),
         ],
         keys_file_path="keystreams\\keys.txt",
     )
     assert render_report(report) == TZ_SAMPLE_REPORT
 
 
-def test_empty_sections_render_with_zero() -> None:
+def test_empty_sections_are_not_printed() -> None:
     assert render_report(RunReport(RunMode.FULL, "16-03-2027 12:00")) == EMPTY_REPORT
 
 
@@ -189,7 +172,7 @@ def test_status_report_structure() -> None:
     assert render_report(report) == STATUS_REPORT
 
 
-def test_orphans_section_appears_after_matched() -> None:
+def test_orphans_section_appears_only_when_present() -> None:
     report: RunReport = RunReport(
         RunMode.FULL,
         "16-03-2027 12:00",
@@ -197,10 +180,11 @@ def test_orphans_section_appears_after_matched() -> None:
     )
     text: str = render_report(report)
     assert (
-        "## Уже запланировано, совпадает (0)\n\n"
         "## Перенесён или отменён? (1)\n"
-        "- 19-03-2027 12:00 uk → Test UA — https://www.youtube.com/watch?v=old — эфир не удалён\n"
+        "- 19-03-2027 12:00 uk -> Test UA — https://www.youtube.com/watch?v=old — эфир не удалён\n"
     ) in text
+    assert "## Уже запланировано" not in text
+    assert "Перенесён или отменён" not in render_report(RunReport(RunMode.FULL, "16-03-2027 12:00"))
 
 
 def test_matched_fixed_ambiguous_and_planer_error_texts() -> None:
@@ -217,13 +201,69 @@ def test_matched_fixed_ambiguous_and_planer_error_texts() -> None:
         ],
     )
     text: str = render_report(report)
-    assert "→ Test UA — u1\n" in text
+    assert "-> Test UA — u1\n" in text
     assert "другое название и описание; обновлено. Ключ и ссылка прежние\n" in text
-    assert "эфир создан, ключ получен, форма ✅\n" in text
+    assert "эфир создан, ключ передан в форму\n" in text
     assert "несколько эфиров на эту минуту без маркера планера" in text
     assert "у найденного эфира нет привязанного потока" in text
     assert "журнал" not in text and "повторная отправка" not in text and "создан заново" not in text
-    assert text.endswith("ошибок 2.\n")
+    assert text.splitlines()[2] == "Итог: создано 1, исправлено 1, совпадает 1, пропущено 0, ошибок 2."
+    assert "✅" not in text and "❌" not in text
+
+
+def test_errors_and_warnings_come_before_reference_sections() -> None:
+    """Отчёт открывают ради ошибок и предупреждений — они сразу после итога, справка ниже."""
+    report: RunReport = RunReport(
+        RunMode.FULL,
+        "16-03-2027 12:00",
+        packages=[ReportPackageLine("plan.bcast", PackageLineStatus.ACCEPTED, slots_total=1, slots_mine=1)],
+        outcomes=[
+            _slot_outcome(OutcomeKind.CREATED, form=FormState.SENT),
+            _slot_outcome(OutcomeKind.ERROR, error=OutcomeError("youtube", "forbidden", "нельзя")),
+        ],
+        warnings=["предупреждение"],
+        mismatches=["расхождение"],
+        skipped=[SkippedLine(SkipKind.PAST, "15-03-2027", "19:00", "uk")],
+    )
+    headers: list[str] = [line for line in render_report(report).splitlines() if line.startswith("## ")]
+    assert headers == [
+        "## Ошибки",
+        "## Предупреждения",
+        "## Расхождения с платформой",
+        "## Создано (1)",
+        "## Пропущено",
+        "## Пакеты",
+    ]
+
+
+def test_totals_are_counted_once_for_report_and_console() -> None:
+    report: RunReport = RunReport(
+        RunMode.FULL,
+        "16-03-2027 12:00",
+        packages=[
+            ReportPackageLine("a.bcast", PackageLineStatus.ACCEPTED, slots_total=4, slots_mine=1),
+            ReportPackageLine("b.bcast", PackageLineStatus.DAMAGED, detail="не ZIP-архив"),
+        ],
+        outcomes=[
+            _slot_outcome(OutcomeKind.CREATED, form=FormState.SENT),
+            _slot_outcome(OutcomeKind.STREAM_ATTACHED, form=FormState.FAILED),
+            _slot_outcome(OutcomeKind.MATCHED),
+            _slot_outcome(OutcomeKind.NO_STREAM),
+        ],
+    )
+    assert build_totals(report) == RunTotals(
+        packages=2,
+        packages_unreadable=1,
+        slots_total=4,
+        slots_mine=1,
+        created=2,
+        form_sent=1,
+        fixed=0,
+        matched=1,
+        orphans=0,
+        skipped=0,
+        errors=1,
+    )
 
 
 def _object(day: int, decision: Decision) -> PlannedBroadcast:
@@ -288,10 +328,16 @@ def test_package_and_skipped_lines_from_scan_and_selection(
     assert build_package_lines(scan, config) == [
         ReportPackageLine("plan.bcast", PackageLineStatus.ACCEPTED, slots_total=5, slots_mine=3)
     ]
-    assert build_skipped_lines(scan, selection, config) == [
-        "- 15-03-2027 19:00 uk — уже прошло",
-        "- 16-03-2027 12:30 ru — до старта меньше 60 минут",
-        "- 17-03-2027 19:00 hu — нет канала для языка hu",
+    skipped: list[SkippedLine] = build_skipped_lines(scan, selection, config)
+    assert skipped == [
+        SkippedLine(SkipKind.PAST, "15-03-2027", "19:00", "uk"),
+        SkippedLine(SkipKind.TOO_LATE, "16-03-2027", "12:30", "ru", minutes=60),
+        SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "hu"),
+    ]
+    assert [skip_text(line) for line in skipped] == [
+        "15-03-2027 19:00 uk — уже прошло",
+        "16-03-2027 12:30 ru — до старта меньше 60 минут",
+        "17-03-2027 19:00 hu — нет канала для языка hu",
     ]
 
 

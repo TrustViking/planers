@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import random
+import re
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from app.config.loader import PlanerConfig
+from app.output.console import render_console
+from app.output.report import (
+    FormState,
+    OutcomeKind,
+    PackageLineStatus,
+    PairOutcome,
+    ReportPackageLine,
+    RunMode,
+    RunReport,
+    RunTotals,
+    SkipKind,
+    SkippedLine,
+    build_totals,
+)
+from app.paths import PlanerPaths
+from app.pipeline.plan import OutcomeError
+from app.pipeline.runner import RunOutcome, run
+from app.platforms.base import PlatformError
+from app.platforms.fake import FakePlatform
+from app.tests.conftest import FakeFormSender
+from app.ui import messages_ru as msg
+
+ROOT: Path = Path("D:/planer")
+CONSOLE_LINE_LIMIT: int = 15
+PACKAGE: str = "plan_17-03-2027_18-03-2027_gen11-09-2026-1658.bcast"
+
+# Макет задачи 4e: один созданный эфир, три пропуска без канала, одно предупреждение.
+SAMPLE_CONSOLE: str = """Планер — 13-09-2026 13:20
+
+  пакеты          1   слотов 4, моих 1
+  создано         1   17-03-2027 19:00 ru -> Osvald.X, ключ передан в форму
+  исправлено      0
+  совпадает       0
+  пропущено       3   нет каналов: en, uk
+  ошибок          0
+
+  внимание: у эфиров включён живой чат, отключается только в Студии на весь канал (Settings -> Community)
+
+  ключи   keystreams\\keys.txt
+  отчёт   logs\\13-09-2026_132051_report.md
+  лог     logs\\13-09-2026_132050_planer.log"""
+
+
+def _created(day: int, form: FormState | None, form_error: str | None = None) -> PairOutcome:
+    return PairOutcome(
+        OutcomeKind.CREATED, "Osvald.X", f"{day}-03-2027", "19:00", "ru", form=form, form_error=form_error
+    )
+
+
+def _sample_report(**overrides: Any) -> RunReport:
+    values: dict[str, Any] = dict(
+        mode=RunMode.FULL,
+        generated_at_text="13-09-2026 13:20",
+        packages=[ReportPackageLine(PACKAGE, PackageLineStatus.ACCEPTED, slots_total=4, slots_mine=1)],
+        outcomes=[_created(17, FormState.SENT)],
+        skipped=[
+            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "uk"),
+            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "en"),
+            SkippedLine(SkipKind.NO_CHANNEL, "18-03-2027", "19:00", "en"),
+        ],
+        warnings=[msg.WARNING_LIVE_CHAT],
+        keys_file_path="keystreams\\keys.txt",
+    )
+    values.update(overrides)
+    return RunReport(**values)
+
+
+def _render(report: RunReport) -> str:
+    return render_console(
+        report,
+        root=ROOT,
+        report_path=ROOT / "logs" / "13-09-2026_132051_report.md",
+        log_path=ROOT / "logs" / "13-09-2026_132050_planer.log",
+    )
+
+
+def test_full_run_matches_the_layout() -> None:
+    text: str = _render(_sample_report())
+    assert text.replace("/", "\\") == SAMPLE_CONSOLE
+    assert len(text.splitlines()) <= CONSOLE_LINE_LIMIT
+
+
+def test_console_has_no_markdown_and_no_icons() -> None:
+    text: str = _render(_sample_report(outcomes=[_created(17, FormState.FAILED, "notConfirmed: HTTP 200")]))
+    assert "#" not in text and "\n- " not in text
+    assert all(icon not in text for icon in ("✅", "❌", "⚠", "→"))
+
+
+def test_zero_counters_are_printed_without_details() -> None:
+    lines: list[str] = _render(_sample_report(outcomes=[], skipped=[], warnings=[])).splitlines()
+    assert "  создано         0" in lines
+    assert "  пропущено       0" in lines
+    assert "  ошибок          0" in lines
+
+
+def test_several_created_show_form_summary_not_every_broadcast() -> None:
+    report: RunReport = _sample_report(
+        outcomes=[_created(17, FormState.SENT), _created(18, FormState.FAILED, "transportFailed: HTTP 503")]
+    )
+    text: str = _render(report)
+    assert "  создано         2   ключ передан в форму: 1 из 2" in text
+    assert "17-03-2027 19:00 ru -> Osvald.X" not in text                # удачный эфир — только в отчёте
+    assert (
+        "  форма: 18-03-2027 19:00 ru -> Osvald.X — ключ в форму НЕ передан — форма недоступна (HTTP 503)"
+    ) in text
+
+
+def test_errors_packages_and_warnings_are_printed_in_full() -> None:
+    report: RunReport = _sample_report(
+        packages=[
+            ReportPackageLine(PACKAGE, PackageLineStatus.ACCEPTED, slots_total=4, slots_mine=1),
+            ReportPackageLine("broken.bcast", PackageLineStatus.DAMAGED, detail="не ZIP-архив"),
+        ],
+        outcomes=[
+            PairOutcome(
+                OutcomeKind.ERROR,
+                "Osvald.X",
+                "18-03-2027",
+                "20:00",
+                "ru",
+                error=OutcomeError("youtube", "liveStreamingNotEnabled", "на канале не включены трансляции"),
+            )
+        ],
+        warnings=["18-03-2027 20:00 ru -> Osvald.X: обложка не поставлена — forbidden (канал не подтверждён)"],
+    )
+    lines: list[str] = _render(report).splitlines()
+    assert "  пакеты          2   слотов 4, моих 1, не прочитано 1" in lines
+    assert "  ошибок          1" in lines
+    assert (
+        "  ошибка: 18-03-2027 20:00 ru -> Osvald.X — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)"
+    ) in lines
+    assert "  пакет: broken.bcast — пакет повреждён: не ZIP-архив; файл не тронут" in lines
+    assert "  внимание: 18-03-2027 20:00 ru -> Osvald.X: обложка не поставлена — forbidden (канал не подтверждён)" in lines
+
+
+def test_skipped_are_grouped_by_reason() -> None:
+    report: RunReport = _sample_report(
+        skipped=[
+            SkippedLine(SkipKind.PAST, "14-03-2027", "19:00", "ru"),
+            SkippedLine(SkipKind.TOO_LATE, "16-03-2027", "12:30", "ru", minutes=60),
+            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "hu"),
+        ]
+    )
+    assert "  пропущено       3   уже прошло: 1; до старта меньше 60 минут: 1; нет каналов: hu" in _render(report)
+
+
+def test_dry_run_has_its_own_title_and_labels() -> None:
+    report: RunReport = _sample_report(
+        mode=RunMode.DRY_RUN,
+        outcomes=[
+            PairOutcome(OutcomeKind.CREATED, "Osvald.X", "17-03-2027", "19:00", "ru"),
+            PairOutcome(OutcomeKind.FIXED, "Osvald.X", "18-03-2027", "19:00", "ru", changed_fields=("title",)),
+        ],
+        keys_file_path=None,
+    )
+    lines: list[str] = _render(report).splitlines()
+    assert lines[0] == "Планер — 13-09-2026 13:20 — dry-run: ничего не создано и в форму не отправлено"
+    assert "  создать         1   17-03-2027 19:00 ru -> Osvald.X" in lines
+    assert "  исправить       1   18-03-2027 19:00 ru -> Osvald.X, будет обновлено: название" in lines
+    assert not any(line.lstrip().startswith(msg.CONSOLE_LABEL_KEYS) for line in lines)
+
+
+def test_status_counts_scheduled_and_errors_only() -> None:
+    report: RunReport = RunReport(
+        mode=RunMode.STATUS,
+        generated_at_text="13-09-2026 13:20",
+        outcomes=[
+            PairOutcome(OutcomeKind.MATCHED, "Osvald.X", "17-03-2027", "19:00", "ru", broadcast_url="u1"),
+            PairOutcome(OutcomeKind.ERROR, "Test RU", error=OutcomeError("youtube", "quotaExceeded", "квота исчерпана")),
+        ],
+        keys_file_path="keystreams\\keys.txt",
+    )
+    lines: list[str] = _render(report).splitlines()
+    assert lines[0] == "Планер — 13-09-2026 13:20 — --status: эфиры планера на каналах"
+    assert lines[2:4] == ["  запланировано   1   17-03-2027 19:00 ru -> Osvald.X", "  ошибок          1"]
+    assert "  ошибка: Test RU — YouTube: quotaExceeded (квота исчерпана)" in lines
+
+
+def test_console_and_report_use_the_same_totals(
+    planer_paths: PlanerPaths,
+    make_package: Callable[..., Path],
+    make_slot: Callable[..., dict[str, Any]],
+    make_config: Callable[..., PlanerConfig],
+    fake_platform: FakePlatform,
+    form_sender: FakeFormSender,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    """Production-путь: запуск через runner, числа консоли совпадают с «Итогом» записанного отчёта."""
+    make_package(
+        planer_paths.promo_dir,
+        slots=[
+            make_slot("17-03-2027", "19:00", "uk"),
+            make_slot("18-03-2027", "19:00", "ru"),
+            make_slot("17-03-2027", "19:00", "hu"),
+        ],
+    )
+    fake_platform.fail_create["18-03-2027_1900_ru"] = PlatformError("forbidden", "нельзя")
+    outcome: RunOutcome = run(RunMode.FULL, make_config(), planer_paths, fake_platform, form_sender, now, rng)
+    assert outcome.report is not None and outcome.report_path is not None
+    totals: RunTotals = build_totals(outcome.report)
+    console: str = render_console(outcome.report, root=planer_paths.root, report_path=outcome.report_path)
+    report_text: str = outcome.report_path.read_text(encoding="utf-8")
+    assert (
+        f"Итог: создано {totals.created}, исправлено {totals.fixed}, совпадает {totals.matched}, "
+        f"пропущено {totals.skipped}, ошибок {totals.errors}."
+    ) in report_text
+    for label, count in (
+        (msg.CONSOLE_LABEL_CREATED, totals.created),
+        (msg.CONSOLE_LABEL_SKIPPED, totals.skipped),
+        (msg.CONSOLE_LABEL_ERRORS, totals.errors),
+    ):
+        assert re.search(rf"^  {label} +{count}\b", console, re.MULTILINE)
+    assert (totals.created, totals.skipped, totals.errors) == (1, 1, 1)
+    assert f"  отчёт   {Path('logs') / outcome.report_path.name}" in console

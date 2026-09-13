@@ -10,10 +10,6 @@ HELP_CHECK: Final[str] = "проверить авторизацию и прав�
 HELP_AUTH: Final[str] = "заново авторизовать канал (ключ из channels.yaml) или all — все каналы"
 HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из promo"
 HELP_DEBUG: Final[str] = "подробный лог в консоли"
-FIRST_RUN_HEADER: Final[str] = (
-    "Запуск без ключей: проверяю каналы и планирую эфиры по пакетам. "
-    "Канал без авторизации будет авторизован сейчас."
-)
 
 # --- конфиг (ТЗ §5.2)
 CONFIG_CREATED_FROM_EXAMPLE: Final[str] = (
@@ -96,13 +92,12 @@ BINDINGS_NOT_VERIFIED: Final[str] = "Каналы не проверены, ни�
 
 # --- promo и пакеты (ТЗ §7.1)
 PROMO_EMPTY: Final[str] = "В {path} нет пакетов *.bcast — сохраните туда пакет от оператора и запустите снова."
-REPORT_WRITTEN: Final[str] = "Отчёт сохранён: {path}"
-PACKAGE_ACCEPTED: Final[str] = "- {file} — принят, слотов {total}, из них под мои языки {mine}"
-PACKAGE_DAMAGED: Final[str] = "- {file} — пакет повреждён: {reason}; файл не тронут"
+PACKAGE_ACCEPTED: Final[str] = "{file} — принят, слотов {total}, из них под мои языки {mine}"
+PACKAGE_DAMAGED: Final[str] = "{file} — пакет повреждён: {reason}; файл не тронут"
 PACKAGE_UNSUPPORTED_SCHEMA: Final[str] = (
-    "- {file} — версия пакета {version} не поддерживается (нужна {supported}); файл не тронут"
+    "{file} — версия пакета {version} не поддерживается (нужна {supported}); файл не тронут"
 )
-PACKAGE_ALL_PAST: Final[str] = "- {file} — все слоты в прошлом, ничего из него не планируется"
+PACKAGE_ALL_PAST: Final[str] = "{file} — все слоты в прошлом, ничего из него не планируется"
 PACKAGE_REASON_WITH_DETAIL: Final[str] = "{reason} ({detail})"
 # ключи — значения PackageErrorReason (app/package/model.py)
 PACKAGE_REASON_TEXT: Final[dict[str, str]] = {
@@ -117,14 +112,14 @@ PACKAGE_REASON_TEXT: Final[dict[str, str]] = {
 }
 
 # --- пропуски (ТЗ §7.1, §7.2)
-SKIP_PAST: Final[str] = "- {date} {time} {language} — уже прошло"
-SKIP_TOO_LATE: Final[str] = "- {date} {time} {language} — до старта меньше {minutes} минут"
-SKIP_NO_CHANNEL: Final[str] = "- {date} {time} {language} — нет канала для языка {language}"
+SKIP_PAST: Final[str] = "{date} {time} {language} — уже прошло"
+SKIP_TOO_LATE: Final[str] = "{date} {time} {language} — до старта меньше {minutes} минут"
+SKIP_NO_CHANNEL: Final[str] = "{date} {time} {language} — нет канала для языка {language}"
 
 # --- исходы пар (ТЗ §5.6, §7.3)
-OUTCOME_SLOT_PREFIX: Final[str] = "- {date} {time} {language} → {account_name}"
-OUTCOME_CHANNEL_PREFIX: Final[str] = "- {account_name}"
-OUTCOME_CREATED: Final[str] = "{prefix} — эфир создан, ключ получен, форма {form}"
+OUTCOME_SLOT_PREFIX: Final[str] = "{date} {time} {language} -> {account_name}"
+OUTCOME_CHANNEL_PREFIX: Final[str] = "{account_name}"
+OUTCOME_CREATED: Final[str] = "{prefix} — эфир создан, {form}"
 OUTCOME_CREATE_PLANNED: Final[str] = "{prefix} — эфира нет, будет создан"
 OUTCOME_FIXED: Final[str] = "{prefix} — на YouTube было другое {what}; обновлено. Ключ и ссылка прежние"
 OUTCOME_FIX_PLANNED: Final[str] = "{prefix} — на YouTube другое {what}; будет обновлено"
@@ -134,9 +129,9 @@ OUTCOME_NO_STREAM: Final[str] = (
     "Привяжите поток в YouTube Studio или удалите эфир — планер создаст его заново"
 )
 OUTCOME_STREAM_ATTACHED: Final[str] = (
-    "{prefix} — эфир был без потока, поток привязан, ключ получен, форма {form}"
+    "{prefix} — эфир был без потока, поток привязан, {form}"
 )
-WARNING_LINE: Final[str] = "- {prefix}: {step} — {code} ({message})"
+WARNING_LINE: Final[str] = "{prefix}: {step} — {code} ({message})"
 # ключи — WARNING_STEP_* (app/pipeline/plan.py)
 MISMATCH_LINE: Final[str] = "{prefix}: {field} — хотели: {wanted}; на платформе: {actual}"
 MISMATCH_FIELD_TITLE: Final[str] = "название"
@@ -146,17 +141,13 @@ MISMATCH_FIELD_MARKER: Final[str] = "маркер потока"
 MISMATCH_FIELD_LANGUAGE: Final[str] = "язык"
 MISMATCH_FIELD_AUDIENCE: Final[str] = "аудитория"
 MISMATCH_FIELD_CATEGORY: Final[str] = "категория"
-WARNING_FORM_DIAGNOSTIC: Final[str] = (
-    "- ответ формы сохранён для разбора: {path}"
-)
+WARNING_FORM_DIAGNOSTIC: Final[str] = "ответ формы сохранён для разбора: {path}"
 WARNING_KEPT_KEY: Final[str] = (
-    "- у совпавших и исправленных эфиров ключ прежний: планер не отправляет его в форму повторно, "
-    "чтобы не задвоить ключ у стримера. Если стример ключа не получил — передайте его из keys.txt "
-    "вручную или удалите эфир на YouTube: планер создаст его заново с новым ключом и отправит."
+    "у совпавших и исправленных эфиров ключ прежний, повторно в форму он не отправляется; "
+    "если стример ключа не получил — передайте его из keys.txt вручную или удалите эфир на YouTube"
 )
 WARNING_LIVE_CHAT: Final[str] = (
-    "- у эфиров включён живой чат. Через API он не отключается: если чат не нужен, "
-    "выключите его один раз в Студии на весь канал (Settings → Community)."
+    "у эфиров включён живой чат, отключается только в Студии на весь канал (Settings -> Community)"
 )
 MISMATCH_DESCRIPTION: Final[str] = "{length} символов, начало «{head}»"
 AUDIENCE_NOT_FOR_KIDS: Final[str] = "не для детей"
@@ -171,16 +162,15 @@ WARNING_STEP_TEXT: Final[dict[str, str]] = {
     "facts": "не удалось перечитать эфир после планирования; на сам эфир это не влияет",
 }
 OUTCOME_AMBIGUOUS: Final[str] = (
-
     "{prefix} — на канале несколько эфиров на эту минуту без маркера планера, "
     "не могу различить — разберитесь вручную"
 )
 OUTCOME_ERROR: Final[str] = "{prefix} — {origin}: {code} ({message})"
 OUTCOME_PLANER_ERROR: Final[str] = "{prefix} — {text}"
 OUTCOME_DRY_RUN_SUFFIX: Final[str] = " — не выполнено (dry-run)"
-FORM_MARK_SENT: Final[str] = "✅"
+FORM_MARK_SENT: Final[str] = "ключ передан в форму"
 FORM_MARK_FAILED: Final[str] = (
-    "❌ {reason}; повторно планер ключ не отправит — передайте его стримеру из keys.txt вручную"
+    "ключ в форму НЕ передан — {reason}; повторно планер его не отправит, передайте ключ стримеру из keys.txt вручную"
 )
 # ключи — коды из app/form/base.py
 FORM_REASON_TEXT: Final[dict[str, str]] = {
@@ -204,13 +194,14 @@ PLANER_ERROR_TEXT: Final[dict[str, str]] = {
     "noBoundStream": "у найденного эфира нет привязанного потока — ключ получить нельзя; привяжите поток или удалите эфир",
     "keysWriteFailed": "файл ключей не записан: {detail}",
 }
-ORPHAN_LINE: Final[str] = "- {date} {time} {language} → {account_name} — {url} — эфир не удалён"
+ORPHAN_LINE: Final[str] = "{date} {time} {language} -> {account_name} — {url} — эфир не удалён"
 SCHEDULED_LINE: Final[str] = "{prefix} — {url}"
 
-# --- отчёт (ТЗ §5.6)
+# --- отчёт logs\{дата}_{время}_report.md (ТЗ §5.6): подробности, можно переслать оператору
 REPORT_TITLE: Final[str] = "# Планер — отчёт {generated_at}"
 REPORT_TITLE_DRY_RUN: Final[str] = " (dry-run)"
-REPORT_NOTICE: Final[str] = "⚠ {notice}"
+REPORT_NOTICE: Final[str] = "Внимание: {notice}"
+REPORT_ITEM: Final[str] = "- {text}"
 REPORT_SECTION_PACKAGES: Final[str] = "## Пакеты"
 REPORT_SECTION_CREATED: Final[str] = "## Создано ({count})"
 REPORT_SECTION_FIXED: Final[str] = "## Исправлено ({count})"
@@ -222,19 +213,57 @@ REPORT_SECTION_WARNINGS: Final[str] = "## Предупреждения"
 REPORT_SECTION_MISMATCHES: Final[str] = "## Расхождения с платформой"
 REPORT_SECTION_ERRORS: Final[str] = "## Ошибки"
 REPORT_TOTAL: Final[str] = (
-    "Итог: создано {created}, исправлено {fixed}, копий {matched}, пропущено {skipped}, "
+    "Итог: создано {created}, исправлено {fixed}, совпадает {matched}, пропущено {skipped}, "
     "ошибок {errors}.{keys_file}"
 )
 REPORT_STATUS_TOTAL: Final[str] = "Итог: запланировано {scheduled}, ошибок {errors}.{keys_file}"
 REPORT_TOTAL_KEYS_FILE: Final[str] = " Файл ключей: {path}"
 
-# --- файл ключей (ТЗ §5.5)
-KEYS_FILE_HEADER: Final[str] = (
-    "# Ключи трансляций. Сгенерировано планером {generated_at}. Файл производный — не править."
+# --- консоль (ТЗ §5.6): что произошло и куда смотреть; без markdown и значков
+CONSOLE_TITLE: Final[str] = "Планер — {generated_at}"
+CONSOLE_TITLE_DRY_RUN: Final[str] = "Планер — {generated_at} — dry-run: ничего не создано и в форму не отправлено"
+CONSOLE_TITLE_STATUS: Final[str] = "Планер — {generated_at} — --status: эфиры планера на каналах"
+CONSOLE_COUNTER: Final[str] = "  {label:<14}{count:>3}   {detail}"
+CONSOLE_LABEL_PACKAGES: Final[str] = "пакеты"
+CONSOLE_LABEL_CREATED: Final[str] = "создано"
+CONSOLE_LABEL_FIXED: Final[str] = "исправлено"
+CONSOLE_LABEL_MATCHED: Final[str] = "совпадает"
+CONSOLE_LABEL_CREATE_PLANNED: Final[str] = "создать"
+CONSOLE_LABEL_FIX_PLANNED: Final[str] = "исправить"
+CONSOLE_LABEL_SKIPPED: Final[str] = "пропущено"
+CONSOLE_LABEL_SCHEDULED: Final[str] = "запланировано"
+CONSOLE_LABEL_ERRORS: Final[str] = "ошибок"
+CONSOLE_DETAIL_JOINER: Final[str] = ", "
+CONSOLE_SKIP_JOINER: Final[str] = "; "
+CONSOLE_PACKAGES_DETAIL: Final[str] = "слотов {total}, моих {mine}"
+CONSOLE_PACKAGES_UNREADABLE: Final[str] = "не прочитано {count}"
+CONSOLE_FORMS_SENT: Final[str] = "ключ передан в форму: {sent} из {total}"
+CONSOLE_FORM_NOT_SENT: Final[str] = "ключ в форму НЕ передан"
+CONSOLE_FIXED_DETAIL: Final[str] = "{prefix}, обновлено: {what}"
+CONSOLE_FIX_PLANNED_DETAIL: Final[str] = "{prefix}, будет обновлено: {what}"
+CONSOLE_SKIP_PAST: Final[str] = "уже прошло: {count}"
+CONSOLE_SKIP_TOO_LATE: Final[str] = "до старта меньше {minutes} минут: {count}"
+CONSOLE_SKIP_NO_CHANNEL: Final[str] = "нет каналов: {languages}"
+CONSOLE_ERROR: Final[str] = "  ошибка: {text}"
+CONSOLE_FORM_ERROR: Final[str] = "  форма: {prefix} — {mark}"
+CONSOLE_PACKAGE_ERROR: Final[str] = "  пакет: {text}"
+CONSOLE_WARNING: Final[str] = "  внимание: {text}"
+CONSOLE_PATH: Final[str] = "  {label:<8}{path}"
+CONSOLE_LABEL_KEYS: Final[str] = "ключи"
+CONSOLE_LABEL_REPORT: Final[str] = "отчёт"
+CONSOLE_LABEL_LOG: Final[str] = "лог"
+
+# --- файл ключей (ТЗ §5.5): блок на стрим, ключ — первой строкой блока
+KEYS_FILE_HEADER: Final[tuple[str, ...]] = (
+    "# Ключи трансляций. Сгенерировано планером {generated_at}.",
+    "# Файл перезаписывается на каждом запуске — не править.",
+    "# Если в строке «форма» стоит «НЕ передан» — передайте ключ стримеру вручную.",
 )
-KEYS_FILE_COLUMNS: Final[str] = (
-    "# язык | дата | время (Киев) | аккаунт | статус формы | stream_url | stream_key | ссылка на эфир"
-)
-KEY_FORM_SENT: Final[str] = "ключ передан в форму {sent_at}"
-KEY_FORM_KEPT: Final[str] = "ключ прежний, планер его не передавал"
-KEY_FORM_FAILED: Final[str] = "не удалось передать: {reason}"
+KEYS_BLOCK_TITLE: Final[str] = "{date} {time}  {language}  {account_name}"
+KEYS_BLOCK_KEY: Final[str] = "  ключ   {value}"
+KEYS_BLOCK_STREAM: Final[str] = "  поток  {value}"
+KEYS_BLOCK_BROADCAST: Final[str] = "  эфир   {value}"
+KEYS_BLOCK_FORM: Final[str] = "  форма  {value}"
+KEY_FORM_SENT: Final[str] = "передан {sent_at}"
+KEY_FORM_KEPT: Final[str] = "ключ прежний, в этом запуске не передавался"
+KEY_FORM_FAILED: Final[str] = "НЕ передан — {reason}"

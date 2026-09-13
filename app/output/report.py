@@ -1,6 +1,7 @@
 """Отчёт запуска (ТЗ §5.6): данные исходов, текст, файл logs\\{дата}_{время}_report.md.
 
 Исходы хранятся как статус + данные; текст — только при рендере, из messages_ru.
+Счётчики считаются один раз — build_totals; ими пользуются и отчёт, и консоль (console.py).
 RunMode живёт здесь, а не в runner.py: отчёт зависит от режима, а runner собирает
 отчёт, — так нет круговой зависимости (runner его реэкспортирует).
 """
@@ -62,6 +63,14 @@ class OutcomeKind(str, Enum):
 ERROR_OUTCOME_KINDS: Final[frozenset[OutcomeKind]] = frozenset(
     {OutcomeKind.ERROR, OutcomeKind.AMBIGUOUS, OutcomeKind.NO_STREAM}
 )
+# привязанный поток — тоже новый ключ, поэтому он в разделе «Создано»
+CREATED_OUTCOME_KINDS: Final[frozenset[OutcomeKind]] = frozenset({OutcomeKind.CREATED, OutcomeKind.STREAM_ATTACHED})
+
+
+class SkipKind(str, Enum):
+    PAST = "past"
+    TOO_LATE = "too_late"
+    NO_CHANNEL = "no_channel"
 
 
 class FormState(str, Enum):
@@ -71,11 +80,19 @@ class FormState(str, Enum):
     FAILED = "failed"      # не подтверждён; повтора не будет
 
 
+_UNREADABLE_PACKAGE_STATUSES: Final[frozenset[PackageLineStatus]] = frozenset(
+    {PackageLineStatus.DAMAGED, PackageLineStatus.UNSUPPORTED_SCHEMA}
+)
 _PACKAGE_TEMPLATES: Final[dict[PackageLineStatus, str]] = {
     PackageLineStatus.ACCEPTED: msg.PACKAGE_ACCEPTED,
     PackageLineStatus.DAMAGED: msg.PACKAGE_DAMAGED,
     PackageLineStatus.UNSUPPORTED_SCHEMA: msg.PACKAGE_UNSUPPORTED_SCHEMA,
     PackageLineStatus.ALL_PAST: msg.PACKAGE_ALL_PAST,
+}
+_SKIP_TEMPLATES: Final[dict[SkipKind, str]] = {
+    SkipKind.PAST: msg.SKIP_PAST,
+    SkipKind.TOO_LATE: msg.SKIP_TOO_LATE,
+    SkipKind.NO_CHANNEL: msg.SKIP_NO_CHANNEL,
 }
 _FORM_MARKS: Final[dict[FormState, str]] = {
     FormState.SENT: msg.FORM_MARK_SENT,
@@ -107,6 +124,17 @@ class PairOutcome:
 
 
 @dataclass(frozen=True)
+class SkippedLine:
+    """Пропущенный слот: текст собирается при рендере, консоль группирует по причине."""
+
+    kind: SkipKind
+    date: str
+    time: str
+    language: str
+    minutes: int = 0     # только для TOO_LATE: min_lead_minutes
+
+
+@dataclass(frozen=True)
 class OrphanLine:
     date: str
     time: str
@@ -122,11 +150,49 @@ class RunReport:
     packages: list[ReportPackageLine] = field(default_factory=list)
     outcomes: list[PairOutcome] = field(default_factory=list)
     orphans: list[OrphanLine] = field(default_factory=list)
-    skipped: list[str] = field(default_factory=list)
+    skipped: list[SkippedLine] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
     keys_file_path: str | None = None
     notice: str | None = None
+
+
+@dataclass(frozen=True)
+class RunTotals:
+    """Счётчики запуска — единственный подсчёт для строки «Итог», заголовков разделов и консоли."""
+
+    packages: int
+    packages_unreadable: int
+    slots_total: int
+    slots_mine: int
+    created: int          # создано + поток привязан: и там, и там новый ключ
+    form_sent: int
+    fixed: int
+    matched: int          # в --status — эфиры планера на каналах
+    orphans: int
+    skipped: int
+    errors: int
+
+
+def build_totals(report: RunReport) -> RunTotals:
+    kinds: list[OutcomeKind] = [outcome.kind for outcome in report.outcomes]
+    forms: list[FormState | None] = [outcome.form for outcome in report.outcomes]
+    accepted: list[ReportPackageLine] = [
+        line for line in report.packages if line.status is PackageLineStatus.ACCEPTED
+    ]
+    return RunTotals(
+        packages=len(report.packages),
+        packages_unreadable=sum(1 for line in report.packages if line.status in _UNREADABLE_PACKAGE_STATUSES),
+        slots_total=sum(line.slots_total for line in accepted),
+        slots_mine=sum(line.slots_mine for line in accepted),
+        created=sum(1 for kind in kinds if kind in CREATED_OUTCOME_KINDS),
+        form_sent=forms.count(FormState.SENT),
+        fixed=kinds.count(OutcomeKind.FIXED),
+        matched=kinds.count(OutcomeKind.MATCHED),
+        orphans=len(report.orphans),
+        skipped=len(report.skipped),
+        errors=sum(1 for kind in kinds if kind in ERROR_OUTCOME_KINDS),
+    )
 
 
 # --- строители исходов: единственный мост «объект → строка отчёта»
@@ -210,9 +276,9 @@ def build_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequen
     return lines
 
 
-def _unique(lines: Iterable[str]) -> list[str]:
+def _unique(lines: Iterable[SkippedLine]) -> list[SkippedLine]:
     """Один слот на несколько каналов даёт одну строку пропуска, а не несколько."""
-    seen: dict[str, None] = {}
+    seen: dict[SkippedLine, None] = {}
     for line in lines:
         seen.setdefault(line, None)
     return list(seen)
@@ -287,13 +353,24 @@ def _form_state(item: PlannedBroadcast) -> FormState | None:
 
 
 def render_report(report: RunReport) -> str:
-    """Структура ТЗ §5.6; пустой раздел — заголовок без строк."""
+    """Структура ТЗ §5.6: сначала итог и то, ради чего отчёт открывают, потом справка; пустой раздел не печатается."""
+    totals: RunTotals = build_totals(report)
     lines: list[str] = _header_lines(report)
     if report.mode is RunMode.STATUS:
-        _append_status_body(lines, report)
+        _append_status_body(lines, report, totals)
     else:
-        _append_run_body(lines, report)
-    return "\n".join(lines) + "\n"
+        _append_run_body(lines, report, totals)
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def display_path(root: Path, path: Path | None) -> str | None:
+    """Путь для владельца — от корня планера, как он видит папки рядом с программой."""
+    if path is None:
+        return None
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def write_report(paths: PlanerPaths, text: str, now_local: datetime) -> Path:
@@ -315,21 +392,21 @@ def build_package_lines(scan: PromoScan, config: PlanerConfig) -> list[ReportPac
     return lines
 
 
-def build_skipped_lines(scan: PromoScan, selection: Selection, config: PlanerConfig) -> list[str]:
+def build_skipped_lines(scan: PromoScan, selection: Selection, config: PlanerConfig) -> list[SkippedLine]:
     """«Уже прошло» — только слоты моих языков; плюс too_late / no_channel из отбора (§7.2)."""
-    entries: list[tuple[Slot, str]] = [
-        (slot, _slot_text(msg.SKIP_PAST, slot))
+    entries: list[tuple[Slot, SkippedLine]] = [
+        (slot, _skipped_line(SkipKind.PAST, slot))
         for slot in scan.past_slots
         if slot.language in config.served_languages
     ]
     entries.extend(
-        (item.slot, _slot_text(msg.SKIP_TOO_LATE, item.slot, minutes=config.min_lead_minutes))
+        (item.slot, _skipped_line(SkipKind.TOO_LATE, item.slot, minutes=config.min_lead_minutes))
         for item in selection.planned
         if item.is_too_late
     )
-    entries.extend((skipped.slot, _skip_text(skipped)) for skipped in selection.skipped)
+    entries.extend((skipped.slot, _skipped_from_selection(skipped)) for skipped in selection.skipped)
     entries.sort(key=lambda entry: slot_order_key(entry[0]))
-    return _unique(text for _, text in entries)
+    return _unique(line for _, line in entries)
 
 
 def _header_lines(report: RunReport) -> list[str]:
@@ -343,79 +420,86 @@ def _header_lines(report: RunReport) -> list[str]:
     return lines
 
 
-def _append_run_body(lines: list[str], report: RunReport) -> None:
+def _append_run_body(lines: list[str], report: RunReport, totals: RunTotals) -> None:
     is_dry_run: bool = report.mode is RunMode.DRY_RUN
     texts: dict[OutcomeKind, list[str]] = {
         kind: [_outcome_text(outcome, is_dry_run=is_dry_run) for outcome in report.outcomes if outcome.kind is kind]
         for kind in OutcomeKind
     }
-    errors: list[str] = [
-        _outcome_text(outcome, is_dry_run=is_dry_run)
-        for outcome in report.outcomes
-        if outcome.kind in ERROR_OUTCOME_KINDS
-    ]
-    _append_section(lines, msg.REPORT_SECTION_PACKAGES, [_render_package_line(line) for line in report.packages])
-    # привязанный поток — тоже новый ключ, поэтому он в разделе «Создано»
+    lines.extend(_total_lines(report, totals))
+    _append_section(lines, msg.REPORT_SECTION_ERRORS, [
+        _outcome_text(outcome, is_dry_run=is_dry_run) for outcome in report.outcomes if outcome.kind in ERROR_OUTCOME_KINDS
+    ])
+    _append_section(lines, msg.REPORT_SECTION_WARNINGS, report.warnings)
+    _append_section(lines, msg.REPORT_SECTION_MISMATCHES, report.mismatches)
     created: list[str] = texts[OutcomeKind.CREATED] + texts[OutcomeKind.STREAM_ATTACHED]
-    for body, header in (
-        (created, msg.REPORT_SECTION_CREATED),
-        (texts[OutcomeKind.FIXED], msg.REPORT_SECTION_FIXED),
-        (texts[OutcomeKind.MATCHED], msg.REPORT_SECTION_MATCHED),
-    ):
-        _append_section(lines, header.format(count=len(body)), body)
-    if report.orphans:
-        _append_section(
-            lines,
-            msg.REPORT_SECTION_ORPHANS.format(count=len(report.orphans)),
-            [_orphan_text(orphan) for orphan in report.orphans],
+    _append_section(lines, msg.REPORT_SECTION_CREATED.format(count=totals.created), created)
+    _append_section(lines, msg.REPORT_SECTION_FIXED.format(count=totals.fixed), texts[OutcomeKind.FIXED])
+    _append_section(lines, msg.REPORT_SECTION_MATCHED.format(count=totals.matched), texts[OutcomeKind.MATCHED])
+    _append_section(
+        lines,
+        msg.REPORT_SECTION_ORPHANS.format(count=totals.orphans),
+        [_orphan_text(orphan) for orphan in report.orphans],
+    )
+    _append_section(lines, msg.REPORT_SECTION_SKIPPED, [skip_text(line) for line in report.skipped])
+    _append_section(lines, msg.REPORT_SECTION_PACKAGES, [render_package_line(line) for line in report.packages])
+
+
+def _total_lines(report: RunReport, totals: RunTotals) -> list[str]:
+    if report.mode is RunMode.STATUS:
+        total: str = msg.REPORT_STATUS_TOTAL.format(
+            scheduled=totals.matched, errors=totals.errors, keys_file=_keys_file_part(report)
         )
-    _append_section(lines, msg.REPORT_SECTION_SKIPPED, report.skipped)
-    if report.warnings:      # раздела нет, когда предупреждать не о чем
-        _append_section(lines, msg.REPORT_SECTION_WARNINGS, report.warnings)
-    if report.mismatches:    # совпало всё — раздела нет
-        _append_section(lines, msg.REPORT_SECTION_MISMATCHES, report.mismatches)
-    _append_section(lines, msg.REPORT_SECTION_ERRORS, errors)
-    lines.append(
-        msg.REPORT_TOTAL.format(
-            created=len(created),
-            fixed=len(texts[OutcomeKind.FIXED]),
-            matched=len(texts[OutcomeKind.MATCHED]),
-            skipped=len(report.skipped),
-            errors=len(errors),
+    else:
+        total = msg.REPORT_TOTAL.format(
+            created=totals.created,
+            fixed=totals.fixed,
+            matched=totals.matched,
+            skipped=totals.skipped,
+            errors=totals.errors,
             keys_file=_keys_file_part(report),
         )
-    )
+    return [total, ""]
 
 
-def _append_status_body(lines: list[str], report: RunReport) -> None:
-    scheduled: list[str] = [
-        msg.SCHEDULED_LINE.format(prefix=_outcome_prefix(outcome), url=outcome.broadcast_url or MISSING_VALUE)
-        for outcome in report.outcomes
-        if outcome.kind is OutcomeKind.MATCHED
-    ]
-    errors: list[str] = [
-        _outcome_body(outcome, is_dry_run=False)
-        for outcome in report.outcomes
-        if outcome.kind in ERROR_OUTCOME_KINDS
-    ]
-    _append_section(lines, msg.REPORT_SECTION_SCHEDULED.format(count=len(scheduled)), scheduled)
-    _append_section(lines, msg.REPORT_SECTION_ERRORS, errors)
-    lines.append(
-        msg.REPORT_STATUS_TOTAL.format(scheduled=len(scheduled), errors=len(errors), keys_file=_keys_file_part(report))
+def _append_status_body(lines: list[str], report: RunReport, totals: RunTotals) -> None:
+    lines.extend(_total_lines(report, totals))
+    _append_section(lines, msg.REPORT_SECTION_ERRORS, error_texts(report))
+    _append_section(
+        lines,
+        msg.REPORT_SECTION_SCHEDULED.format(count=totals.matched),
+        [
+            msg.SCHEDULED_LINE.format(prefix=outcome_prefix(outcome), url=outcome.broadcast_url or MISSING_VALUE)
+            for outcome in report.outcomes
+            if outcome.kind is OutcomeKind.MATCHED
+        ],
     )
 
 
 def _append_section(lines: list[str], header: str, body: list[str]) -> None:
+    """Раздел без строк не печатается вовсе: владелец не читает заголовки с нулями."""
+    if not body:
+        return
     lines.append(header)
-    lines.extend(body)
+    lines.extend(msg.REPORT_ITEM.format(text=text) for text in body)
     lines.append("")
+
+
+def error_texts(report: RunReport) -> list[str]:
+    """Ошибки полным текстом — одинаково для отчёта --status и консоли."""
+    return [_outcome_body(outcome, is_dry_run=False) for outcome in report.outcomes if outcome.kind in ERROR_OUTCOME_KINDS]
+
+
+def package_problem_texts(report: RunReport) -> list[str]:
+    """Непрочитанные пакеты: в отчёте — в разделе «Пакеты», в консоли — строками внимания."""
+    return [render_package_line(line) for line in report.packages if line.status in _UNREADABLE_PACKAGE_STATUSES]
 
 
 def _keys_file_part(report: RunReport) -> str:
     return msg.REPORT_TOTAL_KEYS_FILE.format(path=report.keys_file_path) if report.keys_file_path else ""
 
 
-def _outcome_prefix(outcome: PairOutcome) -> str:
+def outcome_prefix(outcome: PairOutcome) -> str:
     if outcome.date is None:
         return msg.OUTCOME_CHANNEL_PREFIX.format(account_name=outcome.account_name)
     return msg.OUTCOME_SLOT_PREFIX.format(
@@ -432,7 +516,7 @@ def _outcome_text(outcome: PairOutcome, *, is_dry_run: bool) -> str:
 
 
 def _outcome_body(outcome: PairOutcome, *, is_dry_run: bool) -> str:
-    prefix: str = _outcome_prefix(outcome)
+    prefix: str = outcome_prefix(outcome)
     if outcome.kind is OutcomeKind.CREATED:
         return _created_text(outcome, prefix, is_dry_run=is_dry_run)
     if outcome.kind is OutcomeKind.FIXED:
@@ -444,11 +528,11 @@ def _outcome_body(outcome: PairOutcome, *, is_dry_run: bool) -> str:
     if outcome.kind is OutcomeKind.NO_STREAM:
         return msg.OUTCOME_NO_STREAM.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE)
     if outcome.kind is OutcomeKind.STREAM_ATTACHED:
-        return msg.OUTCOME_STREAM_ATTACHED.format(prefix=prefix, form=_form_mark(outcome.form, outcome.form_error))
+        return msg.OUTCOME_STREAM_ATTACHED.format(prefix=prefix, form=form_mark(outcome.form, outcome.form_error))
     return _error_text(outcome, prefix)
 
 
-def _form_mark(form: FormState | None, error: str | None = None) -> str:
+def form_mark(form: FormState | None, error: str | None = None) -> str:
     if form is None:
         return MISSING_VALUE
     if form is FormState.FAILED:
@@ -468,13 +552,16 @@ def form_reason_text(error: str | None) -> str:
 def _created_text(outcome: PairOutcome, prefix: str, *, is_dry_run: bool) -> str:
     if is_dry_run:
         return msg.OUTCOME_CREATE_PLANNED.format(prefix=prefix)
-    return msg.OUTCOME_CREATED.format(prefix=prefix, form=_form_mark(outcome.form, outcome.form_error))
+    return msg.OUTCOME_CREATED.format(prefix=prefix, form=form_mark(outcome.form, outcome.form_error))
+
+
+def changed_fields_text(outcome: PairOutcome) -> str:
+    return msg.CHANGED_FIELDS_JOINER.join(msg.CHANGED_FIELD_TEXT[name] for name in outcome.changed_fields)
 
 
 def _fixed_text(outcome: PairOutcome, prefix: str, *, is_dry_run: bool) -> str:
-    what: str = msg.CHANGED_FIELDS_JOINER.join(msg.CHANGED_FIELD_TEXT[name] for name in outcome.changed_fields)
     template: str = msg.OUTCOME_FIX_PLANNED if is_dry_run else msg.OUTCOME_FIXED
-    return template.format(prefix=prefix, what=what)
+    return template.format(prefix=prefix, what=changed_fields_text(outcome))
 
 
 def _matched_text(outcome: PairOutcome, prefix: str) -> str:
@@ -504,7 +591,7 @@ def _orphan_text(orphan: OrphanLine) -> str:
     )
 
 
-def _render_package_line(line: ReportPackageLine) -> str:
+def render_package_line(line: ReportPackageLine) -> str:
     return _PACKAGE_TEMPLATES[line.status].format(
         file=line.file_name,
         total=line.slots_total,
@@ -539,10 +626,20 @@ def _problem_line(problem: PackageProblem) -> ReportPackageLine:
     return ReportPackageLine(problem.file.name, PackageLineStatus.DAMAGED, detail=reason_text)
 
 
-def _skip_text(skipped: SkippedSlot) -> str:
+def _skipped_line(kind: SkipKind, slot: Slot, *, minutes: int = 0) -> SkippedLine:
+    return SkippedLine(kind=kind, date=slot.date, time=slot.time, language=slot.language, minutes=minutes)
+
+
+def _skipped_from_selection(skipped: SkippedSlot) -> SkippedLine:
     if skipped.reason is SkipReason.NO_CHANNEL:
-        return _slot_text(msg.SKIP_NO_CHANNEL, skipped.slot)
+        return _skipped_line(SkipKind.NO_CHANNEL, skipped.slot)
     raise ValueError(f'unknown skip reason {skipped.reason}')
+
+
+def skip_text(line: SkippedLine) -> str:
+    return _SKIP_TEMPLATES[line.kind].format(
+        date=line.date, time=line.time, language=line.language, minutes=line.minutes
+    )
 
 
 def _slot_text(template: str, slot: Slot, **extra: object) -> str:

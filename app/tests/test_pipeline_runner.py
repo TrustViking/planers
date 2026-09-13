@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config.loader import PlanerConfig
-from app.output.report import FormState, OutcomeKind, PackageLineStatus
+from app.output.report import FormState, OutcomeKind, PackageLineStatus, SkipKind, SkippedLine
 from app.paths import PlanerPaths
 from app.pipeline.plan import Decision, PlannedBroadcast
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
@@ -58,6 +58,12 @@ def _run(
     return run(mode, config, paths, platform, sender, now, rng)
 
 
+def _report_text(outcome: RunOutcome) -> str:
+    """Текст отчёта — из файла, который записал production-путь."""
+    assert outcome.report_path is not None
+    return outcome.report_path.read_text(encoding="utf-8")
+
+
 def _kept_key_lines(outcome: RunOutcome) -> list[str]:
     assert outcome.report is not None
     return [line for line in outcome.report.warnings if line == msg.WARNING_KEPT_KEY]
@@ -77,11 +83,11 @@ def test_full_create_registers_and_confirms_form(
     [form_call] = form_sender.calls
     assert (form_call.slot_id, form_call.channel_id, form_call.form_url) == (UK_SLOT, "yt_ua", FORM_SPEC["url"])
     keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
-    assert "fake-0001-0000-0000-0000" in keys_text and "ключ передан в форму " in keys_text
+    assert "fake-0001-0000-0000-0000" in keys_text and "форма  передан " in keys_text
     assert outcome.report is not None
     [pair_outcome] = outcome.report.outcomes
     assert (pair_outcome.kind, pair_outcome.form) == (OutcomeKind.CREATED, FormState.SENT)
-    assert outcome.report_text is not None and "эфир создан, ключ получен, форма ✅" in outcome.report_text
+    assert "эфир создан, ключ передан в форму" in _report_text(outcome)
     assert outcome.report_path is not None and outcome.report_path.exists()
 
 
@@ -94,7 +100,7 @@ def test_full_create_failure_is_an_error_and_sends_nothing(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.ERRORS
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.ERROR
-    assert "YouTube: liveStreamingNotEnabled (на канале не включены трансляции)" in (outcome.report_text or "")
+    assert "YouTube: liveStreamingNotEnabled (на канале не включены трансляции)" in _report_text(outcome)
     assert form_sender.calls == []
 
 
@@ -108,13 +114,13 @@ def test_failed_form_is_reported_and_never_retried(
     first: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
     assert first.exit_code == ExitCode.ERRORS
     assert first.report is not None and first.report.outcomes[0].form is FormState.FAILED
-    assert "не удалось передать: отправка не удалась (ошибка сети)" in planer_paths.keys_file.read_text(encoding="utf-8")
-    assert "повторно планер ключ не отправит" in (first.report_text or "")
+    assert "форма  НЕ передан — отправка не удалась (ошибка сети)" in planer_paths.keys_file.read_text(encoding="utf-8")
+    assert "повторно планер его не отправит" in _report_text(first)
     second: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
     assert len(sender.calls) == 1                      # повтора нет: ключ прежний
     assert second.exit_code == ExitCode.OK
     assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.MATCHED
-    assert "ключ прежний, планер его не передавал" in planer_paths.keys_file.read_text(encoding="utf-8")
+    assert "ключ прежний, в этом запуске не передавался" in planer_paths.keys_file.read_text(encoding="utf-8")
 
 
 def test_processed_package_stays_in_promo(
@@ -168,7 +174,7 @@ def test_too_late_slot_keeps_package_in_promo(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert path.exists()
     assert outcome.report is not None
-    assert "- 16-03-2027 12:30 uk — до старта меньше 60 минут" in outcome.report.skipped
+    assert SkippedLine(SkipKind.TOO_LATE, "16-03-2027", "12:30", "uk", minutes=60) in outcome.report.skipped
 
 
 def test_missing_broadcast_is_a_plain_create(
@@ -183,7 +189,7 @@ def test_missing_broadcast_is_a_plain_create(
     [form_call] = form_sender.calls                    # новый ключ — ровно одна отправка
     assert form_call.stream_key == "fake-0001-0000-0000-0000"
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.CREATED
-    assert "создан заново" not in (outcome.report_text or "")
+    assert "создан заново" not in _report_text(outcome)
 
 
 def test_matched_key_comes_from_the_platform(
@@ -199,7 +205,7 @@ def test_matched_key_comes_from_the_platform(
     assert outcome.exit_code == ExitCode.OK
     keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
     assert PLATFORM_KEY in keys_text
-    assert "ключ прежний, планер его не передавал" in keys_text
+    assert "ключ прежний, в этом запуске не передавался" in keys_text
     assert form_sender.calls == [] and fake_platform.created == []
     assert outcome.report is not None
     [pair_outcome] = outcome.report.outcomes
@@ -218,7 +224,7 @@ def test_matched_broadcast_is_never_sent_to_the_form(
     assert form_sender.calls == []
     assert outcome.exit_code == ExitCode.OK            # отсутствие отправки по совпавшему эфиру — не ошибка
     assert len(_kept_key_lines(outcome)) == 1
-    assert "не отправляет его в форму повторно" in (outcome.report_text or "")
+    assert "повторно в форму он не отправляется" in _report_text(outcome)
 
 
 def test_two_packages_with_one_slot_give_one_object_per_channel(
@@ -254,7 +260,7 @@ def test_broadcast_without_stream_is_reported_and_gets_no_key(
     assert [call.broadcast_id for call in fake_platform.attached] == [found.broadcast_id]
     assert len(form_sender.calls) == 1
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.STREAM_ATTACHED
-    assert "поток привязан" in (outcome.report_text or "")
+    assert "поток привязан" in _report_text(outcome)
 
 
 def test_package_fields_of_the_object_survive_the_whole_run(
@@ -306,7 +312,7 @@ def test_too_late_slot_reads_its_key_from_the_platform_and_writes_nothing(
     assert form_sender.calls == []
     assert fake_platform.stream_calls                  # площадку прочитали — только чтение
     assert outcome.report is not None and outcome.report.outcomes == []
-    assert "до старта меньше 60 минут" in (outcome.report_text or "")
+    assert "до старта меньше 60 минут" in _report_text(outcome)
     assert _kept_key_lines(outcome) == []
 
 
@@ -319,7 +325,7 @@ def test_too_late_slot_without_broadcast_has_no_key_row(
     assert outcome.exit_code == ExitCode.OK
     assert fake_platform.created == [] and form_sender.calls == []
     lines: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2 and all(line.startswith("# ") for line in lines)
+    assert len(lines) == 3 and all(line.startswith("# ") for line in lines)
 
 
 def test_thumbnail_failure_is_a_warning_not_an_error(
@@ -331,7 +337,7 @@ def test_thumbnail_failure_is_a_warning_not_an_error(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
     assert outcome.report is not None and len(outcome.report.warnings) == 1
-    assert "обложка не поставлена" in (outcome.report_text or "")
+    assert "обложка не поставлена" in _report_text(outcome)
 
 
 def test_video_settings_failure_is_a_warning_not_an_error(
@@ -342,7 +348,7 @@ def test_video_settings_failure_is_a_warning_not_an_error(
     fake_platform.fail_settings["fakebc00001"] = PlatformError("forbidden", "нельзя")
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
-    assert "не удалось применить настройки эфира" in (outcome.report_text or "")
+    assert "не удалось применить настройки эфира" in _report_text(outcome)
 
 
 def test_language_is_set_from_the_slot(
@@ -400,7 +406,7 @@ def test_fix_keeps_key_and_url(
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.FIXED
     assert form_sender.calls == []                     # исправление текстов ключ не трогает и в форму не шлёт
     assert outcome.exit_code == ExitCode.OK
-    assert "обновлено. Ключ и ссылка прежние" in (outcome.report_text or "")
+    assert "обновлено. Ключ и ссылка прежние" in _report_text(outcome)
 
 
 def test_one_failed_object_does_not_block_the_others(
@@ -430,7 +436,7 @@ def test_made_for_kids_is_fixed_and_warned(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
     assert fake_platform.made_for_kids[found.broadcast_id] is False
-    assert "аудитория эфира была «для детей»" in (outcome.report_text or "")
+    assert "аудитория эфира была «для детей»" in _report_text(outcome)
 
 
 def test_audience_failure_is_a_warning_too(
@@ -457,7 +463,7 @@ def test_age_restricted_broadcast_is_reported_but_not_an_error(
     fake_platform.age_restricted.add(found.broadcast_id)
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
-    assert "возрастное ограничение 18+" in (outcome.report_text or "")
+    assert "возрастное ограничение 18+" in _report_text(outcome)
 
 
 def test_facts_are_read_once_per_object(
@@ -497,7 +503,7 @@ def test_matching_broadcast_has_no_mismatch_section(
     make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None and outcome.report.mismatches == []
-    assert "Расхождения с платформой" not in (outcome.report_text or "")
+    assert "Расхождения с платформой" not in _report_text(outcome)
 
 
 def test_full_match_reports_no_mismatch_at_all(
@@ -513,7 +519,7 @@ def test_full_match_reports_no_mismatch_at_all(
     assert facts.start_utc == UK_START.astimezone(timezone.utc)
     assert facts.stream_marker == UK_SLOT
     assert outcome.report is not None and outcome.report.mismatches == []
-    assert "Расхождения с платформой" not in (outcome.report_text or "")
+    assert "Расхождения с платформой" not in _report_text(outcome)
 
 
 def test_description_mismatch_is_reported_shortened(
@@ -544,7 +550,7 @@ def test_description_mismatch_is_reported_shortened(
     )
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None
-    text: str = outcome.report_text or ""
+    text: str = _report_text(outcome)
     assert "Расхождения с платформой" in text
     assert "описание — хотели:" in text
     assert long_text.strip() not in text          # целиком не выводится
@@ -635,7 +641,7 @@ def test_category_mismatch_is_reported(
     )
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
-    assert "категория — хотели: 22; на платформе: 24" in (outcome.report_text or "")
+    assert "категория — хотели: 22; на платформе: 24" in _report_text(outcome)
 
 
 def test_live_chat_is_warned_once_per_run(
@@ -709,8 +715,8 @@ def test_unconfirmed_form_keeps_pending_and_exits_1(
     sender: _PartialFormSender = _PartialFormSender(confirmed_slot_id=UK_SLOT)
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
     assert outcome.exit_code == ExitCode.ERRORS
-    text: str = outcome.report_text or ""
-    assert "форма ✅" in text
+    text: str = _report_text(outcome)
+    assert "эфир создан, ключ передан в форму" in text
     assert "форма не подтвердила запись ответа" in text
     assert "ответ формы сохранён для разбора" in text
 
@@ -738,7 +744,7 @@ def test_dry_run_changes_nothing(
     assert not planer_paths.keys_file.exists()
     assert fake_platform.created == [] and form_sender.calls == []
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.CREATED
-    assert "эфира нет, будет создан — не выполнено (dry-run)" in (outcome.report_text or "")
+    assert "эфира нет, будет создан — не выполнено (dry-run)" in _report_text(outcome)
 
 
 def test_status_lists_marked_broadcasts_into_keys_file(
@@ -758,9 +764,10 @@ def test_status_lists_marked_broadcasts_into_keys_file(
     outcome: RunOutcome = _run(RunMode.STATUS, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
     lines: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 4
-    assert "ключ прежний, планер его не передавал" in lines[2] and "aaaa-aaaa-aaaa-aaaa-aaaa" in lines[2]
-    assert "ключ прежний, планер его не передавал" in lines[3] and "bbbb-bbbb-bbbb-bbbb-bbbb" in lines[3]
+    blocks: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").split("\n\n")[1:]
+    assert len(lines) == 3 + 2 * 6                   # шапка и два блока: пустая строка, заголовок, 4 поля
+    assert "  ключ   aaaa-aaaa-aaaa-aaaa-aaaa" in blocks[0] and "ключ прежний, в этом запуске не передавался" in blocks[0]
+    assert "  ключ   bbbb-bbbb-bbbb-bbbb-bbbb" in blocks[1] and "ключ прежний, в этом запуске не передавался" in blocks[1]
     assert outcome.report is not None
     assert [item.kind for item in outcome.report.outcomes] == [OutcomeKind.MATCHED, OutcomeKind.MATCHED]
 

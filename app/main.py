@@ -29,6 +29,7 @@ from app.form.discovery import FormDiscovery
 from app.form.submitter import GoogleFormSender
 from app.google.auth import AuthError, load_credentials, token_file_for
 from app.observability.logging_setup import close_logging, get_logger, setup_logging
+from app.output.console import render_console
 from app.paths import PlanerPaths, build_paths, ensure_dirs, resolve_root
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
@@ -79,7 +80,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     log_path: Path = setup_logging(paths.logs_dir, debug=args.debug)
     LOGGER.info("run_started root=%s dry_run=%s status=%s log=%s", paths.root, args.dry_run, args.status, log_path)
     try:
-        exit_code: int = _run(args, paths)
+        exit_code: int = _run(args, paths, log_path)
         LOGGER.info("run_finished exit_code=%d", exit_code)
         return exit_code
     finally:
@@ -106,7 +107,7 @@ def _requested_run_mode(args: argparse.Namespace) -> RunMode:
     return RunMode.FULL
 
 
-def _run(args: argparse.Namespace, paths: PlanerPaths) -> int:
+def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path) -> int:
     dependencies: _Dependencies | None = _build_dependencies(paths)
     if dependencies is None:
         return int(ExitCode.CONFIG)
@@ -114,9 +115,7 @@ def _run(args: argparse.Namespace, paths: PlanerPaths) -> int:
         return _run_auth(args.auth, paths, dependencies)
     if args.check:
         return _run_check(paths, dependencies)
-    if not (args.dry_run or args.status):
-        _say(msg.FIRST_RUN_HEADER)
-    return _run_pipeline(_requested_run_mode(args), paths, dependencies)
+    return _run_pipeline(_requested_run_mode(args), paths, dependencies, log_path)
 
 
 def _build_dependencies(paths: PlanerPaths) -> _Dependencies | None:
@@ -312,7 +311,7 @@ def _binding_problem(channel: ChannelConfig, info: ChannelInfo, bindings: Channe
     return None
 
 
-def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies) -> int:
+def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies, log_path: Path) -> int:
     if not _bindings_verified(paths, dependencies):
         _say(msg.BINDINGS_NOT_VERIFIED)
         return int(ExitCode.CONFIG)
@@ -326,7 +325,7 @@ def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies
         now_utc,
         random.Random(),
     )
-    _print_outcome(outcome, paths)
+    _print_outcome(outcome, paths, log_path)
     return outcome.exit_code
 
 
@@ -348,13 +347,12 @@ def _bindings_verified(paths: PlanerPaths, dependencies: _Dependencies) -> bool:
     return True
 
 
-def _print_outcome(outcome: RunOutcome, paths: PlanerPaths) -> None:
+def _print_outcome(outcome: RunOutcome, paths: PlanerPaths, log_path: Path) -> None:
+    """Консоль — сводка и пути; подробности — в отчёте, диагностика — в логе (ТЗ §5.6)."""
     if outcome.problem is RunProblem.PROMO_EMPTY:
         _say(msg.PROMO_EMPTY.format(path=paths.promo_dir))
-    if outcome.report_text is not None:
-        _say(outcome.report_text)
-    if outcome.report_path is not None:
-        _say(msg.REPORT_WRITTEN.format(path=outcome.report_path))
+    if outcome.report is not None:
+        _say(render_console(outcome.report, root=paths.root, report_path=outcome.report_path, log_path=log_path))
 
 
 if __name__ == "__main__":

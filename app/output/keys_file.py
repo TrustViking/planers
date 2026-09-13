@@ -20,7 +20,6 @@ from app.pipeline.reconciler import MarkedBroadcast
 from app.platforms.base import broadcast_url_for
 from app.ui import messages_ru as msg
 
-FIELD_SEPARATOR: Final[str] = " | "
 KEYS_ENCODING: Final[str] = "utf-8"
 MISSING_VALUE: Final[str] = "-"
 
@@ -81,23 +80,22 @@ def _row_order(row: KeyRow) -> tuple[date, str, str]:
 
 
 def render_keys_file(rows: Iterable[KeyRow], generated_at_text: str) -> str:
-    lines: list[str] = [msg.KEYS_FILE_HEADER.format(generated_at=generated_at_text), msg.KEYS_FILE_COLUMNS]
+    """Блок на стрим, между блоками пустая строка: ключ не уезжает за край экрана (ТЗ §5.5)."""
+    lines: list[str] = [line.format(generated_at=generated_at_text) for line in msg.KEYS_FILE_HEADER]
     for row in sorted(rows, key=_row_order):
-        lines.append(
-            FIELD_SEPARATOR.join(
-                (
-                    row.language,
-                    row.date,
-                    row.time,
-                    row.account_name,
-                    row.form_status_text,
-                    row.stream_url,
-                    row.stream_key,
-                    row.broadcast_url,
-                )
-            )
-        )
+        lines.append("")
+        lines.extend(_row_block(row))
     return "\n".join(lines) + "\n"
+
+
+def _row_block(row: KeyRow) -> list[str]:
+    return [
+        msg.KEYS_BLOCK_TITLE.format(date=row.date, time=row.time, language=row.language, account_name=row.account_name),
+        msg.KEYS_BLOCK_KEY.format(value=row.stream_key),
+        msg.KEYS_BLOCK_STREAM.format(value=row.stream_url),
+        msg.KEYS_BLOCK_BROADCAST.format(value=row.broadcast_url),
+        msg.KEYS_BLOCK_FORM.format(value=row.form_status_text),
+    ]
 
 
 def write_keys_file(paths: PlanerPaths, text: str) -> Path:

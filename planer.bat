@@ -13,7 +13,6 @@ if not exist "%PYTHON%" (
 )
 
 cd /d "%ROOT%"
-echo [INFO] planer args: %*
 "%PYTHON%" -m app.main %*
 set "CODE=%ERRORLEVEL%"
 

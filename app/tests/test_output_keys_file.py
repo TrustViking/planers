@@ -21,13 +21,29 @@ from app.tests.conftest import build_planned, build_slot
 KYIV: timezone = timezone(timedelta(hours=2))
 STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 
-# Образец ТЗ §5.5: статус формы говорит только об этом запуске — передан сейчас,
-# не удалось передать новый ключ, или ключ прежний и планер его не передавал.
-TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенерировано планером 13-09-2026 12:00. Файл производный — не править.
-# язык | дата | время (Киев) | аккаунт | статус формы | stream_url | stream_key | ссылка на эфир
-uk | 16-09-2026 | 19:00 | Іван UA | ключ передан в форму 13-09-2026 12:00 | rtmp://a.rtmp.youtube.com/live2 | xxxx-xxxx-xxxx-xxxx-xxxx | https://www.youtube.com/watch?v=abc123
-ru | 16-09-2026 | 21:00 | Иван RU | не удалось передать: форма недоступна (HTTP 503) | rtmp://a.rtmp.youtube.com/live2 | yyyy-yyyy-yyyy-yyyy-yyyy | https://www.youtube.com/watch?v=def456
-uk | 17-09-2026 | 19:00 | Іван UA | ключ прежний, планер его не передавал | rtmp://a.rtmp.youtube.com/live2 | zzzz-zzzz-zzzz-zzzz-zzzz | https://www.youtube.com/watch?v=ghi789
+# Образец ТЗ §5.5: блок на стрим, ключ — первой строкой блока. Статус формы говорит только
+# об этом запуске — передан сейчас, НЕ передан новый ключ, или ключ прежний.
+TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенерировано планером 13-09-2026 12:00.
+# Файл перезаписывается на каждом запуске — не править.
+# Если в строке «форма» стоит «НЕ передан» — передайте ключ стримеру вручную.
+
+16-09-2026 19:00  uk  Іван UA
+  ключ   xxxx-xxxx-xxxx-xxxx-xxxx
+  поток  rtmp://a.rtmp.youtube.com/live2
+  эфир   https://www.youtube.com/watch?v=abc123
+  форма  передан 13-09-2026 12:00
+
+16-09-2026 21:00  ru  Иван RU
+  ключ   yyyy-yyyy-yyyy-yyyy-yyyy
+  поток  rtmp://a.rtmp.youtube.com/live2
+  эфир   https://www.youtube.com/watch?v=def456
+  форма  НЕ передан — форма недоступна (HTTP 503)
+
+17-09-2026 19:00  uk  Іван UA
+  ключ   zzzz-zzzz-zzzz-zzzz-zzzz
+  поток  rtmp://a.rtmp.youtube.com/live2
+  эфир   https://www.youtube.com/watch?v=ghi789
+  форма  ключ прежний, в этом запуске не передавался
 """
 
 
@@ -104,12 +120,12 @@ def test_object_without_key_shows_dashes() -> None:
 def test_form_status_texts_speak_only_about_this_run() -> None:
     new: PlannedBroadcast = _new_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
     new.last_error = "notConfirmed: HTTP 200"
-    assert form_status_text(new) == "не удалось передать: форма не подтвердила запись ответа (HTTP 200)"
+    assert form_status_text(new) == "НЕ передан — форма не подтвердила запись ответа (HTTP 200)"
     new.is_form_sent = True
     new.form_sent_at = datetime(2026, 9, 13, 12, 0)
-    assert form_status_text(new) == "ключ передан в форму 13-09-2026 12:00"
+    assert form_status_text(new) == "передан 13-09-2026 12:00"
     kept: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
-    assert form_status_text(kept) == "ключ прежний, планер его не передавал"
+    assert form_status_text(kept) == "ключ прежний, в этом запуске не передавался"
 
 
 def test_status_row_does_not_look_into_the_journal() -> None:
@@ -120,11 +136,21 @@ def test_status_row_does_not_look_into_the_journal() -> None:
         parts=MarkerParts(date="16-09-2026", time="19:00", language="uk"),
     )
     row = key_row_from_marked(marked)
-    assert (row.form_status_text, row.stream_key) == ("ключ прежний, планер его не передавал", "xxxx-xxxx-xxxx-xxxx-xxxx")
+    assert (row.form_status_text, row.stream_key) == ("ключ прежний, в этом запуске не передавался", "xxxx-xxxx-xxxx-xxxx-xxxx")
 
 
 def test_empty_file_has_only_comment_lines(planer_paths: PlanerPaths) -> None:
     path: Path = write_keys_file(planer_paths, render_keys_file([], "16-03-2027 12:00"))
     assert path == planer_paths.keys_file
     lines: list[str] = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2 and all(line.startswith("# ") for line in lines)
+    assert len(lines) == 3 and all(line.startswith("# ") for line in lines)
+
+
+def test_key_is_the_first_line_of_each_block() -> None:
+    """Ключ — ради него файл и открывают — стоит первым в блоке, а не в конце длинной строки."""
+    item: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
+    lines: list[str] = render_keys_file([key_row_from_planned(item)], "13-09-2026 12:00").splitlines()
+    assert lines[3] == ""
+    assert lines[4] == "16-09-2026 19:00  uk  Іван UA"
+    assert lines[5] == "  ключ   xxxx-xxxx-xxxx-xxxx-xxxx"
+    assert all(len(line) <= 80 for line in lines[4:])

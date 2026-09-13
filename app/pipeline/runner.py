@@ -37,6 +37,7 @@ from app.output.report import (
     build_skipped_lines,
     build_mismatch_lines,
     build_warning_lines,
+    display_path,
     outcome_from_marked,
     outcome_from_planned,
     planer_error_outcome,
@@ -106,7 +107,6 @@ class RunProblem(str, Enum):
 class RunOutcome:
     report: RunReport | None
     exit_code: int
-    report_text: str | None = None
     report_path: Path | None = None
     problem: RunProblem | None = None
 
@@ -193,7 +193,7 @@ def _run_promo(context: _RunContext) -> RunOutcome:
         skipped=build_skipped_lines(scan, selection, context.config),
         mismatches=build_mismatch_lines(selection.planned),
         warnings=build_warning_lines(selection.planned, context.form_diagnostics),
-        keys_file_path=_display_path(context.paths, keys_path),
+        keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )
     # новый ключ, не дошедший до стримера, — это код выхода 1; прежний ключ форму не ждёт (§7.5)
@@ -231,7 +231,7 @@ def _run_status(context: _RunContext) -> RunOutcome:
         mode=RunMode.STATUS,
         generated_at_text=context.generated_at_text,
         outcomes=outcomes,
-        keys_file_path=_display_path(context.paths, keys_path),
+        keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )
     return _complete(context, report, has_errors=_has_error_outcomes(outcomes))
@@ -245,20 +245,11 @@ def _complete(context: _RunContext, report: RunReport, *, has_errors: bool) -> R
     report_path: Path = write_report(context.paths, text, context.now_local)
     exit_code: ExitCode = ExitCode.ERRORS if has_errors else ExitCode.OK
     LOGGER.info("run_report mode=%s outcomes=%d exit_code=%d", report.mode.value, len(report.outcomes), int(exit_code))
-    return RunOutcome(report=report, exit_code=int(exit_code), report_text=text, report_path=report_path)
+    return RunOutcome(report=report, exit_code=int(exit_code), report_path=report_path)
 
 
 def _has_error_outcomes(outcomes: Sequence[PairOutcome]) -> bool:
     return any(outcome.kind in ERROR_OUTCOME_KINDS for outcome in outcomes)
-
-
-def _display_path(paths: PlanerPaths, path: Path | None) -> str | None:
-    if path is None:
-        return None
-    try:
-        return str(path.relative_to(paths.root))
-    except ValueError:
-        return str(path)
 
 
 def _form_error_text(result: FormSendResult) -> str | None:
