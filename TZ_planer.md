@@ -538,7 +538,7 @@ channels:
 
 ### 7.6. Режимы запуска
 
-`planer.exe` через `planer.bat` — оба в корне программы, ничего не спрятано в подпапках (как `bot_main.bat` в броадкастере); окно не закрывается до Enter. У владельца это `packaging\planer.bat` из поставки (зовёт `planer.exe` из своей папки); корневой `planer.bat` репо — девелоперский, через `.venv_planers`:
+`planer.exe` через `planer.bat` — оба в корне программы, ничего не спрятано в подпапках (как `bot_main.bat` в броадкастере); окно не закрывается до Enter. `planer.bat` один на оба случая: если рядом лежит `planer.exe` (установленная программа), запускается он; иначе (репо) — `python -m app.main` из `.venv_planers`:
 
 - без аргументов — полный цикл §4;
 - `--dry-run` — читает пакеты и **сверяется с YouTube** (только чтение), но ничего не создаёт, не исправляет и в форму не шлёт; в отчёте — что было бы сделано; `keys.txt` не меняется;
@@ -643,14 +643,12 @@ D:\_projects\planers\
 ├── state\                         # ignored: channels.json (привязки, §5.3) — единственный файл состояния
 ├── keystreams\                    # keys.txt (ignored)
 ├── logs\                          # ignored: логи и отчёты запусков (§5.6, §5.7)
-├── packaging\
-│   ├── planer.spec                # PyInstaller: одна папка, точка входа app\main.py, из документов discovery — только youtube.v3.json
-│   ├── planer.iss                 # Inno Setup как у броадкастера: «для всех / только для меня», выбор папки, иконка planers.ico
-│   └── planer.bat                 # пусковой батник поставки: рядом с planer.exe, код выхода и pause
-├── planer.bat                     # девелоперский запуск через .venv_planers (§7.6)
+├── planer.bat                     # запуск (§7.6): planer.exe рядом — он; иначе .venv_planers; код выхода и pause
+├── planer.spec                    # PyInstaller: одна папка, точка входа app\main.py, из документов discovery — только youtube.v3.json
+├── planer.iss                     # Inno Setup как у броадкастера: «для всех / только для меня», выбор папки, иконка planers.ico
 ├── build_release.bat              # сборка exe + инсталлятор без client_secret.json
 ├── build_local.bat                # то же + secrets\client_secret.json в инсталляторе; не публиковать
-├── .venv_build\                   # ignored: сборочное окружение = requirements.txt + pyinstaller
+├── .venv_planers\                 # ignored: единственное окружение — приложение, тесты и pyinstaller
 ├── build\, dist\                   # ignored: dist\planer — сборка, dist\installer — инсталлятор
 ├── planers.ico                    # иконка exe, установщика и ярлыков
 ├── CLAUDE.md, README.md, TZ_planer.md
@@ -659,18 +657,18 @@ D:\_projects\planers\
 
 **Сборка и поставка (этап 5).** `build_release.bat` и `build_local.bat` в корне репо различаются только тем, кладётся ли в инсталлятор `secrets\client_secret.json` (условие `IncludeSecrets` в `planer.iss`). Оба:
 
-1. создают или обновляют `.venv_build` тем же интерпретатором, что `.venv_planers`, и ставят в него ровно `requirements.txt` плюс `pyinstaller==6.19.0` — инструмент сборки не попадает ни в `.venv_planers`, ни в `requirements.txt`, а exe собирается из того, что записано в `requirements.txt`;
+1. собирают из единственного окружения `.venv_planers`: в нём же стоит `pyinstaller==6.19.0` (нет — скрипт ставит его туда сам); других окружений у проекта нет;
 2. читают номер версии из `app\version.py` — в скриптах, `planer.spec` и `planer.iss` своих констант версии нет;
-3. чистят `build\` и `dist\`, собирают `packaging\planer.spec` в `dist\planer\`, проверяют, что в сборке есть `_internal\googleapiclient\discovery_cache\documents\youtube.v3.json` (без него `build("youtube", "v3", cache_discovery=False)` у владельца упал бы), кладут рядом с exe `planer.bat` поставки и `config\*.example.yaml`;
+3. чистят `build\` и `dist\`, собирают `planer.spec` в `dist\planer\`, проверяют, что в сборке есть `_internal\googleapiclient\discovery_cache\documents\youtube.v3.json` (без него `build("youtube", "v3", cache_discovery=False)` у владельца упал бы), кладут рядом с exe тот же `planer.bat`, `planers.ico` и `config\*.example.yaml`;
 4. зовут Inno Setup (`ISCC`); готовый файл — `dist\installer\planer-setup-<версия>.exe` (release) или `planer-setup-local-<версия>.exe` (local). Нет Inno Setup — exe собран, печатается подсказка, код выхода 3.
 
 Что ставит инсталлятор. Папка и права — как в `installer.iss` броадкастера: мастер спрашивает «для всех пользователей / только для меня» и всегда показывает страницу выбора папки; по умолчанию `{autopf}\Planer` — для «только для меня» это `%LOCALAPPDATA%\Programs\Planer`, для «для всех» — `C:\Program Files\Planer` (с запросом прав администратора). Во frozen-режиме корень планера — папка exe (`app\paths.py::resolve_root`), туда пишутся `config\`, `secrets\`, `promo\`, `state\`, `keystreams\`, `logs\`, поэтому ставить надо в папку, куда у пользователя есть право записи (например `D:\_exe\Planer`, как у броадкастера); в `C:\Program Files` без прав администратора планер писать не сможет — это обязательный пункт README владельца. `AppId` фиксированный — повторная установка обновляет, а не ставит вторую копию. Кладутся: `planer.exe` (с иконкой `planers.ico`) и `_internal\`, `planer.bat`, `planers.ico`, `config\planer.example.yaml` и `config\channels.example.yaml` (рабочие yaml создаёт программа при первом запуске и инсталлятор их не трогает), для local — `secrets\client_secret.json`; создаётся пустая `promo\`. Иконка установщика — тоже `planers.ico`. Ярлыки: на рабочем столе — «Планер» на `planer.bat` с иконкой `planers.ico` (не на exe: окно закрылось бы сразу) и «Планер — пакеты» на `promo\`; в меню «Пуск» — «Планер» на `planer.bat` с той же иконкой. Удаление снимает только положенное инсталлятором: рабочие yaml, токены в `secrets\`, `promo\`, `state\`, `keystreams\`, `logs\` остаются.
 
 ## 10. Нефункциональные требования
 
-- Python 3.13, venv `.venv_planers`, Windows 11; PyInstaller 6.19.0 onedir (`packaging\planer.spec`) из отдельного `.venv_build` (папки `config\ secrets\ promo\ state\ keystreams\ logs\` — рядом с exe, не внутри `_internal`).
+- Python 3.13, venv `.venv_planers`, Windows 11; PyInstaller 6.19.0 onedir (`planer.spec` в корне) из того же `.venv_planers` (папки `config\ secrets\ promo\ state\ keystreams\ logs\` — рядом с exe, не внутри `_internal`).
 - `requirements.txt` — снимок того, что фактически стоит в `.venv_planers`: его перегенерирует `pip freeze` в скрипте активации окружения у Артура, руками файл не правится. Перед сборкой exe (этап 5) окружение чистится от лишнего и снимок делается заново.
-- Зависимости: `google-api-python-client`, `google-auth`, `google-auth-oauthlib`, `requests`, `PyYAML` — те же, что уже в broadcaster. Новые — только с явного согласования.
+- Зависимости: `google-api-python-client`, `google-auth`, `google-auth-oauthlib`, `requests`, `PyYAML` — те же, что уже в broadcaster; инструмент сборки `pyinstaller==6.19.0` стоит в том же `.venv_planers` и попадает в снимок `requirements.txt` (решение Артура 13-09-2026). Новые — только с явного согласования.
 - Стандарты кода — как в broadcaster: аннотации `X | None`, `verb_noun`, функции ~30 строк, guard clauses, английские имена, структурированные логи, русские операторские сообщения.
 - Тесты `pytest` в `app/tests/`: чтение пакета; §7.1–7.2 на фикстурах с подменённым «сейчас»; §7.3 на фейковой платформе (нет/есть-совпадает/есть-отличается/удалён/два на одну минуту); файл ключей и отчёт по фиксированному состоянию; discovery формы — на сохранённом HTML тренировочной формы (реальном): названия, типы, варианты, разделы и переходы; сопоставление §7.5 п.3 на фикстуре пакета: дата есть / даты нет / stream_url с другим регистром и слэшем; регулярка ключа §7.4: 5 групп — ок, 4 группы — ок, 3 группы и заглавные буквы — ошибка; submitter с подменённым `requests`.
 - Ни один запуск планера не должен упасть целиком из-за одной пары (слот, канал): ошибка изолируется в отчёт.
@@ -687,7 +685,7 @@ D:\_projects\planers\
 | 5 | чистка `.venv_planers` и свежий `requirements.txt`; exe, `planer.bat`, README для владельца; переключение на боевую форму | владелец без Python проходит §4 по инструкции; перенос экспортера в broadcaster и push |
 | 6 | Facebook | после закрытия **[ПРОВЕРИТЬ]** по §7.4 |
 
-Этап 5 на 13-09-2026. Сделано (задача 5a): `app\version.py` и `--version`; `packaging\planer.spec`, `packaging\planer.iss`, `packaging\planer.bat`; `build_local.bat` / `build_release.bat` со сборочным окружением `.venv_build`; смоук собранного exe в чистом корне (создание папок и рабочих yaml из примеров, код 2, версия в логе). Осталось: README для владельца (в том числе правило стримера «брать последнюю строку по дате, каналу и языку», §7.5); переключение на боевую форму; чистка `.venv_planers` и свежий `requirements.txt` перед релизной сборкой; прогон владельцем по инструкции без Python; перенос экспортера в broadcaster и push.
+Этап 5 на 13-09-2026. Сделано (задача 5a): `app\version.py` и `--version`; `planer.spec`, `planer.iss` и общий `planer.bat` в корне репо; `build_local.bat` / `build_release.bat` из единственного окружения `.venv_planers`; смоук собранного exe в чистом корне (создание папок и рабочих yaml из примеров, код 2, версия в логе). Осталось: README для владельца (в том числе правило стримера «брать последнюю строку по дате, каналу и языку», §7.5); переключение на боевую форму; чистка `.venv_planers` и свежий `requirements.txt` перед релизной сборкой; прогон владельцем по инструкции без Python; перенос экспортера в broadcaster и push.
 
 Таблица — только требования. Что из этого уже сделано и каким коммитом — в разделе «Текущее состояние» файла `CLAUDE.md`; отдельного файла статуса в репо нет.
 

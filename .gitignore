@@ -73,8 +73,6 @@ htmlcov/
 venv/
 ENV/
 .venv_*/
-# build environment: requirements.txt + pyinstaller, never .venv_planers (CLAUDE.md)
-/.venv_build/
 .venv-*/
 .poetry/
 

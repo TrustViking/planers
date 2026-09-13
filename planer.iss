@@ -1,5 +1,5 @@
 ﻿; Инсталлятор планера (ТЗ §9, этап 5). Собирается из build_local.bat / build_release.bat:
-;   ISCC /DAppVersion=<app\version.py> /DIncludeSecrets=0|1 packaging\planer.iss
+;   ISCC /DAppVersion=<app\version.py> /DIncludeSecrets=0|1 planer.iss
 ; Источник файлов — dist\planer (то, что прошло смоук): planer.exe, _internal\, planer.bat, config\*.example.yaml.
 ;
 ; Папка и права — как в installer.iss броадкастера: мастер спрашивает «для всех пользователей /
@@ -20,7 +20,7 @@
   #define IncludeSecrets 0
 #endif
 
-#define RepoRoot AddBackslash(SourcePath) + ".."
+#define RepoRoot RemoveBackslash(SourcePath)
 #define SourceDir RepoRoot + "\dist\planer"
 
 #if IncludeSecrets

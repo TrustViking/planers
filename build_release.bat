@@ -2,7 +2,7 @@
 chcp 65001 >nul
 rem Planer: release build - exe + installer WITHOUT secrets (TZ 9, stage 5).
 rem build_local.bat calls this script with PLANER_INCLUDE_SECRETS=1; that is the only difference.
-rem Build environment .venv_build = requirements.txt + pyinstaller (never .venv_planers).
+rem The only environment is .venv_planers: the app and pyinstaller live there.
 rem Exit codes: 0 - exe and installer built; 1 - build failed; 3 - exe built, Inno Setup not found.
 setlocal EnableExtensions
 
@@ -11,11 +11,9 @@ cd /d "%ROOT%"
 
 if not defined PLANER_INCLUDE_SECRETS set "PLANER_INCLUDE_SECRETS=0"
 set "PYINSTALLER_PIN=pyinstaller==6.19.0"
-set "APP_PYTHON=%ROOT%\.venv_planers\Scripts\python.exe"
-set "BUILD_VENV=%ROOT%\.venv_build"
-set "BUILD_PYTHON=%BUILD_VENV%\Scripts\python.exe"
-set "SPEC=%ROOT%\packaging\planer.spec"
-set "ISS=%ROOT%\packaging\planer.iss"
+set "BUILD_PYTHON=%ROOT%\.venv_planers\Scripts\python.exe"
+set "SPEC=%ROOT%\planer.spec"
+set "ISS=%ROOT%\planer.iss"
 set "DIST_APP=%ROOT%\dist\planer"
 set "APP_ICON=%ROOT%\planers.ico"
 set "DISCOVERY_DOC=%DIST_APP%\_internal\googleapiclient\discovery_cache\documents\youtube.v3.json"
@@ -26,27 +24,21 @@ if "%PLANER_INCLUDE_SECRETS%"=="1" (
   echo [INFO] RELEASE build: installer contains no secrets.
 )
 
-rem --- 1. build environment ---------------------------------------------------
-if not exist "%APP_PYTHON%" (
-  echo [ERROR] Python not found: "%APP_PYTHON%" - .venv_build is created from the same interpreter.
+rem --- 1. environment: .venv_planers only ----------------------------------------
+if not exist "%BUILD_PYTHON%" (
+  echo [ERROR] Python not found: "%BUILD_PYTHON%"
   call :finish 1
   exit /b 1
 )
-if not exist "%BUILD_PYTHON%" (
-  echo [INFO] Creating .venv_build ...
-  "%APP_PYTHON%" -m venv "%BUILD_VENV%"
+"%BUILD_PYTHON%" -m PyInstaller --version >nul 2>&1
+if errorlevel 1 (
+  echo [INFO] PyInstaller not found in .venv_planers - installing %PYINSTALLER_PIN% ...
+  "%BUILD_PYTHON%" -m pip install --disable-pip-version-check --quiet %PYINSTALLER_PIN%
   if errorlevel 1 (
-    echo [ERROR] Cannot create .venv_build.
+    echo [ERROR] pip install %PYINSTALLER_PIN% into .venv_planers failed.
     call :finish 1
     exit /b 1
   )
-)
-echo [INFO] Installing requirements.txt + %PYINSTALLER_PIN% into .venv_build ...
-"%BUILD_PYTHON%" -m pip install --disable-pip-version-check --quiet -r "%ROOT%\requirements.txt" %PYINSTALLER_PIN%
-if errorlevel 1 (
-  echo [ERROR] pip install into .venv_build failed.
-  call :finish 1
-  exit /b 1
 )
 
 rem --- 2. version: app\version.py is the only source ----------------------------
@@ -91,7 +83,7 @@ if not exist "%DISCOVERY_DOC%" (
 
 rem Next to the exe: launcher, icon for shortcuts and config examples (the program creates planer.yaml / channels.yaml from them).
 mkdir "%DIST_APP%\config" >nul 2>&1
-copy /Y "%ROOT%\packaging\planer.bat" "%DIST_APP%\planer.bat" >nul
+copy /Y "%ROOT%\planer.bat" "%DIST_APP%\planer.bat" >nul
 copy /Y "%APP_ICON%" "%DIST_APP%\planers.ico" >nul
 copy /Y "%ROOT%\config\planer.example.yaml" "%DIST_APP%\config\planer.example.yaml" >nul
 copy /Y "%ROOT%\config\channels.example.yaml" "%DIST_APP%\config\channels.example.yaml" >nul

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec планера (ТЗ §9, этап 5). Собирается из корня репо скриптами build_local.bat / build_release.bat
-в окружении .venv_build: requirements.txt + pyinstaller==6.19.0.
+PyInstaller spec планера (ТЗ §9, этап 5). Лежит в корне репо, собирается скриптами build_local.bat / build_release.bat
+из единственного окружения .venv_planers (в нём же pyinstaller==6.19.0).
 
 Режим — одна папка (COLLECT): onefile распаковывается во временный каталог при каждом запуске.
 Точка входа — app/main.py. Консольное приложение: сводку печатает в консоль, запускается из planer.bat.
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import googleapiclient
 
-ROOT = Path(SPECPATH).resolve().parent          # SPECPATH — папка packaging\
+ROOT = Path(SPECPATH).resolve()                 # SPECPATH — корень репо, где лежит planer.spec
 sys.path.insert(0, str(ROOT))
 from app.version import APP_VERSION  # noqa: E402  (печатается в лог сборки, чтобы версия была видна)
 
