@@ -22,6 +22,7 @@ from app.platforms.base import (
     CreatedBroadcast,
     PlatformError,
     PlatformLimits,
+    PlatformNotice,
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
@@ -137,6 +138,10 @@ class VerifiedPlatform:
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
         self.verify(channel)
         self._platform.set_thumbnail(channel, broadcast_id, preview)
+
+    def take_notices(self) -> tuple[PlatformNotice, ...]:
+        """Замечания копит обёрнутая площадка; привязка канала тут не нужна."""
+        return self._platform.take_notices()
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         self.verify(channel)

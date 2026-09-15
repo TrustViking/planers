@@ -69,6 +69,7 @@ from app.platforms.base import (
     BroadcastPlatform,
     CreatedBroadcast,
     PlatformError,
+    PlatformNotice,
     VideoFixes,
     broadcast_url_for,
 )
@@ -184,6 +185,8 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         selection.planned,
         frozenset(scan.slot_map),
     )
+    # замечания площадки (эфир без времени старта) — данными, в отчёт и консоль одним путём
+    notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
     keys_path: Path | None = None
     extra_outcomes: list[PairOutcome] = []
     if context.is_full:
@@ -202,7 +205,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         orphans=[_orphan_line(orphan) for orphan in orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
         mismatches=build_mismatch_lines(selection.planned, context.platform.limits),
-        warnings=build_warning_lines(selection.planned, context.form_diagnostics),
+        warnings=build_warning_lines(selection.planned, context.form_diagnostics, notices),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )
@@ -232,6 +235,7 @@ def _execute_full(
 def _run_status(context: _RunContext) -> RunOutcome:
     """Без пакетов: эфиры с маркером планера на каналах → keys.txt и отчёт."""
     marked: MarkedScan = Reconciler(context.platform).marked_broadcasts(context.config.channels)
+    notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
     rows: list[KeyRow] = [key_row_from_marked(item) for item in marked.broadcasts]
     outcomes: list[PairOutcome] = [outcome_from_marked(item) for item in marked.broadcasts]
     outcomes.extend(platform_error_outcome(failure.channel, failure.error) for failure in marked.failures)
@@ -241,6 +245,7 @@ def _run_status(context: _RunContext) -> RunOutcome:
         mode=RunMode.STATUS,
         generated_at_text=context.generated_at_text,
         outcomes=outcomes,
+        warnings=build_warning_lines((), (), notices),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )

@@ -23,6 +23,7 @@ from app.output.report import (
     build_run_warning_lines,
     build_skipped_lines,
     build_totals,
+    build_undated_warning_lines,
     build_warning_lines,
     render_report,
     skip_text,
@@ -32,7 +33,7 @@ from app.package.bcast import BcastScan, scan_bcast
 from app.paths import PlanerPaths
 from app.pipeline.plan import Decision, OutcomeError, PlannedBroadcast
 from app.pipeline.selection import Selection, build_planned
-from app.platforms.base import CreatedBroadcast, StreamInfo, UpcomingBroadcast
+from app.platforms.base import CreatedBroadcast, PlatformNotice, PlatformNoticeKind, StreamInfo, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
 from app.tests.conftest import build_config, build_slot
 from app.tests.conftest import build_planned as build_planned_object
@@ -342,6 +343,18 @@ def _with_new_key(day: int, decision: Decision) -> PlannedBroadcast:
     )
     item.decision = decision
     return item
+
+
+def test_undated_notices_are_deduplicated_by_channel_and_title() -> None:
+    """Канал за запуск читается не раз: одинаковое замечание — одна строка предупреждения."""
+    notice: PlatformNotice = PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, "Test UA", "Брифинг")
+    other: PlatformNotice = PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, "Test RU", "Брифинг")
+    lines: list[str] = build_undated_warning_lines([notice, other, notice])
+    assert lines == [
+        msg.WARNING_UNDATED_BROADCAST.format(account_name="Test UA", title="Брифинг"),
+        msg.WARNING_UNDATED_BROADCAST.format(account_name="Test RU", title="Брифинг"),
+    ]
+    assert build_warning_lines([], (), [notice]) == lines[:1]
 
 
 def test_kept_key_warning_is_written_once_per_run() -> None:

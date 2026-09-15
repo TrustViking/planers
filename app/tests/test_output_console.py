@@ -60,7 +60,7 @@ SAMPLE_CONSOLE: str = f"""Планер {APP_VERSION} — 15-09-2026 19:56
 
 ==================== ИСПРАВИЛИ (1) =====================
   Osvald.X (trustviorel@gmail.com)
-    18-03-2027  20:00  ru  Второй эфир — обновлено: описание, видимость
+    18-03-2027  20:00  ru  Второй эфир — обновлено: описание
 
 ================== КЛЮЧИ СТРИМЕРУ (3) ==================
   Osvald.X (trustviorel@gmail.com)
@@ -68,7 +68,6 @@ SAMPLE_CONSOLE: str = f"""Планер {APP_VERSION} — 15-09-2026 19:56
     18-03-2027  20:00  ru  ****-9zzz  НЕ передан — форма недоступна (HTTP 503)
   Oktavian.X (oktavian.tibery@gmail.com)
     17-03-2027  19:00  uk  ****-3j1j  передан в форму
-  полный ключ — в keystreams\\keys.txt
 
 ==================== УЖЕ СТОЯЛО (1) ====================
   Oktavian.X (oktavian.tibery@gmail.com)
@@ -175,7 +174,35 @@ def test_stream_key_is_masked_and_the_full_key_appears_nowhere() -> None:
     text: str = _render(_sample_report())
     assert "****-6jty" in text and "****-9zzz" in text
     assert all(key not in line for key in FULL_KEYS for line in text.splitlines())
-    assert "  полный ключ — в keystreams\\keys.txt" in text.replace("/", "\\")
+
+
+def test_keys_file_path_is_printed_once_in_the_footer() -> None:
+    """Путь к keys.txt — только строкой подвала, блок КЛЮЧИ СТРИМЕРУ его не повторяет."""
+    text: str = _render(_sample_report())
+    assert text.count("keystreams") == 1
+    assert text.splitlines()[-3].startswith(f"  {msg.CONSOLE_LABEL_KEYS}")
+
+
+def test_settings_only_fix_has_no_tail_in_fixed_and_is_named_in_attention() -> None:
+    """Изменилась только видимость: в ИСПРАВИЛИ — строка без «обновлено», во ВНИМАНИЕ — было/стало."""
+    report: RunReport = _sample_report(
+        outcomes=[
+            PairOutcome(
+                OutcomeKind.FIXED, **OSVALD, date="18-03-2027", time="20:00", language="ru",
+                form=FormState.SENT, title="Второй эфир", stream_key=FULL_KEYS[2],
+                changed_fields=("privacy",), field_changes=(FieldChange("privacy", "private", "unlisted"),),
+            ),
+        ],
+        skipped=[],
+        warnings=[],
+    )
+    text: str = _render(report)
+    lines: list[str] = text.splitlines()
+    fixed: list[str] = text.split("ИСПРАВИЛИ (1)")[1].split("\n\n")[0].splitlines()[1:]
+    assert fixed == ["  Osvald.X (trustviorel@gmail.com)", "    18-03-2027  20:00  ru  Второй эфир"]
+    assert lines[1] == "Итог: опубликовано 0, исправлено 1, уже стояло 0, не публиковали 0, ошибок 0"
+    assert "  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: было private, стало unlisted" in lines
+    assert text.count("видимость") == 1
 
 
 def test_console_has_no_markdown_and_no_icons() -> None:
@@ -229,7 +256,7 @@ def test_dry_run_speaks_of_intent_and_has_no_keys_block() -> None:
     assert lines[0] == f"Планер {APP_VERSION} — 15-09-2026 19:56 — dry-run: ничего не создано и в форму не отправлено"
     assert lines[1] == "Итог: опубликуем 1, исправим 1, уже стояло 0, не публиковали 2, ошибок 0"
     assert _block_titles(text) == ["ВНИМАНИЕ", "ОПУБЛИКУЕМ (1)", "ИСПРАВИМ (1)", "НЕ ПУБЛИКОВАЛИ (2)"]
-    assert "    18-03-2027  20:00  ru  Второй эфир — будет обновлено: описание, видимость" in lines
+    assert "    18-03-2027  20:00  ru  Второй эфир — будет обновлено: описание" in lines
     assert "  вернём к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: сейчас private, будет unlisted" in lines
     assert msg.CONSOLE_BLOCK_KEYS not in text and msg.CONSOLE_LABEL_KEYS + " " not in text
 

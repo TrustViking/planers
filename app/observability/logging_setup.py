@@ -21,9 +21,6 @@ MASK_PREFIX: Final[str] = "****-"
 MASK_HIDDEN: Final[str] = "****"
 MASK_EMPTY: Final[str] = "-"
 MASK_VISIBLE_CHARS: Final[int] = 4
-# Поле записи лога (extra) с эфиром без времени старта: (имя канала, название эфира).
-# Площадка такой эфир отбрасывает, а владелец должен о нём узнать — main собирает эти записи за запуск.
-LOG_EXTRA_UNDATED_BROADCAST: Final[str] = "undated_broadcast"
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -57,26 +54,6 @@ def close_logging() -> None:
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
         handler.close()
-
-
-class LogExtraCollector(logging.Handler):
-    """Собирает значения поля extra из записей логгера планера за время, пока подключён."""
-
-    def __init__(self, field_name: str) -> None:
-        super().__init__(level=logging.DEBUG)
-        self._field_name: str = field_name
-        self.values: list[object] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if hasattr(record, self._field_name):
-            self.values.append(getattr(record, self._field_name))
-
-    def __enter__(self) -> LogExtraCollector:
-        logging.getLogger(ROOT_LOGGER_NAME).addHandler(self)
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        logging.getLogger(ROOT_LOGGER_NAME).removeHandler(self)
 
 
 def mask_stream_key(value: str | None) -> str:

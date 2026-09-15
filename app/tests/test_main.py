@@ -13,8 +13,7 @@ from app import main as main_module
 from app.google.auth import AuthError, AuthErrorReason
 from app.main import ChannelConsole, run_cli
 from app.paths import ROOT_ENV_VAR, PlanerPaths
-from app.platforms import youtube as youtube_module
-from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError, UpcomingBroadcast
+from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
 from app.platforms.fake import FakePlatform
 from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
@@ -341,28 +340,19 @@ def test_undated_broadcast_goes_to_attention_not_to_the_log_console(
     make_slot: SlotFactory,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Эфир без времени старта: строка лога — только в planer.log, владельцу — строкой во «Внимание»."""
+    """Замечание площадки приходит данными (take_notices): одна строка — и во «Внимание», и в файле отчёта."""
     _ready(planer_root)
     make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
-    listed_by_fake = fake_platform_in_main.list_upcoming
-
-    def _list_with_undated(channel: Any) -> list[UpcomingBroadcast]:
-        undated: dict[str, Any] = {"id": "NOSTART", "snippet": {"title": "Брифинг без времени"}}
-        assert youtube_module._broadcast_from_item(undated, channel.account_name) is None   # боевой разбор
-        return listed_by_fake(channel)
-
-    fake_platform_in_main.list_upcoming = _list_with_undated  # type: ignore[method-assign]
+    fake_platform_in_main.seed_undated_broadcast(UA, "Брифинг без времени")
     assert run_cli(["--dry-run"]) == 0
     captured = capsys.readouterr()
+    warning: str = msg.WARNING_UNDATED_BROADCAST.format(account_name=UA, title="Брифинг без времени")
     lines: list[str] = captured.out.splitlines()
     attention: int = next(index for index, line in enumerate(lines) if msg.CONSOLE_BLOCK_ATTENTION in line)
-    assert lines[attention + 1] == (
-        f"  эфир без времени старта: {UA} — «Брифинг без времени»; у эфира нет запланированного времени, "
-        "планер его не видит"
-    )
+    assert lines[attention + 1] == f"  {warning}"
+    [report_file] = list((planer_root / "logs").glob("*_report.md"))
+    assert f"- {warning}" in report_file.read_text(encoding="utf-8").splitlines()
     assert "broadcast_without_start" not in captured.err and "broadcast_without_start" not in captured.out
-    [log_file] = list((planer_root / "logs").glob("*_planer.log"))
-    assert "broadcast_without_start" in log_file.read_text(encoding="utf-8")
 
 
 def test_check_reports_every_channel(

@@ -90,6 +90,27 @@ def test_fields_the_platform_did_not_return_are_logged_once_per_broadcast(
     assert [record.levelname for record in caplog.records if "spec_fields_not_compared" in record.getMessage()] == ["INFO"]
 
 
+def test_two_planer_broadcasts_of_one_minute_on_one_channel_are_told_apart_by_marker(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """Многоязычный канал: uk и ru в одну минуту — каждый опознан своим маркером, оба MATCH, не AMBIGUOUS."""
+    start: datetime = now + timedelta(days=1)
+    uk: Slot = make_slot_object(start, "uk")
+    ru: Slot = make_slot_object(start, "ru")
+    config: PlanerConfig = make_config([("multi", ["uk", "ru"])])
+    uk_broadcast: UpcomingBroadcast = _seed_like(fake_platform, "multi", uk)
+    ru_broadcast: UpcomingBroadcast = _seed_like(fake_platform, "multi", ru)
+    objects: list[PlannedBroadcast] = _objects(config, uk, ru)
+    _reconcile(fake_platform, config, *objects)
+    by_slot: dict[str, PlannedBroadcast] = {item.slot_id: item for item in objects}
+    assert by_slot[uk.slot_id].found == uk_broadcast and by_slot[ru.slot_id].found == ru_broadcast
+    assert {item.decision for item in objects} == {Decision.MATCH}
+    assert all(not item.ambiguous_urls for item in objects)
+
+
 def test_marked_broadcast_with_same_texts_matches(
     fake_platform: FakePlatform,
     make_config: ConfigFactory,

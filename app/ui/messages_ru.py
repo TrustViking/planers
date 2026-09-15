@@ -316,7 +316,6 @@ CONSOLE_FIX_PLANNED_LINE: Final[str] = "    {date}  {time}  {language}  {title} 
 CONSOLE_KEY_LINE: Final[str] = "    {date}  {time}  {language}  {key}  {state}"
 CONSOLE_KEY_SENT: Final[str] = "передан в форму"
 CONSOLE_KEY_FAILED: Final[str] = "НЕ передан — {reason}"
-CONSOLE_KEYS_FILE_NOTE: Final[str] = "  полный ключ — в {path}"
 CONSOLE_SKIP_GROUP_PAST: Final[str] = "  уже прошло"
 CONSOLE_SKIP_GROUP_TOO_LATE: Final[str] = "  до старта меньше {minutes} минут"
 CONSOLE_SKIP_GROUP_NO_CHANNEL: Final[str] = "  нет канала для языка {language}"

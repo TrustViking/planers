@@ -31,15 +31,8 @@ from app.form.base import FormSender
 from app.form.discovery import FormDiscovery
 from app.form.submitter import GoogleFormSender
 from app.google.auth import AuthError, load_credentials, token_file_for
-from app.observability.logging_setup import (
-    LOG_EXTRA_UNDATED_BROADCAST,
-    LogExtraCollector,
-    close_logging,
-    get_logger,
-    setup_logging,
-)
+from app.observability.logging_setup import close_logging, get_logger, setup_logging
 from app.output.console import render_console
-from app.output.report import build_undated_warning_lines
 from app.paths import PlanerPaths, build_paths, ensure_dirs, resolve_root
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
@@ -333,33 +326,18 @@ def _check_channel(channel: ChannelConfig, dependencies: _Dependencies) -> bool:
 
 def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies, log_path: Path) -> int:
     now_utc: datetime = datetime.now(timezone.utc)
-    # эфиры без времени старта площадка отбрасывает и пишет в лог (INFO); владельцу они нужны во «Внимание»
-    with LogExtraCollector(LOG_EXTRA_UNDATED_BROADCAST) as undated:
-        outcome: RunOutcome = run(
-            mode,
-            dependencies.config,
-            paths,
-            dependencies.platform,
-            build_form_sender(paths, now_utc),
-            now_utc,
-            random.Random(),
-        )
-    _add_undated_warnings(outcome, undated.values)
+    outcome: RunOutcome = run(
+        mode,
+        dependencies.config,
+        paths,
+        dependencies.platform,
+        build_form_sender(paths, now_utc),
+        now_utc,
+        random.Random(),
+    )
     channel_order: tuple[str, ...] = tuple(channel.account_name for channel in dependencies.config.channels)
     _print_outcome(outcome, paths, log_path, channel_order)
     return outcome.exit_code
-
-
-def _add_undated_warnings(outcome: RunOutcome, values: list[object]) -> None:
-    """Предупреждение уровня запуска: тем же путём, что прочие run_warnings (отчёт уже записан runner-ом)."""
-    if outcome.report is None:
-        return
-    entries: list[tuple[str, str]] = []
-    for value in values:
-        if isinstance(value, tuple) and len(value) == 2 and all(isinstance(part, str) for part in value):
-            if value not in entries:      # канал за запуск может читаться не один раз
-                entries.append(value)
-    outcome.report.warnings.extend(build_undated_warning_lines(entries))
 
 
 def _print_outcome(outcome: RunOutcome, paths: PlanerPaths, log_path: Path, channel_order: tuple[str, ...]) -> None:

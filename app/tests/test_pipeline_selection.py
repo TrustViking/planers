@@ -72,6 +72,21 @@ def test_two_channels_for_one_language_give_two_objects(now: datetime, make_conf
     assert [item.channel.account_name for item in selection.planned] == ["yt_a", "yt_b"]
 
 
+def test_channel_with_two_languages_gives_an_object_per_slot_of_one_minute(
+    now: datetime, make_config: ConfigFactory,
+) -> None:
+    """Канал обслуживает несколько языков: два слота одной минуты — два объекта на этом канале."""
+    uk: Slot = _slot(now, minutes=180, language="uk")
+    ru: Slot = _slot(now, minutes=180, language="ru")
+    config: PlanerConfig = make_config([("Maria Kamenskay", ["uk", "ru"])])
+    selection: Selection = _select(_slot_map(uk, ru), config, now)
+    assert [(item.slot.slot_id, item.channel.account_name) for item in selection.planned] == [
+        (ru.slot_id, "Maria Kamenskay"),
+        (uk.slot_id, "Maria Kamenskay"),
+    ]
+    assert uk.start == ru.start and selection.skipped == ()
+
+
 def test_objects_are_ordered_by_start_language_and_channel(now: datetime, make_config: ConfigFactory) -> None:
     later_en: Slot = _slot(now, minutes=300, language="en")
     early_uk: Slot = _slot(now, minutes=120, language="uk")

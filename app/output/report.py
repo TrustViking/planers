@@ -35,7 +35,14 @@ from app.pipeline.plan import (
 )
 from app.pipeline.reconciler import MarkedBroadcast
 from app.pipeline.selection import Selection, SkippedSlot, SkipReason
-from app.platforms.base import BroadcastFacts, PlatformError, PlatformLimits, broadcast_url_for
+from app.platforms.base import (
+    BroadcastFacts,
+    PlatformError,
+    PlatformLimits,
+    PlatformNotice,
+    PlatformNoticeKind,
+    broadcast_url_for,
+)
 from app.ui import messages_ru as msg
 from app.version import APP_VERSION
 
@@ -317,12 +324,20 @@ def planer_error_outcome(name: str, code: str, detail: str) -> PairOutcome:
     )
 
 
-def build_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequence[str] = ()) -> list[str]:
-    """Два списка одним результатом: предупреждения запуска, затем постоянные особенности площадки.
+def build_warning_lines(
+    planned: Sequence[PlannedBroadcast],
+    diagnostics: Sequence[str] = (),
+    notices: Sequence[PlatformNotice] = (),
+) -> list[str]:
+    """Два списка одним результатом: предупреждения запуска (с замечаниями площадки), затем её особенности.
 
     Разделяют их RunReport.run_warnings и RunReport.notes по PLATFORM_NOTE_LINES.
     """
-    return build_run_warning_lines(planned, diagnostics) + build_platform_note_lines(planned)
+    return (
+        build_run_warning_lines(planned, diagnostics)
+        + build_undated_warning_lines(notices)
+        + build_platform_note_lines(planned)
+    )
 
 
 def build_run_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequence[str] = ()) -> list[str]:
@@ -332,8 +347,12 @@ def build_run_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Se
     return lines
 
 
-def build_undated_warning_lines(entries: Sequence[tuple[str, str]]) -> list[str]:
-    """Эфиры без времени старта: площадка их отбрасывает, планер их не видит — (имя канала, название)."""
+def build_undated_warning_lines(notices: Sequence[PlatformNotice]) -> list[str]:
+    """Эфиры без времени старта: площадка их отбрасывает, планер их не видит. Повтор (канал, название) — одна строка."""
+    entries: dict[tuple[str, str], None] = {}
+    for notice in notices:
+        if notice.kind is PlatformNoticeKind.UNDATED_BROADCAST:
+            entries.setdefault((notice.account_name, notice.title), None)   # канал за запуск читается не раз
     return [msg.WARNING_UNDATED_BROADCAST.format(account_name=name, title=title) for name, title in entries]
 
 

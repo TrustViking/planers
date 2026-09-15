@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import TYPE_CHECKING, Final, Protocol
 
 from app.config.loader import ChannelConfig, Platform
@@ -56,6 +57,19 @@ class UpcomingBroadcast:
     auto_start: bool | None = None          # contentDetails.enableAutoStart
     auto_stop: bool | None = None           # contentDetails.enableAutoStop
     latency_preference: str | None = None   # contentDetails.latencyPreference
+
+
+class PlatformNoticeKind(str, Enum):
+    UNDATED_BROADCAST = "undated_broadcast"   # эфир без времени старта: площадка его отбрасывает
+
+
+@dataclass(frozen=True)
+class PlatformNotice:
+    """Замечание площадки за запуск: не сбой и не эфир планера, но владелец должен о нём узнать."""
+
+    kind: PlatformNoticeKind
+    account_name: str
+    title: str
 
 
 @dataclass(frozen=True)
@@ -199,6 +213,10 @@ class BroadcastPlatform(Protocol):
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         """Что лежит на платформе: для разбора расхождений (§5.6)."""
+        ...
+
+    def take_notices(self) -> tuple[PlatformNotice, ...]:
+        """Замечания, накопленные за запуск (эфир без времени старта); отдаёт и очищает накопитель."""
         ...
 
 

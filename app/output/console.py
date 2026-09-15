@@ -3,7 +3,8 @@
 У каждой поверхности свой читатель: консоль — блоки без markdown, отчёт в logs\\ — подробности,
 лог — диагностика для разработки. Порядок блоков: ВНИМАНИЕ, ОПУБЛИКОВАЛИ, ИСПРАВИЛИ, КЛЮЧИ СТРИМЕРУ,
 УЖЕ СТОЯЛО, НЕ ПУБЛИКОВАЛИ; пустой блок не печатается, нули видны в строке «Итог» (build_totals).
-Эфиры группируются по каналу в порядке channels.json; ключ в консоли — только маской, полный — в keys.txt.
+Эфиры группируются по каналу в порядке channels.json; ключ в консоли — только маской, полный — в keys.txt
+(путь к нему — один раз, в подвале). В ИСПРАВИЛИ — только тексты эфира; настройки с «было/стало» — во ВНИМАНИЕ.
 """
 from __future__ import annotations
 
@@ -27,7 +28,6 @@ from app.output.report import (
     SkipKind,
     SkippedLine,
     build_totals,
-    changed_fields_text,
     display_path,
     error_texts,
     form_reason_text,
@@ -144,10 +144,7 @@ def _keys_block(report: RunReport, channel_order: Sequence[str]) -> tuple[str, l
     outcomes: list[PairOutcome] = [
         outcome for outcome in report.outcomes if outcome.form is not None and outcome.date is not None
     ]
-    body: list[str] = _channel_lines(outcomes, channel_order, _key_line)
-    if body and report.keys_file_path:
-        body.append(msg.CONSOLE_KEYS_FILE_NOTE.format(path=report.keys_file_path))
-    return _rule(msg.CONSOLE_BLOCK_KEYS, len(outcomes)), body
+    return _rule(msg.CONSOLE_BLOCK_KEYS, len(outcomes)), _channel_lines(outcomes, channel_order, _key_line)
 
 
 def _channel_lines(outcomes: list[PairOutcome], channel_order: Sequence[str], render: LineRender) -> list[str]:
@@ -185,22 +182,24 @@ def _broadcast_line(outcome: PairOutcome) -> str:
 
 
 def _fixed_line(outcome: PairOutcome) -> str:
-    return msg.CONSOLE_FIXED_LINE.format(
-        date=outcome.date,
-        time=outcome.time,
-        language=outcome.language,
-        title=outcome.title or MISSING_VALUE,
-        what=changed_fields_text(outcome),
-    )
+    return _content_fix_line(outcome, msg.CONSOLE_FIXED_LINE)
 
 
 def _fix_planned_line(outcome: PairOutcome) -> str:
-    return msg.CONSOLE_FIX_PLANNED_LINE.format(
+    return _content_fix_line(outcome, msg.CONSOLE_FIX_PLANNED_LINE)
+
+
+def _content_fix_line(outcome: PairOutcome, template: str) -> str:
+    """Хвост «обновлено» — только тексты эфира; настройки названы во ВНИМАНИЕ. Нет текстов — строка без хвоста."""
+    content: list[str] = [name for name in outcome.changed_fields if name in _CONTENT_FIELDS]
+    if not content:
+        return _broadcast_line(outcome)
+    return template.format(
         date=outcome.date,
         time=outcome.time,
         language=outcome.language,
         title=outcome.title or MISSING_VALUE,
-        what=changed_fields_text(outcome),
+        what=msg.CHANGED_FIELDS_JOINER.join(msg.CHANGED_FIELD_TEXT[name] for name in content),
     )
 
 

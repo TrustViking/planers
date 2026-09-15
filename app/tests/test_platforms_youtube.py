@@ -12,7 +12,6 @@ from dataclasses import replace
 
 from app.config.loader import ChannelConfig, Platform, Privacy
 from app.google import api_retry
-from app.observability.logging_setup import LOG_EXTRA_UNDATED_BROADCAST
 from app.platforms import youtube as youtube_module
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
@@ -20,6 +19,8 @@ from app.platforms.base import (
     ChannelInfo,
     CreatedBroadcast,
     PlatformError,
+    PlatformNotice,
+    PlatformNoticeKind,
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
@@ -249,10 +250,25 @@ def test_broadcast_without_start_is_skipped(
     _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
     with caplog.at_level("DEBUG"):
         assert platform.list_upcoming(CHANNEL) == []
-    # в лог — INFO (не вылезает в терминал выше сводки); владельцу — через extra, строкой «Внимание»
+    # в лог — INFO, только диагностика: данных для владельца в записи лога больше нет
     [record] = [record for record in caplog.records if "broadcast_without_start" in record.getMessage()]
     assert record.levelname == "INFO" and "Эфир B1" in record.getMessage()
-    assert getattr(record, LOG_EXTRA_UNDATED_BROADCAST) == ("Канал UA", "Эфир B1")
+
+
+def test_undated_broadcast_becomes_one_notice_taken_once(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Боевой разбор liveBroadcasts.list: эфир без scheduledStartTime выпадает из списка и даёт одно замечание."""
+    undated: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    undated["snippet"].pop("scheduledStartTime")
+    dated: dict[str, Any] = _broadcast_item("B2", "2027-03-17T17:00:00Z")
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [undated, dated]}]))
+    assert [broadcast.broadcast_id for broadcast in platform.list_upcoming(CHANNEL)] == ["B2"]
+    assert platform.take_notices() == (
+        PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, account_name="Канал UA", title="Эфир B1"),
+    )
+    assert platform.take_notices() == ()                 # накопитель очищен
 
 
 def test_list_upcoming_reads_privacy_and_content_details(

@@ -22,7 +22,7 @@ from app.config.loader import ChannelConfig
 from app.google.api_retry import GoogleApiRetryPolicy, execute_with_retry
 from app.google.auth import AuthError, load_credentials, token_file_for
 from app.core.dates import format_datetime_text
-from app.observability.logging_setup import LOG_EXTRA_UNDATED_BROADCAST, get_logger, mask_stream_key
+from app.observability.logging_setup import get_logger, mask_stream_key
 from app.pipeline.plan import BroadcastSpec
 from app.pipeline.reconciler import MarkerParts, split_marker
 from app.platforms.base import (
@@ -31,6 +31,8 @@ from app.platforms.base import (
     CreatedBroadcast,
     PlatformError,
     PlatformLimits,
+    PlatformNotice,
+    PlatformNoticeKind,
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
@@ -118,6 +120,7 @@ class YouTubePlatform:
         self._on_login: Callable[[ChannelConfig], None] | None = on_login
         self._services: dict[str, Any] = {}
         self._channels: dict[str, ChannelInfo] = {}
+        self._notices: list[PlatformNotice] = []   # замечания за запуск; забирает take_notices
 
     @property
     def limits(self) -> PlatformLimits:
@@ -180,12 +183,20 @@ class YouTubePlatform:
                     pageToken=token,
                 ),
             )
-            broadcasts.extend(_broadcasts_from_page(_items(response), channel.account_name))
+            page_broadcasts, page_notices = _broadcasts_from_page(_items(response), channel.account_name)
+            broadcasts.extend(page_broadcasts)
+            self._notices.extend(page_notices)
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
         LOGGER.info('broadcasts_listed channel="%s" count=%d', channel.account_name, len(broadcasts))
         return broadcasts
+
+    def take_notices(self) -> tuple[PlatformNotice, ...]:
+        """Отдать накопленные замечания и очистить накопитель."""
+        taken: tuple[PlatformNotice, ...] = tuple(self._notices)
+        self._notices.clear()
+        return taken
 
     def get_stream(self, channel: ChannelConfig, stream_id: str) -> StreamInfo | None:
         response: dict[str, Any] = self._execute(
@@ -373,7 +384,10 @@ class YouTubePlatform:
             lambda service: service.liveBroadcasts().list(part=BROADCAST_PARTS, id=broadcast_id),
         )
         items: list[dict[str, Any]] = _items(response)
-        return _broadcast_from_item(items[0], channel.account_name) if items else None
+        if not items:
+            return None
+        parsed: UpcomingBroadcast | PlatformNotice = _broadcast_from_item(items[0], channel.account_name)
+        return parsed if isinstance(parsed, UpcomingBroadcast) else None
 
     def _video_item(self, channel: ChannelConfig, broadcast_id: str, part: str) -> dict[str, Any]:
         """videos.list по id эфира: read-modify-write без чтения невозможен."""
@@ -626,32 +640,42 @@ def _channel_language(item: dict[str, Any], snippet: dict[str, Any]) -> str | No
     return None
 
 
-def _broadcasts_from_page(items: list[dict[str, Any]], account_name: str) -> list[UpcomingBroadcast]:
+def _broadcasts_from_page(
+    items: list[dict[str, Any]],
+    account_name: str,
+) -> tuple[list[UpcomingBroadcast], list[PlatformNotice]]:
+    """Эфиры страницы и замечания о тех, что сверять не с чем."""
     broadcasts: list[UpcomingBroadcast] = []
+    notices: list[PlatformNotice] = []
     for item in items:
-        broadcast: UpcomingBroadcast | None = _broadcast_from_item(item, account_name)
-        if broadcast is not None:
-            broadcasts.append(broadcast)
-    return broadcasts
+        parsed: UpcomingBroadcast | PlatformNotice = _broadcast_from_item(item, account_name)
+        if isinstance(parsed, UpcomingBroadcast):
+            broadcasts.append(parsed)
+        else:
+            notices.append(parsed)
+    return broadcasts, notices
 
 
-def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBroadcast | None:
-    """Эфир без разбираемого времени старта пропускается: сверять его не с чем."""
+def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBroadcast | PlatformNotice:
+    """Эфир без разбираемого времени старта сверять не с чем: вместо эфира — замечание для владельца."""
     snippet: dict[str, Any] = _mapping(item, "snippet")
     broadcast_id: str = _text(item, "id")
     start_text: Any = snippet.get("scheduledStartTime")
     start_utc: datetime | None = _parse_start(start_text)
     if start_utc is None:
-        # такой эфир планер не видит вовсе: в лог — INFO, владельцу — строкой «Внимание» (extra собирает main)
+        # лог — только диагностика; владельцу факт уходит данными (PlatformNotice → take_notices)
         LOGGER.info(
             'broadcast_without_start channel="%s" broadcast_id=%s title=%r value=%r',
             account_name,
             broadcast_id,
             snippet.get("title"),
             start_text,
-            extra={LOG_EXTRA_UNDATED_BROADCAST: (account_name, str(snippet.get("title") or ""))},
         )
-        return None
+        return PlatformNotice(
+            kind=PlatformNoticeKind.UNDATED_BROADCAST,
+            account_name=account_name,
+            title=str(snippet.get("title") or ""),
+        )
     category_id: Any = snippet.get("categoryId")
     status: dict[str, Any] = _mapping(item, "status")
     details: dict[str, Any] = _mapping(item, "contentDetails")

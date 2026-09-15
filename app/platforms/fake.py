@@ -19,6 +19,8 @@ from app.platforms.base import (
     CreatedBroadcast,
     PlatformError,
     PlatformLimits,
+    PlatformNotice,
+    PlatformNoticeKind,
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
@@ -79,6 +81,7 @@ class FakePlatform:
         self.thumbnails: list[FakeCall] = []
         self.attached: list[FakeCall] = []
         self.markers_set: list[FakeCall] = []                 # set_stream_marker: (канал, поток, метка)
+        self._notices: list[PlatformNotice] = []             # замечания площадки: seed_undated_broadcast
         self.fail_marker: dict[str, PlatformError] = {}      # stream_id → ошибка set_stream_marker
         self.languages: dict[str, str] = {}                # broadcast_id → записанный язык
         self.channel_info: dict[str, ChannelInfo] = {}     # account_name → ответ describe_channel
@@ -130,6 +133,17 @@ class FakePlatform:
         self._broadcasts.setdefault(channel_id, {})[broadcast.broadcast_id] = broadcast
         self.categories[broadcast.broadcast_id] = category_id
         return broadcast
+
+    def seed_undated_broadcast(self, account_name: str, title: str) -> PlatformNotice:
+        """Эфир без времени старта на канале: площадка его не отдаёт, а замечание копит до take_notices."""
+        notice: PlatformNotice = PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, account_name, title)
+        self._notices.append(notice)
+        return notice
+
+    def take_notices(self) -> tuple[PlatformNotice, ...]:
+        taken: tuple[PlatformNotice, ...] = tuple(self._notices)
+        self._notices.clear()
+        return taken
 
     def remove_broadcast(self, channel_id: str, broadcast_id: str) -> None:
         """Владелец удалил эфир руками."""
