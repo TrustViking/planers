@@ -17,6 +17,7 @@ import pytest
 from app.config.loader import ChannelConfig, Platform, PlanerConfig, PlanerSettings, Privacy
 from app.core.dates import build_slot_id, format_date, format_time, parse_date, parse_time
 from app.form.base import FormSendResult
+from app.output.progress import BroadcastStep
 from app.package.model import FormSpec, Package, Slot
 from app.pipeline.plan import BroadcastSpec, PlannedBroadcast
 from app.platforms.base import PlatformLimits
@@ -193,6 +194,38 @@ class FakeFormSender:
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         self.calls.append(FormCall(planned.slot_id, planned.account_name, planned.stream_key, planned.form.url))
         return FormSendResult(confirmed=self.confirmed, error=self.error)
+
+
+class RecordingProgress:
+    """RunProgress для тестов: пишет вызовы по порядку; при платформе — сколько list_upcoming уже было."""
+
+    def __init__(self, platform: FakePlatform | None = None) -> None:
+        self._platform: FakePlatform | None = platform
+        self.calls: list[tuple[object, ...]] = []
+
+    def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None:
+        self.calls.append(("packages_read", packages, slots_total, slots_mine))
+
+    def channel_read_started(self, account_name: str) -> None:
+        self.calls.append(("channel_read_started", account_name, *self._list_count()))
+
+    def channel_read_done(self, account_name: str, upcoming: int) -> None:
+        self.calls.append(("channel_read_done", account_name, upcoming, *self._list_count()))
+
+    def broadcast_step_started(self, item: PlannedBroadcast, step: BroadcastStep) -> None:
+        self.calls.append(("broadcast_step_started", item.slot_id, item.account_name, step))
+
+    def key_send_started(self, item: PlannedBroadcast) -> None:
+        self.calls.append(("key_send_started", item.slot_id, item.account_name))
+
+    def report_started(self) -> None:
+        self.calls.append(("report_started",))
+
+    def names(self) -> list[object]:
+        return [call[0] for call in self.calls]
+
+    def _list_count(self) -> tuple[int, ...]:
+        return () if self._platform is None else (len(self._platform.list_calls),)
 
 
 @pytest.fixture

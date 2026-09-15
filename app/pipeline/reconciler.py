@@ -19,6 +19,7 @@ from typing import Final
 from app.config.loader import ChannelConfig
 from app.core.dates import SLOT_TIME_FORMAT, build_slot_id, format_date, format_time, parse_date
 from app.observability.logging_setup import get_logger, mask_stream_key
+from app.output.progress import NoProgress, RunProgress
 from app.pipeline.plan import (
     WARNING_STEP_AMBIGUOUS,
     WARNING_STEP_REPORTED_FIELD,
@@ -119,10 +120,14 @@ def _group_by_channel(
 
 
 class Reconciler:
-    """list_upcoming — ровно раз на канал; get_stream кешируется по (channel.account_name, stream_id)."""
+    """list_upcoming — ровно раз на канал; get_stream кешируется по (channel.account_name, stream_id).
 
-    def __init__(self, platform: BroadcastPlatform) -> None:
+    Чтение каждого канала видно владельцу строками прогресса: до list_upcoming и после успешного ответа.
+    """
+
+    def __init__(self, platform: BroadcastPlatform, *, progress: RunProgress = NoProgress()) -> None:
         self._platform: BroadcastPlatform = platform
+        self._progress: RunProgress = progress
         self._streams: dict[tuple[str, str], StreamInfo | None] = {}
 
     def reconcile(
@@ -143,12 +148,19 @@ class Reconciler:
         failures: list[ChannelFailure] = []
         for channel in channels:
             try:
-                broadcasts.extend(self._marked_in_channel(channel, self._platform.list_upcoming(channel)))
+                broadcasts.extend(self._marked_in_channel(channel, self._list_upcoming(channel)))
             except PlatformError as error:
                 LOGGER.warning('channel_unavailable channel="%s" code=%s', channel.account_name, error.code)
                 failures.append(ChannelFailure(channel=channel, error=error))
         broadcasts.sort(key=lambda item: (item.broadcast.start_utc, item.parts.language, item.channel.account_name))
         return MarkedScan(broadcasts=tuple(broadcasts), failures=tuple(failures))
+
+    def _list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
+        """Вход и привязка — внутри первого обращения, поэтому строка «запрашиваю» печатается до него."""
+        self._progress.channel_read_started(channel.account_name)
+        broadcasts: list[UpcomingBroadcast] = self._platform.list_upcoming(channel)
+        self._progress.channel_read_done(channel.account_name, len(broadcasts))
+        return broadcasts
 
     def _reconcile_channel(
         self,
@@ -157,7 +169,7 @@ class Reconciler:
         slot_ids: frozenset[str],
     ) -> list[OrphanBroadcast]:
         try:
-            broadcasts: list[UpcomingBroadcast] = self._platform.list_upcoming(channel)
+            broadcasts: list[UpcomingBroadcast] = self._list_upcoming(channel)
         except PlatformError as error:
             LOGGER.warning('channel_unavailable channel="%s" code=%s planned=%d', channel.account_name, error.code, len(items))
             for item in items:

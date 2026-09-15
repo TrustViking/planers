@@ -1,0 +1,90 @@
+"""Прогресс запуска в консоли: строка на каждый долгий шаг между шапкой и «Итогом».
+
+Шапку печатает main.py сразу после настройки логов; итоговые блоки — console.py. Здесь — только
+живые строки по ходу работы: пакеты, чтение каналов, создание и исправление эфиров, отправка ключей, отчёт.
+Прогресс передаётся параметром: NoProgress — умолчание (тесты, вызовы без консоли), ConsoleProgress — main.
+"""
+from __future__ import annotations
+
+from enum import Enum
+from typing import Final, Protocol
+
+from app.pipeline.plan import PlannedBroadcast
+from app.ui import messages_ru as msg
+
+
+class BroadcastStep(str, Enum):
+    CREATE = "create"
+    FIX = "fix"
+
+
+_STEP_TEXTS: Final[dict[BroadcastStep, str]] = {
+    BroadcastStep.CREATE: msg.PROGRESS_BROADCAST_CREATE,
+    BroadcastStep.FIX: msg.PROGRESS_BROADCAST_FIX,
+}
+
+
+class RunProgress(Protocol):
+    def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None: ...
+
+    def channel_read_started(self, account_name: str) -> None: ...
+
+    def channel_read_done(self, account_name: str, upcoming: int) -> None: ...
+
+    def broadcast_step_started(self, item: PlannedBroadcast, step: BroadcastStep) -> None: ...
+
+    def key_send_started(self, item: PlannedBroadcast) -> None: ...
+
+    def report_started(self) -> None: ...
+
+
+class NoProgress:
+    """Ничего не печатает."""
+
+    def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None:
+        return None
+
+    def channel_read_started(self, account_name: str) -> None:
+        return None
+
+    def channel_read_done(self, account_name: str, upcoming: int) -> None:
+        return None
+
+    def broadcast_step_started(self, item: PlannedBroadcast, step: BroadcastStep) -> None:
+        return None
+
+    def key_send_started(self, item: PlannedBroadcast) -> None:
+        return None
+
+    def report_started(self) -> None:
+        return None
+
+
+class ConsoleProgress:
+    """Строка сразу в консоль: flush обязателен — в собранном exe вывод иначе копится до конца запуска."""
+
+    def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None:
+        self._say(msg.PROGRESS_PACKAGES_READ.format(packages=packages, slots_total=slots_total, slots_mine=slots_mine))
+
+    def channel_read_started(self, account_name: str) -> None:
+        self._say(msg.PROGRESS_CHANNEL_READ_STARTED.format(account_name=account_name))
+
+    def channel_read_done(self, account_name: str, upcoming: int) -> None:
+        self._say(msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=account_name, count=upcoming))
+
+    def broadcast_step_started(self, item: PlannedBroadcast, step: BroadcastStep) -> None:
+        self._say(_STEP_TEXTS[step].format(**_broadcast_fields(item)))
+
+    def key_send_started(self, item: PlannedBroadcast) -> None:
+        self._say(msg.PROGRESS_KEY_SEND.format(**_broadcast_fields(item)))
+
+    def report_started(self) -> None:
+        self._say(msg.PROGRESS_REPORT)
+
+    @staticmethod
+    def _say(text: str) -> None:
+        print(msg.PROGRESS_LINE.format(text=text), flush=True)
+
+
+def _broadcast_fields(item: PlannedBroadcast) -> dict[str, str]:
+    return {"account_name": item.account_name, "date": item.date, "time": item.time, "language": item.language}

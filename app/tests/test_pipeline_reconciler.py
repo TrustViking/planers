@@ -17,7 +17,7 @@ from app.pipeline.plan import (
 from app.pipeline.reconciler import MarkerParts, OrphanBroadcast, Reconciler, split_marker
 from app.platforms.base import PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
-from app.tests.conftest import build_planned
+from app.tests.conftest import RecordingProgress, build_planned
 
 ConfigFactory = Callable[..., PlanerConfig]
 SlotFactory = Callable[..., Slot]
@@ -413,3 +413,41 @@ def test_split_marker_rejects_non_markers() -> None:
     assert split_marker("Мой поток") is None
     assert split_marker("99-99-2027_1900_uk") is None
     assert split_marker("17-03-2027_1900_uk") == MarkerParts(date="17-03-2027", time="19:00", language="uk")
+
+
+def test_progress_brackets_each_channel_read(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """«Запрашиваю» — до list_upcoming (вход в канал — внутри него), «эфиров N» — после ответа."""
+    uk: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    ru: Slot = make_slot_object(now + timedelta(days=1), "ru")
+    _seed_like(fake_platform, "yt_ru", ru)
+    config: PlanerConfig = make_config()
+    progress: RecordingProgress = RecordingProgress(fake_platform)
+    objects: list[PlannedBroadcast] = _objects(config, uk, ru)
+    Reconciler(fake_platform, progress=progress).reconcile(objects, frozenset({uk.slot_id, ru.slot_id}), config.channels)
+    assert progress.calls == [
+        ("channel_read_started", "yt_ua", 0),
+        ("channel_read_done", "yt_ua", 0, 1),
+        ("channel_read_started", "yt_ru", 1),
+        ("channel_read_done", "yt_ru", 1, 2),
+    ]
+
+
+def test_failed_channel_read_has_start_but_no_done(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+) -> None:
+    """Сбой канала владелец увидит во «Внимание»; строки «эфиров N» по нему нет."""
+    config: PlanerConfig = make_config()
+    fake_platform.fail_list["yt_ua"] = PlatformError("quotaExceeded", "квота исчерпана")
+    progress: RecordingProgress = RecordingProgress()
+    Reconciler(fake_platform, progress=progress).marked_broadcasts(config.channels)
+    assert progress.calls == [
+        ("channel_read_started", "yt_ua"),
+        ("channel_read_started", "yt_ru"),
+        ("channel_read_done", "yt_ru", 0),
+    ]

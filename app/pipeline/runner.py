@@ -27,15 +27,19 @@ from app.output.keys_file import (
     render_keys_file,
     write_keys_file,
 )
+from app.output.progress import BroadcastStep, NoProgress, RunProgress
 from app.output.report import (
     ERROR_OUTCOME_KINDS,
     OrphanLine,
     PairOutcome,
+    ReportPackageLine,
     RunMode,
     RunReport,
+    RunTotals,
     build_package_lines,
     build_skipped_lines,
     build_mismatch_lines,
+    build_totals,
     build_warning_lines,
     display_path,
     outcome_from_marked,
@@ -133,6 +137,7 @@ class _RunContext:
     rng: random.Random
     notice: str | None
     form_diagnostics: list[str]   # пути сохранённых ответов формы (§7.5)
+    progress: RunProgress
 
     @property
     def now_local(self) -> datetime:
@@ -162,8 +167,9 @@ def run(
     rng: random.Random,
     *,
     notice: str | None = None,
+    progress: RunProgress = NoProgress(),
 ) -> RunOutcome:
-    context: _RunContext = _RunContext(mode, config, paths, platform, form_sender, now_utc, rng, notice, [])
+    context: _RunContext = _RunContext(mode, config, paths, platform, form_sender, now_utc, rng, notice, [], progress)
     if mode is RunMode.STATUS:
         return _run_status(context)
     return _run_bcast(context)
@@ -180,8 +186,10 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         context.platform.limits,
         context.now_utc,
     )
+    packages: list[ReportPackageLine] = build_package_lines(scan, context.config)
+    _progress_packages(context, packages)
     # к площадке обращаемся только по каналам, у которых есть объекты: вход и привязка — при первом обращении
-    orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform).reconcile(
+    orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
         selection.planned,
         frozenset(scan.slot_map),
     )
@@ -200,7 +208,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     report: RunReport = RunReport(
         mode=context.mode,
         generated_at_text=context.generated_at_text,
-        packages=build_package_lines(scan, context.config),
+        packages=packages,
         outcomes=outcomes,
         orphans=[_orphan_line(orphan) for orphan in orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
@@ -213,6 +221,14 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     form_pending: bool = context.is_full and any(item.is_key_undelivered for item in selection.planned)
     has_errors: bool = _has_error_outcomes(report.outcomes) or bool(scan.problems) or form_pending
     return _complete(context, report, has_errors=has_errors)
+
+
+def _progress_packages(context: _RunContext, packages: list[ReportPackageLine]) -> None:
+    """Числа — тем же подсчётом, что «Итог» и раздел «Пакеты» отчёта (build_totals), второго счёта нет."""
+    totals: RunTotals = build_totals(
+        RunReport(mode=context.mode, generated_at_text=context.generated_at_text, packages=packages)
+    )
+    context.progress.packages_read(totals.packages, totals.slots_total, totals.slots_mine)
 
 
 def _execute_full(
@@ -234,7 +250,9 @@ def _execute_full(
 
 def _run_status(context: _RunContext) -> RunOutcome:
     """Без пакетов: эфиры с маркером планера на каналах → keys.txt и отчёт."""
-    marked: MarkedScan = Reconciler(context.platform).marked_broadcasts(context.config.channels)
+    marked: MarkedScan = Reconciler(context.platform, progress=context.progress).marked_broadcasts(
+        context.config.channels
+    )
     notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
     rows: list[KeyRow] = [key_row_from_marked(item) for item in marked.broadcasts]
     outcomes: list[PairOutcome] = [outcome_from_marked(item) for item in marked.broadcasts]
@@ -253,6 +271,7 @@ def _run_status(context: _RunContext) -> RunOutcome:
 
 
 def _complete(context: _RunContext, report: RunReport, *, has_errors: bool) -> RunOutcome:
+    context.progress.report_started()
     text: str = render_report(report)
     if context.mode is not RunMode.DRY_RUN:
         # Сначала чистка, потом отчёт: свой же отчёт под неё не попадает (§5.7).
@@ -304,6 +323,7 @@ def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> li
     for item in planned:
         if not item.is_key_undelivered:
             continue
+        context.progress.key_send_started(item)
         result: FormSendResult = context.form_sender.send(item)
         if result.confirmed:
             item.is_form_sent = True
@@ -453,6 +473,7 @@ class _Executor:
         # MATCH: ключ и ссылку сверка уже взяла с площадки, действий нет; ключ в форму не идёт
 
     def _create(self, item: PlannedBroadcast) -> None:
+        self._context.progress.broadcast_step_started(item, BroadcastStep.CREATE)
         created: CreatedBroadcast = self._platform.create_broadcast(item.channel, item.expected)
         item.take_new_key(created)
         LOGGER.info(
@@ -489,6 +510,7 @@ class _Executor:
 
     def _fix(self, item: PlannedBroadcast) -> None:
         """Привести найденный эфир к пакету: каждое поле — своим вызовом; видимость — в _finish."""
+        self._context.progress.broadcast_step_started(item, BroadcastStep.FIX)
         broadcast_id: str = item.found.broadcast_id if item.found else ""
         if BROADCAST_UPDATE_FIELDS.intersection(item.changed_fields):
             self._platform.update_broadcast(item.channel, broadcast_id, item.expected)

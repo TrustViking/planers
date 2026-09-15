@@ -29,7 +29,6 @@ from app.platforms.base import PlatformError
 from app.platforms.fake import FakePlatform
 from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
-from app.version import APP_VERSION
 
 ROOT: Path = Path("D:/planer")
 OSVALD: dict[str, str] = {"account_name": "Osvald.X", "google_account": "trustviorel@gmail.com"}
@@ -43,8 +42,7 @@ RESTORED_WARNING: str = (
 )
 
 # Макет задачи 5e: блоки сверху вниз, пустой блок не печатается, каналы — в порядке channels.json.
-SAMPLE_CONSOLE: str = f"""Планер {APP_VERSION} — 15-09-2026 19:56
-Итог: опубликовано 2, исправлено 1, уже стояло 1, не публиковали 2, ошибок 0
+SAMPLE_CONSOLE: str = f"""Итог: опубликовано 2, исправлено 1, уже стояло 1, не публиковали 2, ошибок 0
 
 ======================= ВНИМАНИЕ =======================
   ключ не дошёл до стримера: 18-03-2027 20:00 ru -> Osvald.X — форма недоступна (HTTP 503)
@@ -142,6 +140,14 @@ def test_full_run_matches_the_layout() -> None:
     assert _render(_sample_report()).replace("/", "\\") == SAMPLE_CONSOLE
 
 
+def test_console_has_no_title_it_is_printed_by_main_at_start() -> None:
+    """Шапку печатает main при старте: в итоговом тексте её нет, иначе в прогоне было бы два заголовка."""
+    for mode in RunMode:
+        text: str = _render(_sample_report(mode=mode))
+        assert text.splitlines()[0].startswith("Итог: ")
+        assert "Планер " not in text
+
+
 def test_blocks_keep_their_order_and_rules_their_width() -> None:
     text: str = _render(_sample_report())
     assert _block_titles(text) == [
@@ -155,7 +161,7 @@ def test_empty_blocks_are_not_printed_at_all() -> None:
     """Нули видны в «Итоге»; пустого раздела нет."""
     text: str = _render(_sample_report(outcomes=[], skipped=[], warnings=[]))
     lines: list[str] = text.splitlines()
-    assert lines[1] == "Итог: опубликовано 0, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0"
+    assert lines[0] == "Итог: опубликовано 0, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0"
     assert _block_titles(text) == []
 
 
@@ -200,7 +206,7 @@ def test_settings_only_fix_has_no_tail_in_fixed_and_is_named_in_attention() -> N
     lines: list[str] = text.splitlines()
     fixed: list[str] = text.split("ИСПРАВИЛИ (1)")[1].split("\n\n")[0].splitlines()[1:]
     assert fixed == ["  Osvald.X (trustviorel@gmail.com)", "    18-03-2027  20:00  ru  Второй эфир"]
-    assert lines[1] == "Итог: опубликовано 0, исправлено 1, уже стояло 0, не публиковали 0, ошибок 0"
+    assert lines[0] == "Итог: опубликовано 0, исправлено 1, уже стояло 0, не публиковали 0, ошибок 0"
     assert "  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: было private, стало unlisted" in lines
     assert text.count("видимость") == 1
 
@@ -253,15 +259,14 @@ def test_dry_run_speaks_of_intent_and_has_no_keys_block() -> None:
     )
     text: str = _render(report)
     lines: list[str] = text.splitlines()
-    assert lines[0] == f"Планер {APP_VERSION} — 15-09-2026 19:56 — dry-run: ничего не создано и в форму не отправлено"
-    assert lines[1] == "Итог: опубликуем 1, исправим 1, уже стояло 0, не публиковали 2, ошибок 0"
+    assert lines[0] == "Итог: опубликуем 1, исправим 1, уже стояло 0, не публиковали 2, ошибок 0"
     assert _block_titles(text) == ["ВНИМАНИЕ", "ОПУБЛИКУЕМ (1)", "ИСПРАВИМ (1)", "НЕ ПУБЛИКОВАЛИ (2)"]
     assert "    18-03-2027  20:00  ru  Второй эфир — будет обновлено: описание" in lines
     assert "  вернём к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: сейчас private, будет unlisted" in lines
     assert msg.CONSOLE_BLOCK_KEYS not in text and msg.CONSOLE_LABEL_KEYS + " " not in text
 
 
-def test_status_prints_title_total_attention_and_matched_only() -> None:
+def test_status_prints_total_attention_and_matched_only() -> None:
     report: RunReport = RunReport(
         mode=RunMode.STATUS,
         generated_at_text="15-09-2026 19:56",
@@ -276,8 +281,7 @@ def test_status_prints_title_total_attention_and_matched_only() -> None:
     )
     text: str = _render(report)
     lines: list[str] = text.splitlines()
-    assert lines[0] == f"Планер {APP_VERSION} — 15-09-2026 19:56 — --status: эфиры планера на каналах"
-    assert lines[1] == "Итог: уже стояло 1, ошибок 1"
+    assert lines[0] == "Итог: уже стояло 1, ошибок 1"
     assert _block_titles(text) == ["ВНИМАНИЕ", "УЖЕ СТОЯЛО (1)"]
     assert "  ошибка: Test RU — YouTube: quotaExceeded (квота исчерпана)" in lines
     assert "    17-03-2027  19:00  ru  Эфир" in lines
@@ -337,7 +341,7 @@ def test_console_and_report_use_the_same_totals(
         f"Итог: создано {totals.created}, исправлено {totals.fixed}, совпадает {totals.matched}, "
         f"пропущено {totals.skipped}, ошибок {totals.errors}."
     ) in report_text
-    assert console.splitlines()[1] == msg.CONSOLE_TOTAL.format(
+    assert console.splitlines()[0] == msg.CONSOLE_TOTAL.format(
         created=totals.created, fixed=totals.fixed, matched=totals.matched, skipped=totals.skipped, errors=totals.errors
     )
     assert (totals.created, totals.skipped, totals.errors) == (1, 1, 1)

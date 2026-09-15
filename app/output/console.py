@@ -1,5 +1,8 @@
 """Консоль после запуска (ТЗ §5.6): перечень блоками сверху вниз — что требует внимания, что куда ушло.
 
+Шапку (версия, время, режим) печатает main.py при старте, строки по ходу работы — app/output/progress.py;
+итоговый текст отсюда начинается со строки «Итог».
+
 У каждой поверхности свой читатель: консоль — блоки без markdown, отчёт в logs\\ — подробности,
 лог — диагностика для разработки. Порядок блоков: ВНИМАНИЕ, ОПУБЛИКОВАЛИ, ИСПРАВИЛИ, КЛЮЧИ СТРИМЕРУ,
 УЖЕ СТОЯЛО, НЕ ПУБЛИКОВАЛИ; пустой блок не печатается, нули видны в строке «Итог» (build_totals).
@@ -36,13 +39,7 @@ from app.output.report import (
 )
 from app.pipeline.plan import ChangedField
 from app.ui import messages_ru as msg
-from app.version import APP_VERSION
 
-_TITLES: Final[dict[RunMode, str]] = {
-    RunMode.FULL: msg.CONSOLE_TITLE,
-    RunMode.DRY_RUN: msg.CONSOLE_TITLE_DRY_RUN,
-    RunMode.STATUS: msg.CONSOLE_TITLE_STATUS,
-}
 _TOTALS: Final[dict[RunMode, str]] = {
     RunMode.FULL: msg.CONSOLE_TOTAL,
     RunMode.DRY_RUN: msg.CONSOLE_TOTAL_DRY_RUN,
@@ -64,10 +61,9 @@ def render_console(
     log_path: Path | None = None,
     channel_order: Sequence[str] = (),
 ) -> str:
-    """Готовый текст для консоли; печатает main.py. channel_order — имена каналов в порядке channels.json."""
+    """Готовый текст для консоли от «Итога» до подвала; печатает main.py. channel_order — порядок channels.json."""
     totals: RunTotals = build_totals(report)
     lines: list[str] = [
-        _TITLES[report.mode].format(version=APP_VERSION, generated_at=report.generated_at_text),
         _TOTALS[report.mode].format(
             created=totals.created,
             fixed=totals.fixed,

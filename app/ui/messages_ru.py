@@ -332,6 +332,16 @@ CONSOLE_LABEL_KEYS: Final[str] = "ключи"
 CONSOLE_LABEL_REPORT: Final[str] = "отчёт"
 CONSOLE_LABEL_LOG: Final[str] = "лог"
 
+# --- прогресс запуска (app/output/progress.py): строка на каждый долгий шаг, между шапкой и «Итогом»
+PROGRESS_LINE: Final[str] = "  {text}"
+PROGRESS_PACKAGES_READ: Final[str] = "пакетов прочитано {packages}: слотов {slots_total}, из них под мои языки {slots_mine}"
+PROGRESS_CHANNEL_READ_STARTED: Final[str] = "канал «{account_name}»: запрашиваю запланированные эфиры"
+PROGRESS_CHANNEL_READ_DONE: Final[str] = "канал «{account_name}»: запланированных эфиров {count}"
+PROGRESS_BROADCAST_CREATE: Final[str] = "канал «{account_name}»: создаю эфир {date} {time} {language}"
+PROGRESS_BROADCAST_FIX: Final[str] = "канал «{account_name}»: исправляю эфир {date} {time} {language}"
+PROGRESS_KEY_SEND: Final[str] = "канал «{account_name}»: отправляю ключ в форму — эфир {date} {time} {language}"
+PROGRESS_REPORT: Final[str] = "пишу отчёт"
+
 # --- файл ключей (ТЗ §5.5): блок на стрим, ключ — первой строкой блока
 KEYS_FILE_HEADER: Final[tuple[str, ...]] = (
     "# Ключи трансляций. Сгенерировано планером {generated_at}.",

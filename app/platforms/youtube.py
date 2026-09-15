@@ -59,6 +59,8 @@ BIND_PARTS: Final[str] = "id,contentDetails"
 VIDEO_SETTINGS_PARTS: Final[str] = "snippet,status"   # один проход: язык, категория, аудитория
 VIDEO_FACTS_PARTS: Final[str] = "snippet,status,contentDetails,liveStreamingDetails"
 AGE_RESTRICTED_RATING: Final[str] = "ytAgeRestricted"
+# Постоянный эфир канала: заводит сама площадка, времени старта у него нет, удалить нельзя.
+DEFAULT_BROADCAST_FLAG: Final[str] = "isDefaultBroadcast"
 RFC3339_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
 INGESTION_TYPE: Final[str] = "rtmp"
 STREAM_RESOLUTION: Final[str] = "variable"
@@ -386,7 +388,7 @@ class YouTubePlatform:
         items: list[dict[str, Any]] = _items(response)
         if not items:
             return None
-        parsed: UpcomingBroadcast | PlatformNotice = _broadcast_from_item(items[0], channel.account_name)
+        parsed: UpcomingBroadcast | PlatformNotice | None = _broadcast_from_item(items[0], channel.account_name)
         return parsed if isinstance(parsed, UpcomingBroadcast) else None
 
     def _video_item(self, channel: ChannelConfig, broadcast_id: str, part: str) -> dict[str, Any]:
@@ -648,20 +650,31 @@ def _broadcasts_from_page(
     broadcasts: list[UpcomingBroadcast] = []
     notices: list[PlatformNotice] = []
     for item in items:
-        parsed: UpcomingBroadcast | PlatformNotice = _broadcast_from_item(item, account_name)
+        parsed: UpcomingBroadcast | PlatformNotice | None = _broadcast_from_item(item, account_name)
         if isinstance(parsed, UpcomingBroadcast):
             broadcasts.append(parsed)
-        else:
+        elif parsed is not None:
             notices.append(parsed)
     return broadcasts, notices
 
 
-def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBroadcast | PlatformNotice:
-    """Эфир без разбираемого времени старта сверять не с чем: вместо эфира — замечание для владельца."""
+def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBroadcast | PlatformNotice | None:
+    """Эфир без разбираемого времени старта сверять не с чем: вместо эфира — замечание для владельца.
+
+    Постоянный эфир канала (isDefaultBroadcast) владелец не удалит и не исправит: без замечания, None.
+    """
     snippet: dict[str, Any] = _mapping(item, "snippet")
     broadcast_id: str = _text(item, "id")
     start_text: Any = snippet.get("scheduledStartTime")
     start_utc: datetime | None = _parse_start(start_text)
+    if start_utc is None and _optional_bool(snippet, DEFAULT_BROADCAST_FLAG):
+        LOGGER.info(
+            'default_broadcast_skipped channel="%s" broadcast_id=%s title=%r',
+            account_name,
+            broadcast_id,
+            snippet.get("title"),
+        )
+        return None
     if start_utc is None:
         # лог — только диагностика; владельцу факт уходит данными (PlatformNotice → take_notices)
         LOGGER.info(

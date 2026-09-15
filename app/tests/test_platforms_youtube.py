@@ -271,6 +271,42 @@ def test_undated_broadcast_becomes_one_notice_taken_once(
     assert platform.take_notices() == ()                 # накопитель очищен
 
 
+def test_default_broadcast_without_start_gives_neither_broadcast_nor_notice(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Постоянный эфир канала заводит сама площадка: владельцу с ним делать нечего, остаётся строка лога."""
+    permanent: dict[str, Any] = _broadcast_item("B0", "2027-03-17T17:00:00Z")
+    permanent["snippet"].pop("scheduledStartTime")
+    permanent["snippet"]["isDefaultBroadcast"] = True
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [permanent]}]))
+    with caplog.at_level("DEBUG"):
+        assert platform.list_upcoming(CHANNEL) == []
+    assert platform.take_notices() == ()
+    messages: list[str] = [record.getMessage() for record in caplog.records]
+    [record] = [record for record in caplog.records if "default_broadcast_skipped" in record.getMessage()]
+    assert record.levelname == "INFO" and "broadcast_id=B0" in record.getMessage() and "Эфир B0" in record.getMessage()
+    assert not any("broadcast_without_start" in message for message in messages)
+
+
+def test_ordinary_undated_broadcast_next_to_default_still_gives_one_notice(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    permanent: dict[str, Any] = _broadcast_item("B0", "2027-03-17T17:00:00Z")
+    permanent["snippet"].pop("scheduledStartTime")
+    permanent["snippet"]["isDefaultBroadcast"] = True
+    undated: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    undated["snippet"].pop("scheduledStartTime")
+    undated["snippet"]["isDefaultBroadcast"] = False
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [permanent, undated]}]))
+    assert platform.list_upcoming(CHANNEL) == []
+    assert platform.take_notices() == (
+        PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, account_name="Канал UA", title="Эфир B1"),
+    )
+
+
 def test_list_upcoming_reads_privacy_and_content_details(
     platform: YouTubePlatform,
     monkeypatch: pytest.MonkeyPatch,

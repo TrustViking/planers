@@ -1,7 +1,8 @@
 """Точка входа планера: флаги (ТЗ §7.6), коды выхода (ТЗ §5.6).
 
 Только разбор флагов, построение зависимостей и печать; оркестрация — app/pipeline/runner.py.
-Вывод в консоль — только отсюда и только текстами из messages_ru.
+Вывод в консоль — только отсюда и только текстами из messages_ru: шапка сразу после настройки логов
+(до конфигов и сети), строки прогресса по ходу работы (ConsoleProgress), пустая строка, итоговые блоки.
 Порядок запуска: конфиги → пакеты из bcast\\ → объекты → каналы, у которых есть объекты:
 вход и проверка привязки — при первом обращении к каналу (app/platforms/verified.py).
 """
@@ -27,12 +28,14 @@ from app.config.loader import (
     PlanerConfig,
     load_planer_config,
 )
+from app.core.dates import format_datetime_text
 from app.form.base import FormSender
 from app.form.discovery import FormDiscovery
 from app.form.submitter import GoogleFormSender
 from app.google.auth import AuthError, load_credentials, token_file_for
 from app.observability.logging_setup import close_logging, get_logger, setup_logging
 from app.output.console import render_console
+from app.output.progress import ConsoleProgress
 from app.paths import PlanerPaths, build_paths, ensure_dirs, resolve_root
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
@@ -45,6 +48,12 @@ from app.version import APP_VERSION
 LOGGER = get_logger("main")
 
 LIST_JOINER: Final[str] = ", "
+# Шапка запуска: --check и --auth — обычная, как у полного цикла.
+TITLES: Final[dict[RunMode, str]] = {
+    RunMode.FULL: msg.CONSOLE_TITLE,
+    RunMode.DRY_RUN: msg.CONSOLE_TITLE_DRY_RUN,
+    RunMode.STATUS: msg.CONSOLE_TITLE_STATUS,
+}
 
 
 class ChannelConsole:
@@ -128,8 +137,10 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         args.status,
         log_path,
     )
+    now_utc: datetime = datetime.now(timezone.utc)
+    _say_title(args, now_utc)
     try:
-        exit_code: int = _run(args, paths, log_path)
+        exit_code: int = _run(args, paths, log_path, now_utc)
         LOGGER.info("run_finished exit_code=%d", exit_code)
         return exit_code
     finally:
@@ -144,7 +155,14 @@ def _configure_console() -> None:
 
 
 def _say(text: str) -> None:
-    print(text)
+    """flush — чтобы строка была видна сразу и в собранном exe, а не в конце запуска."""
+    print(text, flush=True)
+
+
+def _say_title(args: argparse.Namespace, now_utc: datetime) -> None:
+    """Шапка — первая строка любого запуска; время — то же, что в отчёте этого запуска."""
+    mode: RunMode = RunMode.FULL if args.check or args.auth is not None else _requested_run_mode(args)
+    _say(TITLES[mode].format(version=APP_VERSION, generated_at=format_datetime_text(now_utc.astimezone())))
 
 
 def _requested_run_mode(args: argparse.Namespace) -> RunMode:
@@ -156,7 +174,7 @@ def _requested_run_mode(args: argparse.Namespace) -> RunMode:
     return RunMode.FULL
 
 
-def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path) -> int:
+def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path, now_utc: datetime) -> int:
     dependencies: _Dependencies | None = _build_dependencies(paths)
     if dependencies is None:
         return int(ExitCode.CONFIG)
@@ -164,7 +182,7 @@ def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path) -> int:
         return _run_auth(args.auth, paths, dependencies)
     if args.check:
         return _run_check(paths, dependencies)
-    return _run_pipeline(_requested_run_mode(args), paths, dependencies, log_path)
+    return _run_pipeline(_requested_run_mode(args), paths, dependencies, log_path, now_utc)
 
 
 def _build_dependencies(paths: PlanerPaths) -> _Dependencies | None:
@@ -324,8 +342,13 @@ def _check_channel(channel: ChannelConfig, dependencies: _Dependencies) -> bool:
     return True
 
 
-def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies, log_path: Path) -> int:
-    now_utc: datetime = datetime.now(timezone.utc)
+def _run_pipeline(
+    mode: RunMode,
+    paths: PlanerPaths,
+    dependencies: _Dependencies,
+    log_path: Path,
+    now_utc: datetime,
+) -> int:
     outcome: RunOutcome = run(
         mode,
         dependencies.config,
@@ -334,6 +357,7 @@ def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies
         build_form_sender(paths, now_utc),
         now_utc,
         random.Random(),
+        progress=ConsoleProgress(),
     )
     channel_order: tuple[str, ...] = tuple(channel.account_name for channel in dependencies.config.channels)
     _print_outcome(outcome, paths, log_path, channel_order)
@@ -341,7 +365,11 @@ def _run_pipeline(mode: RunMode, paths: PlanerPaths, dependencies: _Dependencies
 
 
 def _print_outcome(outcome: RunOutcome, paths: PlanerPaths, log_path: Path, channel_order: tuple[str, ...]) -> None:
-    """Консоль — блоки и пути; подробности — в отчёте, диагностика — в логе (ТЗ §5.6)."""
+    """Консоль — блоки и пути; подробности — в отчёте, диагностика — в логе (ТЗ §5.6).
+
+    Пустая строка отделяет прогресс от итога; шапка уже напечатана при старте.
+    """
+    _say("")
     if outcome.problem is RunProblem.BCAST_EMPTY:
         _say(msg.BCAST_EMPTY.format(path=paths.bcast_dir))
     if outcome.report is not None:

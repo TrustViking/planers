@@ -135,8 +135,9 @@ def test_run_without_flags_is_the_full_cycle(
     assert run_cli([]) == 0
     out: str = capsys.readouterr().out
     lines: list[str] = out.splitlines()
-    assert lines[0].startswith(f"Планер {APP_VERSION} — ")
-    assert lines[1] == "Итог: опубликовано 1, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0"
+    assert re.fullmatch(rf"Планер {re.escape(APP_VERSION)} — \d{{2}}-\d{{2}}-\d{{4}} \d{{2}}:\d{{2}}", lines[0])
+    assert lines.count("Итог: опубликовано 1, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0") == 1
+    assert sum(1 for line in lines if line.startswith("Планер ")) == 1          # шапка одна на прогон
     assert f"  {UA} ({UA_GOOGLE})" in lines
     assert "    01-01-2099  19:00  uk  ****-0000  передан в форму" in lines
     assert "## " not in out                                            # markdown — только в отчёте
@@ -145,6 +146,70 @@ def test_run_without_flags_is_the_full_cycle(
     assert not (planer_root / "state").exists()                       # технические данные — только в app\state
     keys_text: str = (planer_root / "keystreams" / "keys.txt").read_text(encoding="utf-8")
     assert "fake-0001" in keys_text and "форма  отправлен в форму " in keys_text
+
+
+def test_full_run_prints_title_then_progress_then_blank_line_then_total(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Владелец не ждёт немого курсора: шапка сразу, строка на каждый долгий шаг, потом итог."""
+    _ready(planer_root)
+    make_package(
+        planer_root / "bcast",
+        slots=[make_slot("01-01-2099", "19:00", "uk"), make_slot("01-01-2099", "19:00", "ru")],
+    )
+    assert run_cli([]) == 0
+    lines: list[str] = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith(f"Планер {APP_VERSION} — ") and "dry-run" not in lines[0]
+    progress: list[str] = [
+        "  " + msg.PROGRESS_PACKAGES_READ.format(packages=1, slots_total=2, slots_mine=2),
+        # каналы — в порядке объектов (слоты по дате, времени и языку): ru раньше uk
+        "  " + msg.PROGRESS_CHANNEL_READ_STARTED.format(account_name=RU),
+        "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=RU, count=0),
+        "  " + msg.PROGRESS_CHANNEL_READ_STARTED.format(account_name=UA),
+        "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=UA, count=0),
+        "  " + msg.PROGRESS_BROADCAST_CREATE.format(account_name=RU, date="01-01-2099", time="19:00", language="ru"),
+        "  " + msg.PROGRESS_BROADCAST_CREATE.format(account_name=UA, date="01-01-2099", time="19:00", language="uk"),
+        "  " + msg.PROGRESS_KEY_SEND.format(account_name=RU, date="01-01-2099", time="19:00", language="ru"),
+        "  " + msg.PROGRESS_KEY_SEND.format(account_name=UA, date="01-01-2099", time="19:00", language="uk"),
+        "  " + msg.PROGRESS_REPORT,
+    ]
+    assert lines[1 : 1 + len(progress)] == progress
+    total: int = lines.index("Итог: опубликовано 2, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0")
+    assert total == len(progress) + 2 and lines[total - 1] == ""
+
+
+def test_dry_run_prints_channel_and_package_progress_but_no_actions(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    assert run_cli(["--dry-run"]) == 0
+    lines: list[str] = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith(f"Планер {APP_VERSION} — ") and lines[0].endswith(
+        " — dry-run: ничего не создано и в форму не отправлено"
+    )
+    assert "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=UA, count=0) in lines
+    assert "  " + msg.PROGRESS_PACKAGES_READ.format(packages=1, slots_total=1, slots_mine=1) in lines
+    assert not [line for line in lines if "создаю эфир" in line or "исправляю эфир" in line or "отправляю ключ" in line]
+    assert lines.index("  " + msg.PROGRESS_REPORT) < lines.index(
+        "Итог: опубликуем 1, исправим 0, уже стояло 0, не публиковали 0, ошибок 0"
+    )
+
+
+def test_title_is_printed_before_config_is_read(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--check без channels.json: шапка (обычная) — первой строкой, ещё до ошибки конфига."""
+    assert run_cli(["--check"]) == 2
+    lines: list[str] = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith(f"Планер {APP_VERSION} — ") and " — " not in lines[0].split(" — ", 1)[1]
+    assert msg.CONFIG_CHANNELS_TEMPLATE.splitlines()[0] in lines[1:]
 
 
 def test_run_without_flags_on_empty_bcast_exits_3_without_touching_channels(
@@ -244,7 +309,9 @@ def test_missing_token_logs_in_at_first_access_and_run_continues(
     positions: list[int] = [out.index(line) for line in login_lines]
     assert positions == sorted(positions)
     assert msg.AUTH_OK.format(account_name=UA, title=f"Fake {UA}", youtube_channel_id=f"UCfake{UA}") in out
-    assert out.index("Google hasn't verified this app") < out.index(f"Планер {APP_VERSION} — ")
+    # шапка — до входа, итог — после
+    assert out.index(f"Планер {APP_VERSION} — ") < out.index(msg.AUTH_STARTING.format(account_name=UA))
+    assert out.index("Google hasn't verified this app") < out.index("Итог: ")
     assert fake_platform_in_main.logins == [UA]
     assert list(_read_bindings(planer_root)) == [UA]
 
@@ -328,7 +395,8 @@ def test_status_writes_keys_file(
     lines: list[str] = keys_file.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3 and all(line.startswith("# ") for line in lines)
     out: str = capsys.readouterr().out
-    assert out.splitlines()[1] == "Итог: уже стояло 0, ошибок 0"
+    assert out.splitlines()[0].endswith(" — --status: эфиры планера на каналах")
+    assert "Итог: уже стояло 0, ошибок 0" in out.splitlines()
     assert "=====" not in out                                         # пустые блоки не печатаются
     assert re.search(r"^  ключи +keystreams", out, re.MULTILINE)
 

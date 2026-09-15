@@ -18,7 +18,8 @@ from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.form.base import FORM_CODE_NOT_CONFIRMED, FormSendResult
 from app.platforms.base import BroadcastFacts, PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
-from app.tests.conftest import FORM_SPEC, FakeFormSender
+from app.output.progress import BroadcastStep
+from app.tests.conftest import FORM_SPEC, FakeFormSender, RecordingProgress
 from app.ui import messages_ru as msg
 
 PackageFactory = Callable[..., Path]
@@ -919,3 +920,74 @@ def test_created_broadcast_has_no_marker_mismatch(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.CREATED
     assert not any("маркер потока" in line for line in outcome.report.mismatches)
+
+
+def test_full_run_reports_progress_in_step_order(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Пакеты → чтение каналов → создание и исправление → ключи в форму → отчёт; числа — как в «Пакетах» отчёта."""
+    ru_spec: dict[str, Any] = make_slot("18-03-2027", "19:00", "ru")
+    make_package(
+        planer_paths.bcast_dir,
+        slots=[make_slot("17-03-2027", "19:00", "uk"), ru_spec, make_slot("18-03-2027", "19:00", "hu")],
+    )
+    fake_platform.seed_broadcast(
+        "yt_ru", datetime.fromisoformat("2027-03-18T19:00:00+02:00"), "Старое название", ru_spec["description"],
+        marker="18-03-2027_1900_ru", stream_key=PLATFORM_KEY,
+    )
+    progress: RecordingProgress = RecordingProgress()
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(), planer_paths, fake_platform, form_sender, now, rng, progress=progress
+    )
+    assert outcome.exit_code == ExitCode.OK
+    assert progress.calls == [
+        ("packages_read", 1, 3, 2),
+        ("channel_read_started", "yt_ua"),
+        ("channel_read_done", "yt_ua", 0),
+        ("channel_read_started", "yt_ru"),
+        ("channel_read_done", "yt_ru", 1),
+        ("broadcast_step_started", UK_SLOT, "yt_ua", BroadcastStep.CREATE),
+        ("broadcast_step_started", "18-03-2027_1900_ru", "yt_ru", BroadcastStep.FIX),
+        ("key_send_started", UK_SLOT, "yt_ua"),
+        ("key_send_started", "18-03-2027_1900_ru", "yt_ru"),
+        ("report_started",),
+    ]
+    assert outcome.report is not None
+    assert f"{outcome.report.packages[0].file_name} — принят, слотов 3, из них под мои языки 2" in _report_text(outcome)
+
+
+def test_dry_run_progress_has_no_action_steps(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    progress: RecordingProgress = RecordingProgress()
+    run(RunMode.DRY_RUN, make_config(), planer_paths, fake_platform, form_sender, now, rng, progress=progress)
+    assert progress.names() == ["packages_read", "channel_read_started", "channel_read_done", "report_started"]
+
+
+def test_status_progress_reads_every_channel_and_the_report(
+    planer_paths: PlanerPaths, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    progress: RecordingProgress = RecordingProgress()
+    run(RunMode.STATUS, make_config(), planer_paths, fake_platform, form_sender, now, rng, progress=progress)
+    assert progress.calls == [
+        ("channel_read_started", "yt_ua"),
+        ("channel_read_done", "yt_ua", 0),
+        ("channel_read_started", "yt_ru"),
+        ("channel_read_done", "yt_ru", 0),
+        ("report_started",),
+    ]
+
+
+def test_empty_bcast_reports_no_progress(
+    planer_paths: PlanerPaths, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    progress: RecordingProgress = RecordingProgress()
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(), planer_paths, fake_platform, form_sender, now, rng, progress=progress
+    )
+    assert outcome.exit_code == ExitCode.BCAST_EMPTY and progress.calls == []
