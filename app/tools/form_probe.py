@@ -3,7 +3,7 @@
 Запуск из корня репо: python -m app.tools.form_probe
 Опыт E, закрытая форма: python -m app.tools.form_probe --closed-form — только чтение структуры, ни одной отправки.
 
-Только тренировочная форма: адрес берётся из манифеста самого свежего пакета в promo\\, а после
+Только тренировочная форма: адрес берётся из манифеста самого свежего пакета в bcast\\, а после
 редиректа идентификатор формы сверяется с TRAINING_FORM_ID — при несовпадении ничего не отправляется.
 Структура формы читается production-кодом (FormDiscovery), тело и разделы собираются production-функциями
 submitter; постит пробник сам, потому что ему нужно сырое тело ответа. Пишет только в logs\\.
@@ -44,7 +44,7 @@ from app.form.submitter import (
     _with_response_language,
 )
 from app.package.model import FormSpec, Package, PackageError
-from app.package.promo import list_package_files
+from app.package.bcast import list_package_files
 from app.package.reader import read_package
 from app.paths import PlanerPaths, build_paths, resolve_root
 
@@ -205,7 +205,7 @@ def _latest_form(paths: PlanerPaths) -> FormSpec:
         except PackageError as error:
             print(f"пакет пропущен: {path.name} — {error}")
     if not packages:
-        raise ProbeRefused(f"в {paths.promo_dir} нет читаемых пакетов — адрес формы брать неоткуда")
+        raise ProbeRefused(f"в {paths.bcast_dir} нет читаемых пакетов — адрес формы брать неоткуда")
     latest: Package = max(packages, key=lambda package: package.generated_at)
     print(f"форма из пакета {latest.path.name}: {latest.form.url}")
     return latest.form

@@ -1,10 +1,12 @@
-"""FakePlatform — площадка в памяти: используется тестами и main.py до этапа 3; после — только тестами.
+"""FakePlatform — площадка в памяти: только для тестов.
 
-Хранение по channel.id (каждый канал — отдельный YouTube-канал). Идентификаторы
+Хранение по channel.account_name (каждый канал — отдельный YouTube-канал). Вход в канал
+имитируется: канал из tokens_missing при первом обращении вызывает on_login, как YouTube перед браузером. Идентификаторы
 детерминированные (счётчик); ключи — 5 групп по 4 символа [a-z0-9], как у YouTube (§7.4).
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Final
@@ -27,8 +29,8 @@ FAKE_STREAM_URL: Final[str] = "rtmp://a.rtmp.youtube.com/live2"
 FAKE_BROADCAST_ID_TEMPLATE: Final[str] = "fakebc{number:05d}"
 FAKE_STREAM_ID_TEMPLATE: Final[str] = "fakestream{number:04d}"
 FAKE_STREAM_KEY_TEMPLATE: Final[str] = "fake-{number:04d}-0000-0000-0000"
-FAKE_CHANNEL_ID_TEMPLATE: Final[str] = "UCfake{channel_key}"
-FAKE_CHANNEL_TITLE_TEMPLATE: Final[str] = "Fake {channel_key}"
+FAKE_CHANNEL_ID_TEMPLATE: Final[str] = "UCfake{account_name}"
+FAKE_CHANNEL_TITLE_TEMPLATE: Final[str] = "Fake {account_name}"
 NOT_FOUND_CODE: Final[str] = "broadcastNotFound"
 # Те же лимиты, что у YouTube: тесты должны ловить реальное поведение обрезки.
 FAKE_TITLE_MAX_CHARS: Final[int] = 100
@@ -52,9 +54,9 @@ class FakePlatform:
         self.updated: list[FakeCall] = []
         self.list_calls: list[str] = []
         self.stream_calls: list[tuple[str, str]] = []
-        self.fail_list: dict[str, PlatformError] = {}     # channel_id → ошибка list_upcoming
+        self.fail_list: dict[str, PlatformError] = {}     # account_name → ошибка list_upcoming
         self.fail_create: dict[str, PlatformError] = {}   # slot_id → ошибка create_broadcast
-        self.fail_describe: dict[str, PlatformError] = {}  # channel_id → ошибка describe_channel
+        self.fail_describe: dict[str, PlatformError] = {}  # account_name → ошибка describe_channel
         self.fail_update: dict[str, PlatformError] = {}    # broadcast_id → ошибка update_broadcast
         self.fail_attach: dict[str, PlatformError] = {}    # broadcast_id → ошибка attach_stream
         self.fail_settings: dict[str, PlatformError] = {}  # broadcast_id → ошибка apply_video_settings
@@ -71,8 +73,11 @@ class FakePlatform:
         self.thumbnails: list[FakeCall] = []
         self.attached: list[FakeCall] = []
         self.languages: dict[str, str] = {}                # broadcast_id → записанный язык
-        self.channel_info: dict[str, ChannelInfo] = {}     # channel_id → ответ describe_channel
+        self.channel_info: dict[str, ChannelInfo] = {}     # account_name → ответ describe_channel
         self.describe_calls: list[str] = []
+        self.tokens_missing: set[str] = set()              # account_name без токена: первый вызов — вход
+        self.on_login: Callable[[ChannelConfig], None] | None = None
+        self.logins: list[str] = []
 
     def seed_broadcast(
         self,
@@ -116,30 +121,32 @@ class FakePlatform:
         )
 
     def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
-        """По умолчанию — детерминированный ответ по channel.id; тест может задать свой."""
-        self.describe_calls.append(channel.id)
-        if channel.id in self.fail_describe:
-            raise self.fail_describe[channel.id]
-        return self.channel_info.get(channel.id, self.default_channel_info(channel.id))
+        """По умолчанию — детерминированный ответ по channel.account_name; тест может задать свой."""
+        self.describe_calls.append(channel.account_name)
+        self._login_if_needed(channel)
+        if channel.account_name in self.fail_describe:
+            raise self.fail_describe[channel.account_name]
+        return self.channel_info.get(channel.account_name, self.default_channel_info(channel.account_name))
 
     @staticmethod
-    def default_channel_info(channel_key: str) -> ChannelInfo:
+    def default_channel_info(account_name: str) -> ChannelInfo:
         return ChannelInfo(
-            youtube_channel_id=FAKE_CHANNEL_ID_TEMPLATE.format(channel_key=channel_key),
-            title=FAKE_CHANNEL_TITLE_TEMPLATE.format(channel_key=channel_key),
+            youtube_channel_id=FAKE_CHANNEL_ID_TEMPLATE.format(account_name=account_name),
+            title=FAKE_CHANNEL_TITLE_TEMPLATE.format(account_name=account_name),
             default_language=None,
         )
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
-        self.list_calls.append(channel.id)
-        if channel.id in self.fail_list:
-            raise self.fail_list[channel.id]
-        broadcasts: list[UpcomingBroadcast] = list(self._broadcasts.get(channel.id, {}).values())
+        self.list_calls.append(channel.account_name)
+        self._login_if_needed(channel)
+        if channel.account_name in self.fail_list:
+            raise self.fail_list[channel.account_name]
+        broadcasts: list[UpcomingBroadcast] = list(self._broadcasts.get(channel.account_name, {}).values())
         return sorted(broadcasts, key=lambda broadcast: (broadcast.start_utc, broadcast.broadcast_id))
 
     def get_stream(self, channel: ChannelConfig, stream_id: str) -> StreamInfo | None:
-        self.stream_calls.append((channel.id, stream_id))
-        return self._streams.get(channel.id, {}).get(stream_id)
+        self.stream_calls.append((channel.account_name, stream_id))
+        return self._streams.get(channel.account_name, {}).get(stream_id)
 
     def create_broadcast(self, channel: ChannelConfig, spec: BroadcastSpec) -> CreatedBroadcast:
         if spec.marker in self.fail_create:
@@ -158,9 +165,9 @@ class FakePlatform:
             description=spec.description,
             stream_id=stream.stream_id,
         )
-        self._streams.setdefault(channel.id, {})[stream.stream_id] = stream
-        self._broadcasts.setdefault(channel.id, {})[broadcast.broadcast_id] = broadcast
-        self.created.append(FakeCall(channel.id, broadcast.broadcast_id, spec.marker, None))
+        self._streams.setdefault(channel.account_name, {})[stream.stream_id] = stream
+        self._broadcasts.setdefault(channel.account_name, {})[broadcast.broadcast_id] = broadcast
+        self.created.append(FakeCall(channel.account_name, broadcast.broadcast_id, spec.marker, None))
         return CreatedBroadcast(
             broadcast_id=broadcast.broadcast_id,
             broadcast_url=broadcast_url_for(channel, broadcast.broadcast_id),
@@ -178,15 +185,15 @@ class FakePlatform:
     ) -> None:
         if broadcast_id in self.fail_update:
             raise self.fail_update[broadcast_id]
-        current: UpcomingBroadcast | None = self._broadcasts.get(channel.id, {}).get(broadcast_id)
+        current: UpcomingBroadcast | None = self._broadcasts.get(channel.account_name, {}).get(broadcast_id)
         if current is None:
-            raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.id}")
-        self._broadcasts[channel.id][broadcast_id] = replace(
+            raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.account_name}")
+        self._broadcasts[channel.account_name][broadcast_id] = replace(
             current,
             title=spec.title,
             description=spec.description,
         )
-        self.updated.append(FakeCall(channel.id, broadcast_id, spec.marker, None))
+        self.updated.append(FakeCall(channel.account_name, broadcast_id, spec.marker, None))
 
     def attach_stream(
         self,
@@ -196,9 +203,9 @@ class FakePlatform:
     ) -> CreatedBroadcast:
         if broadcast_id in self.fail_attach:
             raise self.fail_attach[broadcast_id]
-        current: UpcomingBroadcast | None = self._broadcasts.get(channel.id, {}).get(broadcast_id)
+        current: UpcomingBroadcast | None = self._broadcasts.get(channel.account_name, {}).get(broadcast_id)
         if current is None:
-            raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.id}")
+            raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.account_name}")
         number: int = self._next_number()
         stream: StreamInfo = StreamInfo(
             stream_id=FAKE_STREAM_ID_TEMPLATE.format(number=number),
@@ -206,9 +213,9 @@ class FakePlatform:
             ingestion_address=FAKE_STREAM_URL,
             stream_name=FAKE_STREAM_KEY_TEMPLATE.format(number=number),
         )
-        self._streams.setdefault(channel.id, {})[stream.stream_id] = stream
-        self._broadcasts[channel.id][broadcast_id] = replace(current, stream_id=stream.stream_id)
-        self.attached.append(FakeCall(channel.id, broadcast_id, spec.marker, None))
+        self._streams.setdefault(channel.account_name, {})[stream.stream_id] = stream
+        self._broadcasts[channel.account_name][broadcast_id] = replace(current, stream_id=stream.stream_id)
+        self.attached.append(FakeCall(channel.account_name, broadcast_id, spec.marker, None))
         return CreatedBroadcast(
             broadcast_id=broadcast_id,
             broadcast_url=broadcast_url_for(channel, broadcast_id),
@@ -243,7 +250,7 @@ class FakePlatform:
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
         if broadcast_id in self.fail_thumbnail:
             raise self.fail_thumbnail[broadcast_id]
-        self.thumbnails.append(FakeCall(channel.id, broadcast_id, "", preview))
+        self.thumbnails.append(FakeCall(channel.account_name, broadcast_id, "", preview))
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         self.facts_calls.append(broadcast_id)
@@ -252,11 +259,11 @@ class FakePlatform:
         override: BroadcastFacts | None = self.facts_override.get(broadcast_id)
         if override is not None:
             return override
-        broadcast: UpcomingBroadcast | None = self._broadcasts.get(channel.id, {}).get(broadcast_id)
+        broadcast: UpcomingBroadcast | None = self._broadcasts.get(channel.account_name, {}).get(broadcast_id)
         if broadcast is None:
-            raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.id}")
+            raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.account_name}")
         stream: StreamInfo | None = (
-            self._streams.get(channel.id, {}).get(broadcast.stream_id) if broadcast.stream_id else None
+            self._streams.get(channel.account_name, {}).get(broadcast.stream_id) if broadcast.stream_id else None
         )
         return BroadcastFacts(
             broadcast_id=broadcast_id,
@@ -273,6 +280,14 @@ class FakePlatform:
             stream_marker=stream.title if stream is not None else None,
             live_chat_id=self.live_chat_ids.get(broadcast_id),
         )
+
+    def _login_if_needed(self, channel: ChannelConfig) -> None:
+        if channel.account_name not in self.tokens_missing:
+            return
+        self.tokens_missing.discard(channel.account_name)
+        self.logins.append(channel.account_name)
+        if self.on_login is not None:
+            self.on_login(channel)
 
     def _next_number(self) -> int:
         self._counter += 1

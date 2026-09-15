@@ -1,6 +1,6 @@
 """Построение объектов запланированных эфиров (ТЗ §7.2): слот → объекты по каналам.
 
-Слоты уже слиты по slot_id в app/package/promo.py, и только после этого каждый
+Слоты уже слиты по slot_id в app/package/bcast.py, и только после этого каждый
 размножается по каналам своего языка. Сливать расширенные объекты нельзя: один слот
 из двух пакетов дал бы два эфира на один канал.
 
@@ -25,7 +25,7 @@ LOGGER = get_logger("selection")
 
 
 class SkipReason(str, Enum):
-    NO_CHANNEL = "no_channel"  # язык слота не входит ни в один channels[].languages
+    NO_CHANNEL = "no_channel"  # язык слота не входит ни в один channels[].languages (channels.json)
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ class SkippedSlot:
 
 @dataclass(frozen=True)
 class Selection:
-    planned: tuple[PlannedBroadcast, ...]   # по (дата, время, язык, id канала)
+    planned: tuple[PlannedBroadcast, ...]   # по (дата, время, язык, имя канала)
     skipped: tuple[SkippedSlot, ...]
 
 
@@ -48,7 +48,7 @@ def build_planned(
     now: datetime,
 ) -> Selection:
     """Два канала на один язык → два объекта (два эфира)."""
-    lead: timedelta = timedelta(minutes=config.min_lead_minutes)
+    lead: timedelta = timedelta(minutes=config.settings.min_lead_minutes)
     planned: list[PlannedBroadcast] = []
     skipped: list[SkippedSlot] = []
     for slot in sorted(slot_map.values(), key=slot_order_key):
@@ -63,7 +63,7 @@ def build_planned(
             _build_one(slot, slot_sources[slot.slot_id], channel, limits, is_too_late)
             for channel in channels
         )
-    planned.sort(key=lambda item: (*slot_order_key(item.slot), item.channel.id))
+    planned.sort(key=lambda item: (*slot_order_key(item.slot), item.channel.account_name))
     LOGGER.info(
         "selection_done planned=%d too_late=%d skipped=%d",
         len(planned),

@@ -1,0 +1,8 @@
+{
+  "channels": [
+    {"platform": "youtube", "account_name": "Канал UA", "google_account": "you@gmail.com",
+     "languages": ["uk"], "privacy": "public"},
+    {"platform": "youtube", "account_name": "Канал RU", "google_account": "you@gmail.com",
+     "languages": ["ru", "en"], "privacy": "unlisted"}
+  ]
+}

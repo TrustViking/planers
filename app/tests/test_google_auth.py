@@ -19,6 +19,7 @@ from app.google.auth import (
 )
 
 TOKEN_JSON: str = json.dumps({"token": "x", "refresh_token": "y"})
+LOGIN_HINT: str = "owner@gmail.com"
 
 
 class _FakeCredentials:
@@ -73,13 +74,25 @@ def test_scope_is_youtube_only() -> None:
     assert YOUTUBE_SCOPE == "https://www.googleapis.com/auth/youtube"
 
 
-def test_token_file_name_is_built_from_channel_key(tmp_path: Path) -> None:
-    assert token_file_for(tmp_path, "yt_ua") == tmp_path / "yt_ua.token.json"
+def test_token_file_name_is_the_account_name(tmp_path: Path) -> None:
+    assert token_file_for(tmp_path, "Osvald.X") == tmp_path / "Osvald.X.token.json"
+    assert token_file_for(tmp_path, "Канал UA") == tmp_path / "Канал UA.token.json"
+
+
+def test_on_login_is_called_right_before_the_browser(
+    client_secret: Path,
+    tmp_path: Path,
+    flow: type[_FakeFlow],
+) -> None:
+    seen: list[dict[str, Any]] = []
+    load_credentials(client_secret, tmp_path / "Osvald.X.token.json", LOGIN_HINT, on_login=lambda: seen.append(dict(flow.last_kwargs)))
+    assert seen == [{}]                          # браузер ещё не открывался
+    assert flow.last_kwargs["port"] == 0          # а после вызова — открылся
 
 
 def test_missing_client_secret_raises(tmp_path: Path) -> None:
     with pytest.raises(AuthError) as raised:
-        load_credentials(tmp_path / "nope.json", tmp_path / "token.json")
+        load_credentials(tmp_path / "nope.json", tmp_path / "token.json", LOGIN_HINT)
     assert raised.value.reason is AuthErrorReason.CLIENT_SECRET_MISSING
 
 
@@ -89,10 +102,11 @@ def test_flow_runs_on_free_port_and_asks_for_refresh_token(
     flow: type[_FakeFlow],
 ) -> None:
     token_file: Path = tmp_path / "yt_ua.token.json"
-    load_credentials(client_secret, token_file)
+    load_credentials(client_secret, token_file, LOGIN_HINT)
     assert flow.last_kwargs["port"] == 0
     assert flow.last_kwargs["access_type"] == ACCESS_TYPE
     assert flow.last_kwargs["prompt"] == PROMPT
+    assert flow.last_kwargs["login_hint"] == LOGIN_HINT     # браузер сразу предлагает аккаунт канала
     assert token_file.read_text(encoding="utf-8") == TOKEN_JSON
 
 
@@ -109,8 +123,10 @@ def test_valid_token_is_reused_without_browser(
         "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: _FakeCredentials()),
     )
-    load_credentials(client_secret, token_file)
+    logins: list[str] = []
+    load_credentials(client_secret, token_file, LOGIN_HINT, on_login=lambda: logins.append("login"))
     assert flow.last_kwargs == {}
+    assert logins == []                           # токен живой — входа нет, владельцу печатать нечего
 
 
 def test_expired_token_is_refreshed_silently(
@@ -127,7 +143,7 @@ def test_expired_token_is_refreshed_silently(
         "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: stale),
     )
-    load_credentials(client_secret, token_file)
+    load_credentials(client_secret, token_file, LOGIN_HINT)
     assert stale.refreshed is True
     assert flow.last_kwargs == {}
     assert token_file.read_text(encoding="utf-8") == TOKEN_JSON
@@ -146,7 +162,7 @@ def test_force_reauth_drops_token_and_opens_browser(
         "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: pytest.fail("токен не должен читаться при force_reauth")),
     )
-    load_credentials(client_secret, token_file, force_reauth=True)
+    load_credentials(client_secret, token_file, LOGIN_HINT, force_reauth=True)
     assert flow.last_kwargs["port"] == 0
     assert token_file.read_text(encoding="utf-8") == TOKEN_JSON
 
@@ -165,7 +181,7 @@ def test_unreadable_token_is_reported(
 
     monkeypatch.setattr(auth_module.Credentials, "from_authorized_user_file", classmethod(_raise))
     with pytest.raises(AuthError) as raised:
-        load_credentials(client_secret, token_file)
+        load_credentials(client_secret, token_file, LOGIN_HINT)
     assert raised.value.reason is AuthErrorReason.TOKEN_UNREADABLE
 
 
@@ -188,7 +204,7 @@ def test_revoked_token_falls_back_to_browser(
         "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: revoked),
     )
-    load_credentials(client_secret, token_file)
+    load_credentials(client_secret, token_file, LOGIN_HINT)
     assert flow.last_kwargs["port"] == 0
 
 
@@ -212,5 +228,5 @@ def test_transport_failure_on_refresh_is_reported(
         classmethod(lambda cls, path, scopes: stale),
     )
     with pytest.raises(AuthError) as raised:
-        load_credentials(client_secret, token_file)
+        load_credentials(client_secret, token_file, LOGIN_HINT)
     assert raised.value.reason is AuthErrorReason.REFRESH_FAILED

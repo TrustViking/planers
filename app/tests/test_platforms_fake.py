@@ -28,7 +28,7 @@ def test_seed_with_marker_creates_bound_stream(
 ) -> None:
     channel, _ = _channels(make_config)
     seeded: UpcomingBroadcast = fake_platform.seed_broadcast(
-        channel.id, now + timedelta(days=1), "Название", "Описание", marker="17-03-2027_1200_uk"
+        channel.account_name, now + timedelta(days=1), "Название", "Описание", marker="17-03-2027_1200_uk"
     )
     [listed] = fake_platform.list_upcoming(channel)
     assert listed == seeded
@@ -46,7 +46,7 @@ def test_seed_without_marker_has_no_stream(
     now: datetime,
 ) -> None:
     channel, _ = _channels(make_config)
-    fake_platform.seed_broadcast(channel.id, now, "Ручной", "")
+    fake_platform.seed_broadcast(channel.account_name, now, "Ручной", "")
     [listed] = fake_platform.list_upcoming(channel)
     assert listed.stream_id is None
 
@@ -74,7 +74,7 @@ def test_create_broadcast_is_deterministic_and_marked(
     assert (listed.title, listed.description, listed.start_utc) == (slot.title, slot.description, slot.start)
     stream: StreamInfo | None = fake_platform.get_stream(channel, created.stream_id)
     assert stream is not None and stream.title == slot.slot_id
-    assert fake_platform.created == [FakeCall(channel.id, created.broadcast_id, slot.slot_id, None)]
+    assert fake_platform.created == [FakeCall(channel.account_name, created.broadcast_id, slot.slot_id, None)]
 
 
 def test_update_changes_texts_and_unknown_broadcast_fails(
@@ -85,11 +85,11 @@ def test_update_changes_texts_and_unknown_broadcast_fails(
 ) -> None:
     channel, _ = _channels(make_config)
     slot: Slot = make_slot_object(now + timedelta(days=1), "uk", title="Новое", description="Новое описание")
-    seeded: UpcomingBroadcast = fake_platform.seed_broadcast(channel.id, slot.start, "Старое", "Старое описание")
+    seeded: UpcomingBroadcast = fake_platform.seed_broadcast(channel.account_name, slot.start, "Старое", "Старое описание")
     fake_platform.update_broadcast(channel, seeded.broadcast_id, _spec(fake_platform, slot))
     [listed] = fake_platform.list_upcoming(channel)
     assert (listed.title, listed.description) == ("Новое", "Новое описание")
-    assert fake_platform.updated == [FakeCall(channel.id, seeded.broadcast_id, slot.slot_id, None)]
+    assert fake_platform.updated == [FakeCall(channel.account_name, seeded.broadcast_id, slot.slot_id, None)]
     with pytest.raises(PlatformError):
         fake_platform.update_broadcast(channel, "nope", _spec(fake_platform, slot))
 
@@ -102,7 +102,7 @@ def test_failures_are_configurable(
 ) -> None:
     channel, _ = _channels(make_config)
     slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
-    fake_platform.fail_list[channel.id] = PlatformError("quotaExceeded", "квота")
+    fake_platform.fail_list[channel.account_name] = PlatformError("quotaExceeded", "квота")
     fake_platform.fail_create[slot.slot_id] = PlatformError("liveStreamingNotEnabled", "трансляции выключены")
     with pytest.raises(PlatformError, match="quotaExceeded"):
         fake_platform.list_upcoming(channel)
@@ -117,6 +117,6 @@ def test_channels_are_isolated(
     now: datetime,
 ) -> None:
     first, second = _channels(make_config)
-    fake_platform.seed_broadcast(first.id, now, "Первый", "")
+    fake_platform.seed_broadcast(first.account_name, now, "Первый", "")
     assert fake_platform.list_upcoming(second) == []
-    assert fake_platform.list_calls == [second.id]
+    assert fake_platform.list_calls == [second.account_name]

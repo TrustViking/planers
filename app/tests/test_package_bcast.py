@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.package.promo import PromoScan, scan_promo
+from app.package.bcast import BcastScan, scan_bcast
 from app.package.model import PackageErrorReason
 from app.paths import PlanerPaths
 
@@ -20,9 +20,9 @@ def test_newer_package_wins_for_the_same_slot(
     now: datetime,
 ) -> None:
     # имена файлов нарочно в обратном порядке: решает generated_at, а не имя
-    make_package(planer_paths.promo_dir, generated_at="13-09-2026 10:15", file_name="b_old.bcast", slots=[make_slot(title="Старое")])
-    make_package(planer_paths.promo_dir, generated_at="14-09-2026 09:00", file_name="a_new.bcast", slots=[make_slot(title="Новое")])
-    scan: PromoScan = scan_promo(planer_paths, now)
+    make_package(planer_paths.bcast_dir, generated_at="13-09-2026 10:15", file_name="b_old.bcast", slots=[make_slot(title="Старое")])
+    make_package(planer_paths.bcast_dir, generated_at="14-09-2026 09:00", file_name="a_new.bcast", slots=[make_slot(title="Новое")])
+    scan: BcastScan = scan_bcast(planer_paths, now)
     assert [item.package.path.name for item in scan.packages] == ["b_old.bcast", "a_new.bcast"]
     assert list(scan.slot_map) == ["17-03-2027_1900_uk"]
     assert scan.slot_map["17-03-2027_1900_uk"].title == "Новое"
@@ -34,8 +34,8 @@ def test_past_slots_leave_the_map(
     make_slot: SlotFactory,
     now: datetime,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("15-03-2027"), make_slot("17-03-2027")])
-    scan: PromoScan = scan_promo(planer_paths, now)
+    make_package(planer_paths.bcast_dir, slots=[make_slot("15-03-2027"), make_slot("17-03-2027")])
+    scan: BcastScan = scan_bcast(planer_paths, now)
     assert list(scan.slot_map) == ["17-03-2027_1900_uk"]
     assert [slot.slot_id for slot in scan.past_slots] == ["15-03-2027_1900_uk"]
     [item] = scan.packages
@@ -49,8 +49,8 @@ def test_package_with_only_past_slots_is_all_past(
     make_slot: SlotFactory,
     now: datetime,
 ) -> None:
-    path: Path = make_package(planer_paths.promo_dir, slots=[make_slot("14-03-2027"), make_slot("15-03-2027")])
-    scan: PromoScan = scan_promo(planer_paths, now)
+    path: Path = make_package(planer_paths.bcast_dir, slots=[make_slot("14-03-2027"), make_slot("15-03-2027")])
+    scan: BcastScan = scan_bcast(planer_paths, now)
     assert [package.path for package in scan.all_past_packages] == [path]
     assert scan.packages[0].slots_active == 0
     assert scan.slot_map == {}
@@ -61,10 +61,10 @@ def test_damaged_file_is_a_problem_and_stays_in_place(
     make_package: PackageFactory,
     now: datetime,
 ) -> None:
-    broken: Path = planer_paths.promo_dir / "broken.bcast"
+    broken: Path = planer_paths.bcast_dir / "broken.bcast"
     broken.write_bytes(b"not a zip")
-    make_package(planer_paths.promo_dir)
-    scan: PromoScan = scan_promo(planer_paths, now)
+    make_package(planer_paths.bcast_dir)
+    scan: BcastScan = scan_bcast(planer_paths, now)
     [problem] = scan.problems
     assert (problem.file, problem.reason) == (broken, PackageErrorReason.NOT_ZIP)
     assert broken.exists()
@@ -76,9 +76,9 @@ def test_subdirectories_are_not_scanned(
     make_package: PackageFactory,
     now: datetime,
 ) -> None:
-    """Пакеты читаются одним списком из корня promo; вложенные папки — не наше дело."""
-    make_package(planer_paths.promo_dir / "old")
-    assert scan_promo(planer_paths, now).is_empty
+    """Пакеты читаются одним списком из корня bcast; вложенные папки — не наше дело."""
+    make_package(planer_paths.bcast_dir / "old")
+    assert scan_bcast(planer_paths, now).is_empty
 
 
 def test_slot_sources_point_to_the_winning_package(
@@ -88,12 +88,12 @@ def test_slot_sources_point_to_the_winning_package(
     now: datetime,
 ) -> None:
     old: Path = make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         generated_at="13-09-2026 10:15",
         file_name="old.bcast",
         slots=[make_slot("17-03-2027"), make_slot("18-03-2027")],
     )
-    new: Path = make_package(planer_paths.promo_dir, generated_at="14-09-2026 09:00", file_name="new.bcast", slots=[make_slot("17-03-2027")])
-    scan: PromoScan = scan_promo(planer_paths, now)
+    new: Path = make_package(planer_paths.bcast_dir, generated_at="14-09-2026 09:00", file_name="new.bcast", slots=[make_slot("17-03-2027")])
+    scan: BcastScan = scan_bcast(planer_paths, now)
     assert scan.slot_sources["17-03-2027_1900_uk"].path == new
     assert scan.slot_sources["18-03-2027_1900_uk"].path == old

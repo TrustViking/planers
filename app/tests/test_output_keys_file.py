@@ -22,46 +22,43 @@ KYIV: timezone = timezone(timedelta(hours=2))
 STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 
 # Образец ТЗ §5.5: блок на стрим, ключ — первой строкой блока. Статус формы говорит только
-# об этом запуске — передан сейчас, НЕ передан новый ключ, или ключ прежний.
+# об этом запуске — отправлен сейчас, НЕ отправлен новый ключ, или эфир уже стоял с прежним ключом.
 TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенерировано планером 13-09-2026 12:00.
 # Файл перезаписывается на каждом запуске — не править.
-# Если в строке «форма» стоит «НЕ передан» — передайте ключ стримеру вручную.
+# Строка «форма»: «отправлен в форму» — ключ у стримера; «эфир уже стоял, ключ не менялся» — ключ прежний; «НЕ отправлен» — передайте ключ стримеру вручную.
 
-16-09-2026 19:00  uk  Іван UA
+16-09-2026 19:00  uk  Канал UA
   ключ   xxxx-xxxx-xxxx-xxxx-xxxx
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=abc123
-  форма  передан 13-09-2026 12:00
+  форма  отправлен в форму 13-09-2026 12:00
 
-16-09-2026 21:00  ru  Иван RU
+16-09-2026 21:00  ru  Канал RU
   ключ   yyyy-yyyy-yyyy-yyyy-yyyy
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=def456
-  форма  НЕ передан — форма недоступна (HTTP 503)
+  форма  НЕ отправлен: форма недоступна (HTTP 503) — передайте стримеру вручную
 
-17-09-2026 19:00  uk  Іван UA
+17-09-2026 19:00  uk  Канал UA
   ключ   zzzz-zzzz-zzzz-zzzz-zzzz
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=ghi789
-  форма  ключ прежний, в этом запуске не передавался
+  форма  эфир уже стоял, ключ не менялся — в форму не отправляется
 """
 
 
-def _channel(channel_id: str, account_name: str, language: str) -> ChannelConfig:
+def _channel(account_name: str, language: str) -> ChannelConfig:
     return ChannelConfig(
-        id=channel_id,
         platform=Platform.YOUTUBE,
         account_name=account_name,
+        google_account="owner@gmail.com",
         languages=(language,),
         privacy=Privacy.PUBLIC,
-        auto_start=True,
-        set_thumbnail=True,
-        category_id="22",
     )
 
 
-UA: ChannelConfig = _channel("yt_ua", "Іван UA", "uk")
-RU: ChannelConfig = _channel("yt_ru", "Иван RU", "ru")
+UA: ChannelConfig = _channel("Канал UA", "uk")
+RU: ChannelConfig = _channel("Канал RU", "ru")
 
 
 def _start(day: int, hour: int) -> datetime:
@@ -107,7 +104,7 @@ def test_row_takes_everything_from_the_object() -> None:
     """Дата, время, язык и аккаунт — из слота и канала; ключ и ссылка — с площадки."""
     item: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
     row = key_row_from_planned(item)
-    assert (row.date, row.time, row.language, row.account_name) == ("16-09-2026", "19:00", "uk", "Іван UA")
+    assert (row.date, row.time, row.language, row.account_name) == ("16-09-2026", "19:00", "uk", "Канал UA")
     assert (row.stream_key, row.broadcast_url) == ("xxxx-xxxx-xxxx-xxxx-xxxx", "https://www.youtube.com/watch?v=abc123")
 
 
@@ -120,12 +117,12 @@ def test_object_without_key_shows_dashes() -> None:
 def test_form_status_texts_speak_only_about_this_run() -> None:
     new: PlannedBroadcast = _new_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
     new.last_error = "notConfirmed: HTTP 200"
-    assert form_status_text(new) == "НЕ передан — форма не подтвердила запись ответа (HTTP 200)"
+    assert form_status_text(new) == "НЕ отправлен: форма не подтвердила запись ответа (HTTP 200) — передайте стримеру вручную"
     new.is_form_sent = True
     new.form_sent_at = datetime(2026, 9, 13, 12, 0)
-    assert form_status_text(new) == "передан 13-09-2026 12:00"
+    assert form_status_text(new) == "отправлен в форму 13-09-2026 12:00"
     kept: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
-    assert form_status_text(kept) == "ключ прежний, в этом запуске не передавался"
+    assert form_status_text(kept) == "эфир уже стоял, ключ не менялся — в форму не отправляется"
 
 
 def test_status_row_does_not_look_into_the_journal() -> None:
@@ -136,7 +133,7 @@ def test_status_row_does_not_look_into_the_journal() -> None:
         parts=MarkerParts(date="16-09-2026", time="19:00", language="uk"),
     )
     row = key_row_from_marked(marked)
-    assert (row.form_status_text, row.stream_key) == ("ключ прежний, в этом запуске не передавался", "xxxx-xxxx-xxxx-xxxx-xxxx")
+    assert (row.form_status_text, row.stream_key) == ("эфир уже стоял, ключ не менялся — в форму не отправляется", "xxxx-xxxx-xxxx-xxxx-xxxx")
 
 
 def test_empty_file_has_only_comment_lines(planer_paths: PlanerPaths) -> None:
@@ -151,6 +148,6 @@ def test_key_is_the_first_line_of_each_block() -> None:
     item: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
     lines: list[str] = render_keys_file([key_row_from_planned(item)], "13-09-2026 12:00").splitlines()
     assert lines[3] == ""
-    assert lines[4] == "16-09-2026 19:00  uk  Іван UA"
+    assert lines[4] == "16-09-2026 19:00  uk  Канал UA"
     assert lines[5] == "  ключ   xxxx-xxxx-xxxx-xxxx-xxxx"
     assert all(len(line) <= 80 for line in lines[4:])

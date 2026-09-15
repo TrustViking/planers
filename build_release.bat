@@ -81,14 +81,14 @@ if not exist "%DISCOVERY_DOC%" (
   exit /b 1
 )
 
-rem Next to the exe: launcher, icon for shortcuts and config examples (the program creates planer.yaml / channels.yaml from them).
+rem Next to the exe: launcher, icon for shortcuts and config\planer.json (technical settings, shipped filled in).
+rem config\channels.json is NOT shipped: the owner creates it, the program prints its template.
 mkdir "%DIST_APP%\config" >nul 2>&1
 copy /Y "%ROOT%\planer.bat" "%DIST_APP%\planer.bat" >nul
 copy /Y "%APP_ICON%" "%DIST_APP%\planers.ico" >nul
-copy /Y "%ROOT%\config\planer.example.yaml" "%DIST_APP%\config\planer.example.yaml" >nul
-copy /Y "%ROOT%\config\channels.example.yaml" "%DIST_APP%\config\channels.example.yaml" >nul
-if not exist "%DIST_APP%\config\channels.example.yaml" (
-  echo [ERROR] Config examples were not copied to "%DIST_APP%\config".
+copy /Y "%ROOT%\config\planer.json" "%DIST_APP%\config\planer.json" >nul
+if not exist "%DIST_APP%\config\planer.json" (
+  echo [ERROR] config\planer.json was not copied to "%DIST_APP%\config".
   call :finish 1
   exit /b 1
 )

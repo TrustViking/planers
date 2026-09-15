@@ -1,16 +1,4 @@
-﻿; Инсталлятор планера (ТЗ §9, этап 5). Собирается из build_local.bat / build_release.bat:
-;   ISCC /DAppVersion=<app\version.py> /DIncludeSecrets=0|1 planer.iss
-; Источник файлов — dist\planer (то, что прошло смоук): planer.exe, _internal\, planer.bat, config\*.example.yaml.
-;
-; Права — как в installer.iss броадкастера: мастер спрашивает «для всех пользователей / только для меня»
-; (PrivilegesRequiredOverridesAllowed) и всегда показывает страницу выбора папки.
-; Папка по умолчанию — рядом с файлом установщика: {src}\Planer (setup в D:\_exe → D:\_exe\Planer).
-; При обновлении мастер предлагает папку прежней установки (UsePreviousAppDir). Во frozen-режиме корень планера — папка exe
-; (app\paths.py::resolve_root), туда пишутся config\, secrets\, promo\, state\, keystreams\, logs\;
-; в Program Files без прав администратора писать нельзя — ставить в папку с правом записи (например D:\_exe\Planer).
-;
-; Удаление снимает только то, что положил инсталлятор. Рабочие planer.yaml / channels.yaml,
-; токены в secrets\, promo\, state\, keystreams\, logs\ создаёт программа — они остаются.
+﻿
 
 #ifndef AppVersion
   #error AppVersion не передан: номер версии берётся только из app\version.py через build-скрипт
@@ -29,19 +17,23 @@
   #define SetupBaseName "planer-setup-" + AppVersion
 #endif
 
+#ifndef OutputDir
+#define OutputDir "dist\installer"
+#endif
+
 [Setup]
 AppId={{DC9B9159-696D-4AD9-92BB-92539B3781E5}
-AppName=Планер
+AppName=Planer
 AppVersion={#AppVersion}
-AppVerName=Планер {#AppVersion}
-AppPublisher=TrustViking
+AppVerName=Planer {#AppVersion}
+AppPublisher=Vi0rel
 DefaultDirName={src}\Planer
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog commandline
 DisableDirPage=no
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
-OutputDir={#RepoRoot}\dist\installer
+OutputDir={#OutputDir}
 OutputBaseFilename={#SetupBaseName}
 Compression=lzma2
 SolidCompression=yes
@@ -54,21 +46,20 @@ UninstallDisplayIcon={app}\planer.exe
 CloseApplications=yes
 RestartIfNeededByRun=no
 
-[Languages]
-Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Dirs]
 ; Пустая папка для пакетов: владелец кладёт туда пакет ещё до первого запуска. При удалении не трогается.
-Name: "{app}\promo"; Flags: uninsneveruninstall
+; config\, secrets\, bcast\, keystreams\, logs\ и app\state\ — данные владельца: удаление их не трогает.
+Name: "{app}\bcast"; Flags: uninsneveruninstall
 
 [Files]
 Source: "{#SourceDir}\planer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\planer.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\planers.ico"; DestDir: "{app}"; Flags: ignoreversion
-; Только примеры: рабочие planer.yaml и channels.yaml создаёт программа (app\config\loader.py::ensure_configs_exist).
-Source: "{#SourceDir}\config\planer.example.yaml"; DestDir: "{app}\config"; Flags: ignoreversion
-Source: "{#SourceDir}\config\channels.example.yaml"; DestDir: "{app}\config"; Flags: ignoreversion
+; Технические настройки planer.json: ставятся, только если файла ещё нет, — правки владельца
+; переустановка не трогает, удаление тоже. channels.json владелец создаёт сам по шаблону из консоли.
+Source: "{#SourceDir}\config\planer.json"; DestDir: "{app}\config"; Flags: onlyifdoesntexist uninsneveruninstall
 #if IncludeSecrets
 ; build_local.bat: паспорт программы Google из secrets\ репо. В build_release.bat его нет —
 ; владелец получает файл отдельно (messages_ru.CLIENT_SECRET_MISSING).
@@ -77,6 +68,6 @@ Source: "{#RepoRoot}\secrets\client_secret.json"; DestDir: "{app}\secrets"; Flag
 
 [Icons]
 ; Ярлыки — на planer.bat, а не на exe: без pause окно консоли закрылось бы вместе с программой.
-Name: "{autodesktop}\Планер"; Filename: "{app}\planer.bat"; WorkingDir: "{app}"; IconFilename: "{app}\planers.ico"
-Name: "{autodesktop}\Планер — пакеты"; Filename: "{app}\promo"
-Name: "{autoprograms}\Планер"; Filename: "{app}\planer.bat"; WorkingDir: "{app}"; IconFilename: "{app}\planers.ico"
+Name: "{autodesktop}\Planer"; Filename: "{app}\planer.bat"; WorkingDir: "{app}"; IconFilename: "{app}\planers.ico"
+;Name: "{autodesktop}\Planer_"; Filename: "{app}\bcast"
+;Name: "{autoprograms}\Planer"; Filename: "{app}\planer.bat"; WorkingDir: "{app}"; IconFilename: "{app}\planers.ico"

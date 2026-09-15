@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from googleapiclient.errors import HttpError
 
-from app.config.loader import ChannelConfig, Platform, Privacy
+from app.config.loader import ChannelConfig, Platform, PlanerSettings, Privacy
 from app.google import api_retry
 from app.platforms import youtube as youtube_module
 from app.pipeline.plan import BroadcastSpec
@@ -24,14 +24,18 @@ from app.platforms.base import (
 from app.platforms.youtube import YOUTUBE_STREAM_KEY_PATTERN, YouTubePlatform
 
 CHANNEL: ChannelConfig = ChannelConfig(
-    id="yt_ua",
     platform=Platform.YOUTUBE,
-    account_name="Test UA",
+    account_name="Канал UA",
+    google_account="owner@gmail.com",
     languages=("uk",),
     privacy=Privacy.PUBLIC,
+)
+SETTINGS: PlanerSettings = PlanerSettings(
+    min_lead_minutes=60,
+    keep_days=30,
     auto_start=True,
     set_thumbnail=True,
-        category_id="22",
+    category_id="22",
 )
 GOOD_KEY: str = "abcd-1234-efgh-5678-ijkl"
 
@@ -100,7 +104,7 @@ class _FakeService:
 def platform(tmp_path: Path) -> YouTubePlatform:
     client_secret: Path = tmp_path / "client_secret.json"
     client_secret.write_text("{}", encoding="utf-8")
-    return YouTubePlatform(client_secret, tmp_path)
+    return YouTubePlatform(client_secret, tmp_path, SETTINGS)
 
 
 def _install(
@@ -404,7 +408,7 @@ def test_create_broadcast_inserts_binds_and_returns_key(
     insert: dict[str, Any] = service.calls[0]["body"]
     assert insert["snippet"]["scheduledStartTime"] == "2027-03-17T17:00:00Z"
     assert insert["snippet"]["title"] == "Эфир"
-    assert insert["snippet"]["categoryId"] == CHANNEL.category_id
+    assert insert["snippet"]["categoryId"] == SETTINGS.category_id
     assert insert["status"]["privacyStatus"] == "public"
     assert insert["status"]["selfDeclaredMadeForKids"] is False
     assert insert["contentDetails"] == {
@@ -417,6 +421,67 @@ def test_create_broadcast_inserts_binds_and_returns_key(
     assert stream_body["cdn"] == {"ingestionType": "rtmp", "resolution": "variable", "frameRate": "variable"}
     assert service.calls[2]["method"] == "bind"
     assert (service.calls[2]["id"], service.calls[2]["streamId"]) == ("B1", "S1")
+
+
+def test_auto_start_and_category_come_from_planer_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Настройки эфира общие для всех каналов: канал в channels.json их не задаёт."""
+    client_secret: Path = tmp_path / "client_secret.json"
+    client_secret.write_text("{}", encoding="utf-8")
+    settings: PlanerSettings = PlanerSettings(
+        min_lead_minutes=60,
+        keep_days=30,
+        auto_start=False,
+        set_thumbnail=False,
+        category_id="25",
+    )
+    platform: YouTubePlatform = YouTubePlatform(client_secret, tmp_path, settings)
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveBroadcasts=[{"id": "B1"}, {"id": "B1"}, {"id": "B1"}], liveStreams=[_stream_response()]),
+    )
+    spec: BroadcastSpec = _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc))
+    platform.create_broadcast(CHANNEL, spec)
+    platform.update_broadcast(CHANNEL, "B1", spec)
+    insert: dict[str, Any] = service.calls[0]["body"]
+    assert insert["contentDetails"]["enableAutoStart"] is False
+    assert insert["snippet"]["categoryId"] == "25"
+    assert service.calls[3]["body"]["snippet"]["categoryId"] == "25"
+
+
+def test_login_callback_gets_the_channel_before_the_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Токен ищется по account_name; вход — через on_login ровно перед браузером."""
+    client_secret: Path = tmp_path / "client_secret.json"
+    client_secret.write_text("{}", encoding="utf-8")
+    logins: list[str] = []
+    platform: YouTubePlatform = YouTubePlatform(
+        client_secret,
+        tmp_path,
+        SETTINGS,
+        on_login=lambda channel: logins.append(channel.account_name),
+    )
+    token_files: list[Path] = []
+    hints: list[str] = []
+
+    def _load(
+        client_secret_file: Path,
+        token_file: Path,
+        login_hint: str,
+        force_reauth: bool = False,
+        on_login: Any = None,
+    ) -> object:
+        token_files.append(token_file)
+        hints.append(login_hint)
+        on_login()
+        return object()
+
+    monkeypatch.setattr(youtube_module, "load_credentials", _load)
+    monkeypatch.setattr(youtube_module, "build", lambda *args, **kwargs: _FakeService())
+    platform._service(CHANNEL)
+    platform._service(CHANNEL)                         # клиент кешируется: вход один раз
+    assert logins == ["Канал UA"]
+    assert token_files == [tmp_path / "Канал UA.token.json"]
+    assert hints == ["owner@gmail.com"]
 
 
 def test_unexpected_stream_key_is_an_error(
@@ -469,7 +534,7 @@ def test_update_sends_time_and_category(
     assert service.calls[0]["part"] == "snippet"      # contentDetails тянет monitorStream
     assert body["id"] == "B1"
     assert body["snippet"]["scheduledStartTime"] == "2027-03-17T17:00:00Z"
-    assert body["snippet"]["categoryId"] == CHANNEL.category_id   # категория канала, а не найденная
+    assert body["snippet"]["categoryId"] == SETTINGS.category_id   # категория канала, а не найденная
 
 
 def _video_item(**overrides: Any) -> dict[str, Any]:

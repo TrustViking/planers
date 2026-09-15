@@ -1,4 +1,9 @@
-"""Корень планера и его папки (ТЗ §9): рядом с exe (frozen) или корень репо (dev)."""
+"""Корень планера и его папки (ТЗ §9): рядом с exe (frozen) или корень репо (dev).
+
+Владелец видит в корне только своё: config\\ (что заполняет), secrets\\ (ключи доступа),
+bcast\\ (пакеты), keystreams\\ (ключи потоков), logs\\ (логи). Технические данные —
+в app\\state\\: в dev это папка пакета app/state, рядом с exe — папка app\\state\\ у exe.
+"""
 from __future__ import annotations
 
 import os
@@ -24,15 +29,13 @@ def resolve_root() -> Path:
 class PlanerPaths:
     root: Path
     config_dir: Path
-    config_file: Path
-    config_example: Path
-    channels_file: Path          # config\channels.yaml — каналы владельца (ТЗ §5.2)
-    channels_example: Path
+    config_file: Path            # config\planer.json — настройки планера, поставляются со сборкой (ТЗ §5.2)
+    channels_file: Path          # config\channels.json — каналы владельца (ТЗ §5.2)
     secrets_dir: Path
     client_secret_file: Path     # secrets\client_secret.json — паспорт программы (ТЗ §5.3)
-    promo_dir: Path
-    state_dir: Path
-    channels_state_file: Path    # state\channels.json — привязки каналов (ТЗ §5.3)
+    bcast_dir: Path              # bcast\ — пакеты броадкастера (ТЗ §7.1)
+    state_dir: Path              # app\state\ — только runtime-данные планера
+    bindings_file: Path          # app\state\bindings.json — привязки каналов (ТЗ §5.3)
     keystreams_dir: Path
     keys_file: Path
     logs_dir: Path
@@ -42,7 +45,7 @@ class PlanerPaths:
         return (
             self.config_dir,
             self.secrets_dir,
-            self.promo_dir,
+            self.bcast_dir,
             self.state_dir,
             self.keystreams_dir,
             self.logs_dir,
@@ -52,20 +55,18 @@ class PlanerPaths:
 def build_paths(root: Path) -> PlanerPaths:
     config_dir: Path = root / "config"
     secrets_dir: Path = root / "secrets"
-    state_dir: Path = root / "state"
+    state_dir: Path = root / "app" / "state"
     keystreams_dir: Path = root / "keystreams"
     return PlanerPaths(
         root=root,
         config_dir=config_dir,
-        config_file=config_dir / "planer.yaml",
-        config_example=config_dir / "planer.example.yaml",
-        channels_file=config_dir / "channels.yaml",
-        channels_example=config_dir / "channels.example.yaml",
+        config_file=config_dir / "planer.json",
+        channels_file=config_dir / "channels.json",
         secrets_dir=secrets_dir,
         client_secret_file=secrets_dir / "client_secret.json",
-        promo_dir=root / "promo",
+        bcast_dir=root / "bcast",
         state_dir=state_dir,
-        channels_state_file=state_dir / "channels.json",
+        bindings_file=state_dir / "bindings.json",
         keystreams_dir=keystreams_dir,
         keys_file=keystreams_dir / "keys.txt",
         logs_dir=root / "logs",
@@ -73,5 +74,6 @@ def build_paths(root: Path) -> PlanerPaths:
 
 
 def ensure_dirs(paths: PlanerPaths) -> None:
+    """Только папки: файлы в config\\ планер не создаёт никогда."""
     for directory in paths.directories:
         directory.mkdir(parents=True, exist_ok=True)

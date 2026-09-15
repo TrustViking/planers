@@ -12,10 +12,11 @@ secrets/
 
 ########################################
 # Planer runtime data (folders are created by app/paths.py)
+# config/planer.json is tracked: the single source for dev and for the build
 ########################################
-config/planer.yaml
-config/channels.yaml
-/promo/
+/config/channels.json
+/bcast/
+/app/state/bindings.json
 
 ########################################
 # Google OAuth / API
@@ -92,7 +93,6 @@ downloads/
 /data/
 docs/
 image/
-/state/
 /tools/
 
 ########################################

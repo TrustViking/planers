@@ -87,15 +87,15 @@ def _group_by_channel(
     channels: Sequence[ChannelConfig],
 ) -> list[tuple[ChannelConfig, list[PlannedBroadcast]]]:
     groups: dict[str, tuple[ChannelConfig, list[PlannedBroadcast]]] = {
-        channel.id: (channel, []) for channel in channels
+        channel.account_name: (channel, []) for channel in channels
     }
     for item in planned:
-        groups.setdefault(item.channel.id, (item.channel, []))[1].append(item)
+        groups.setdefault(item.channel.account_name, (item.channel, []))[1].append(item)
     return list(groups.values())
 
 
 class Reconciler:
-    """list_upcoming — ровно раз на канал; get_stream кешируется по (channel.id, stream_id)."""
+    """list_upcoming — ровно раз на канал; get_stream кешируется по (channel.account_name, stream_id)."""
 
     def __init__(self, platform: BroadcastPlatform) -> None:
         self._platform: BroadcastPlatform = platform
@@ -121,9 +121,9 @@ class Reconciler:
             try:
                 broadcasts.extend(self._marked_in_channel(channel, self._platform.list_upcoming(channel)))
             except PlatformError as error:
-                LOGGER.warning("channel_unavailable channel=%s code=%s", channel.id, error.code)
+                LOGGER.warning('channel_unavailable channel="%s" code=%s', channel.account_name, error.code)
                 failures.append(ChannelFailure(channel=channel, error=error))
-        broadcasts.sort(key=lambda item: (item.broadcast.start_utc, item.parts.language, item.channel.id))
+        broadcasts.sort(key=lambda item: (item.broadcast.start_utc, item.parts.language, item.channel.account_name))
         return MarkedScan(broadcasts=tuple(broadcasts), failures=tuple(failures))
 
     def _reconcile_channel(
@@ -135,7 +135,7 @@ class Reconciler:
         try:
             broadcasts: list[UpcomingBroadcast] = self._platform.list_upcoming(channel)
         except PlatformError as error:
-            LOGGER.warning("channel_unavailable channel=%s code=%s planned=%d", channel.id, error.code, len(items))
+            LOGGER.warning('channel_unavailable channel="%s" code=%s planned=%d', channel.account_name, error.code, len(items))
             for item in items:
                 if item.is_too_late:
                     continue      # решения у него нет: ключа просто не будет, ошибкой это не считается
@@ -148,9 +148,9 @@ class Reconciler:
             else:
                 self._decide(item, broadcasts)
             LOGGER.info(
-                "pair_decision slot_id=%s channel=%s decision=%s broadcast_id=%s stream_key=%s",
+                'pair_decision slot_id=%s channel="%s" decision=%s broadcast_id=%s stream_key=%s',
                 item.slot_id,
-                channel.id,
+                channel.account_name,
                 item.decision.value,
                 item.found.broadcast_id if item.found else "-",
                 mask_stream_key(item.stream_key),
@@ -245,7 +245,7 @@ class Reconciler:
     def _stream(self, channel: ChannelConfig, stream_id: str | None) -> StreamInfo | None:
         if stream_id is None:
             return None
-        cache_key: tuple[str, str] = (channel.id, stream_id)
+        cache_key: tuple[str, str] = (channel.account_name, stream_id)
         if cache_key not in self._streams:
             self._streams[cache_key] = self._platform.get_stream(channel, stream_id)
         return self._streams[cache_key]

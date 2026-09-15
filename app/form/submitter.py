@@ -123,9 +123,9 @@ class GoogleFormSender:
             return self._post(planned, structure, answers, pages)
         except FormError as error:
             LOGGER.warning(
-                "form_send_failed slot_id=%s channel=%s code=%s",
+                'form_send_failed slot_id=%s channel="%s" code=%s',
                 planned.slot_id,
-                planned.channel.id,
+                planned.channel.account_name,
                 error.code,
             )
             return error.as_result()
@@ -151,17 +151,17 @@ class GoogleFormSender:
         confirmation: Confirmation = read_confirmation(response.status_code, response.text)
         if confirmation.is_confirmed:
             LOGGER.info(
-                "form_confirmed slot_id=%s channel=%s %s",
+                'form_confirmed slot_id=%s channel="%s" %s',
                 planned.slot_id,
-                planned.channel.id,
+                planned.channel.account_name,
                 confirmation.log_fields(),
             )
             return FormSendResult(confirmed=True)
         path: Path | None = self._discovery.save_diagnostic(response.text, planned.form.url, "response")
         LOGGER.warning(
-            "form_not_confirmed slot_id=%s channel=%s %s page_title=%r saved=%s",
+            'form_not_confirmed slot_id=%s channel="%s" %s page_title=%r saved=%s',
             planned.slot_id,
-            planned.channel.id,
+            planned.channel.account_name,
             confirmation.log_fields(),
             _page_title(response.text),
             path,

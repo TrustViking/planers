@@ -119,7 +119,7 @@ def test_fields_come_from_slot_and_channel(make_config: ConfigFactory, make_slot
     slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
     item: PlannedBroadcast = build_planned(slot, make_config().channels[0])
     assert (item.slot_id, item.language, item.date, item.time) == (slot.slot_id, "uk", slot.date, slot.time)
-    assert item.account_name == "Account yt_ua"
+    assert item.account_name == "yt_ua"
     assert item.form is slot.form
 
 

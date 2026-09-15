@@ -1,4 +1,4 @@
-"""Оркестрация запуска (ТЗ §4): promo → объекты → сверка → действия → форма → keys.txt → отчёт.
+"""Оркестрация запуска (ТЗ §4): bcast → объекты → сверка → действия → форма → keys.txt → отчёт.
 
 main.py только разбирает флаги, строит зависимости и печатает результат.
 Рабочая единица — PlannedBroadcast: один эфир одного слота на одном канале.
@@ -46,7 +46,7 @@ from app.output.report import (
     write_report,
 )
 from app.package.model import PackageError, read_preview
-from app.package.promo import PromoScan, scan_promo
+from app.package.bcast import BcastScan, scan_bcast
 from app.paths import PlanerPaths
 from app.pipeline.plan import (
     BroadcastSpec,
@@ -96,11 +96,11 @@ class ExitCode(IntEnum):
     OK = 0            # всё, что можно было сделать, сделано
     ERRORS = 1        # есть ошибки
     CONFIG = 2        # ошибка конфигурации/авторизации — ничего не делалось
-    PROMO_EMPTY = 3   # в promo\ нет пакетов
+    BCAST_EMPTY = 3   # в bcast\ нет пакетов
 
 
 class RunProblem(str, Enum):
-    PROMO_EMPTY = "promo_empty"
+    BCAST_EMPTY = "bcast_empty"
 
 
 @dataclass(frozen=True)
@@ -155,13 +155,13 @@ def run(
     context: _RunContext = _RunContext(mode, config, paths, platform, form_sender, now_utc, rng, notice, [])
     if mode is RunMode.STATUS:
         return _run_status(context)
-    return _run_promo(context)
+    return _run_bcast(context)
 
 
-def _run_promo(context: _RunContext) -> RunOutcome:
-    scan: PromoScan = scan_promo(context.paths, context.now_utc)
+def _run_bcast(context: _RunContext) -> RunOutcome:
+    scan: BcastScan = scan_bcast(context.paths, context.now_utc)
     if scan.is_empty:
-        return RunOutcome(report=None, exit_code=int(ExitCode.PROMO_EMPTY), problem=RunProblem.PROMO_EMPTY)
+        return RunOutcome(report=None, exit_code=int(ExitCode.BCAST_EMPTY), problem=RunProblem.BCAST_EMPTY)
     selection: Selection = build_planned(
         scan.slot_map,
         scan.slot_sources,
@@ -169,10 +169,10 @@ def _run_promo(context: _RunContext) -> RunOutcome:
         context.platform.limits,
         context.now_utc,
     )
+    # к площадке обращаемся только по каналам, у которых есть объекты: вход и привязка — при первом обращении
     orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform).reconcile(
         selection.planned,
         frozenset(scan.slot_map),
-        context.config.channels,
     )
     keys_path: Path | None = None
     extra_outcomes: list[PairOutcome] = []
@@ -191,7 +191,7 @@ def _run_promo(context: _RunContext) -> RunOutcome:
         outcomes=outcomes,
         orphans=[_orphan_line(orphan) for orphan in orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
-        mismatches=build_mismatch_lines(selection.planned),
+        mismatches=build_mismatch_lines(selection.planned, context.config.settings.category_id),
         warnings=build_warning_lines(selection.planned, context.form_diagnostics),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
@@ -220,7 +220,7 @@ def _execute_full(
 
 
 def _run_status(context: _RunContext) -> RunOutcome:
-    """Без promo: эфиры с маркером планера на каналах → keys.txt и отчёт."""
+    """Без пакетов: эфиры с маркером планера на каналах → keys.txt и отчёт."""
     marked: MarkedScan = Reconciler(context.platform).marked_broadcasts(context.config.channels)
     rows: list[KeyRow] = [key_row_from_marked(item) for item in marked.broadcasts]
     outcomes: list[PairOutcome] = [outcome_from_marked(item) for item in marked.broadcasts]
@@ -241,7 +241,7 @@ def _complete(context: _RunContext, report: RunReport, *, has_errors: bool) -> R
     text: str = render_report(report)
     if context.mode is not RunMode.DRY_RUN:
         # Сначала чистка, потом отчёт: свой же отчёт под неё не попадает (§5.7).
-        cleanup_expired(context.paths, context.config.keep_days, context.now_utc)
+        cleanup_expired(context.paths, context.config.settings.keep_days, context.now_utc)
     report_path: Path = write_report(context.paths, text, context.now_local)
     exit_code: ExitCode = ExitCode.ERRORS if has_errors else ExitCode.OK
     LOGGER.info("run_report mode=%s outcomes=%d exit_code=%d", report.mode.value, len(report.outcomes), int(exit_code))
@@ -299,9 +299,9 @@ def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> li
         if result.diagnostic_path is not None:
             diagnostics.append(str(result.diagnostic_path))
         LOGGER.info(
-            "form_send slot_id=%s channel=%s confirmed=%s stream_key=%s",
+            'form_send slot_id=%s channel="%s" confirmed=%s stream_key=%s',
             item.slot_id,
-            item.channel.id,
+            item.channel.account_name,
             result.confirmed,
             mask_stream_key(item.stream_key),
         )
@@ -346,7 +346,7 @@ def _one_line(text: str) -> str:
 
 
 def _log_line(item: PlannedBroadcast, fields: dict[str, object]) -> str:
-    identity: dict[str, object] = {"slot_id": item.slot_id, "channel": item.channel.id}
+    identity: dict[str, object] = {"slot_id": item.slot_id, "channel": _quoted(item.channel.account_name)}
     return " ".join(f"{key}={value}" for key, value in (identity | fields).items())
 
 
@@ -370,7 +370,7 @@ class _Executor:
             self._dispatch(item)
             self._finish(item)
         except PlatformError as error:
-            LOGGER.warning("pair_failed slot_id=%s channel=%s code=%s", item.slot_id, item.channel.id, error.code)
+            LOGGER.warning('pair_failed slot_id=%s channel="%s" code=%s', item.slot_id, item.channel.account_name, error.code)
             item.error = OutcomeError(origin=item.channel.platform.value, code=error.code, message=error.message)
             item.last_error = error.message or error.code
             item.decision = Decision.ERROR
@@ -397,9 +397,9 @@ class _Executor:
         created: CreatedBroadcast = self._platform.create_broadcast(item.channel, item.expected)
         item.take_new_key(created)
         LOGGER.info(
-            "broadcast_created slot_id=%s channel=%s broadcast_id=%s stream_key=%s",
+            'broadcast_created slot_id=%s channel="%s" broadcast_id=%s stream_key=%s',
             item.slot_id,
-            item.channel.id,
+            item.channel.account_name,
             created.broadcast_id,
             mask_stream_key(created.stream_key),
         )
@@ -417,9 +417,9 @@ class _Executor:
         item.stream_attached = True
         item.take_new_key(attached)
         LOGGER.info(
-            "stream_attached slot_id=%s channel=%s broadcast_id=%s stream_key=%s",
+            'stream_attached slot_id=%s channel="%s" broadcast_id=%s stream_key=%s',
             item.slot_id,
-            item.channel.id,
+            item.channel.account_name,
             attached.broadcast_id,
             mask_stream_key(attached.stream_key),
         )
@@ -437,9 +437,9 @@ class _Executor:
             item.expected,
         )
         LOGGER.info(
-            "broadcast_updated slot_id=%s channel=%s broadcast_id=%s fields=%s",
+            'broadcast_updated slot_id=%s channel="%s" broadcast_id=%s fields=%s',
             item.slot_id,
-            item.channel.id,
+            item.channel.account_name,
             broadcast_id,
             ",".join(changed.value for changed in item.changed_fields),
         )
@@ -468,13 +468,13 @@ class _Executor:
                 item.channel,
                 broadcast_id,
                 item.language,
-                item.channel.category_id,
+                self._context.config.settings.category_id,
             )
         except PlatformError as error:
             LOGGER.warning(
-                "video_settings_failed slot_id=%s channel=%s code=%s",
+                'video_settings_failed slot_id=%s channel="%s" code=%s',
                 item.slot_id,
-                item.channel.id,
+                item.channel.account_name,
                 error.code,
             )
             item.warn(OutcomeWarning(WARNING_STEP_SETTINGS, error.code, error.message))
@@ -483,7 +483,7 @@ class _Executor:
             item.warn(OutcomeWarning(WARNING_STEP_AUDIENCE, "fixed"))
         if fixes.category_set and item.found is not None:
             # категория была другой только у найденного эфира: у созданного её ставит планер
-            item.warn(OutcomeWarning(WARNING_STEP_CATEGORY, item.channel.category_id))
+            item.warn(OutcomeWarning(WARNING_STEP_CATEGORY, self._context.config.settings.category_id))
 
     def _read_facts(self, item: PlannedBroadcast, broadcast_id: str) -> None:
         """Один раз на объект: что по факту лежит на платформе (§5.6)."""
@@ -491,9 +491,9 @@ class _Executor:
             item.facts = self._platform.read_facts(item.channel, broadcast_id)
         except PlatformError as error:
             LOGGER.warning(
-                "facts_read_failed slot_id=%s channel=%s code=%s",
+                'facts_read_failed slot_id=%s channel="%s" code=%s',
                 item.slot_id,
-                item.channel.id,
+                item.channel.account_name,
                 error.code,
             )
             item.warn(OutcomeWarning(WARNING_STEP_FACTS, error.code, error.message))
@@ -511,15 +511,15 @@ class _Executor:
             self._platform.set_thumbnail(item.channel, broadcast_id, preview)
         except PlatformError as error:
             LOGGER.warning(
-                "thumbnail_failed slot_id=%s channel=%s code=%s",
+                'thumbnail_failed slot_id=%s channel="%s" code=%s',
                 item.slot_id,
-                item.channel.id,
+                item.channel.account_name,
                 error.code,
             )
             item.warn(OutcomeWarning(WARNING_STEP_THUMBNAIL, error.code, error.message))
 
     def _preview(self, item: PlannedBroadcast) -> bytes | None:
-        """Случайное превью слота (§5.1) — если канал ставит превью и в слоте они есть."""
-        if not item.channel.set_thumbnail or not item.slot.previews:
+        """Случайное превью слота (§5.1) — если planer.json велит ставить превью и в слоте они есть."""
+        if not self._context.config.settings.set_thumbnail or not item.slot.previews:
             return None
         return read_preview(item.source_package, self._context.rng.choice(item.slot.previews))

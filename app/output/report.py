@@ -18,7 +18,7 @@ from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import FILE_STAMP_FORMAT
 from app.core.text import normalize_description, normalize_title
 from app.form.base import FORM_CODE_NOT_CONFIRMED
-from app.package.promo import AcceptedPackage, PromoScan, PackageProblem
+from app.package.bcast import AcceptedPackage, BcastScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
 from app.paths import PlanerPaths
@@ -311,7 +311,7 @@ def _unique(lines: Iterable[SkippedLine]) -> list[SkippedLine]:
     return list(seen)
 
 
-def build_mismatch_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
+def build_mismatch_lines(planned: Sequence[PlannedBroadcast], category_id: str) -> list[str]:
     """Что хотели и что лежит на платформе (§5.6). Совпало всё — раздела в отчёте нет."""
     lines: list[str] = []
     for item in planned:
@@ -319,11 +319,11 @@ def build_mismatch_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
             continue
         prefix: str = _slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name)
         lines.extend(msg.MISMATCH_LINE.format(prefix=prefix, field=field, wanted=wanted, actual=actual)
-                     for field, wanted, actual in _mismatches(item, item.facts))
+                     for field, wanted, actual in _mismatches(item, item.facts, category_id))
     return lines
 
 
-def _mismatches(item: PlannedBroadcast, facts: BroadcastFacts) -> list[tuple[str, str, str]]:
+def _mismatches(item: PlannedBroadcast, facts: BroadcastFacts, category_id: str) -> list[tuple[str, str, str]]:
     found: list[tuple[str, str, str]] = []
     _add_if_different(found, msg.MISMATCH_FIELD_TITLE, item.expected.title, normalize_title(facts.title))
     _add_description(found, item, facts)
@@ -340,7 +340,7 @@ def _mismatches(item: PlannedBroadcast, facts: BroadcastFacts) -> list[tuple[str
     _add_if_different(
         found,
         msg.MISMATCH_FIELD_CATEGORY,
-        item.channel.category_id,
+        category_id,
         facts.category_id or MISSING_VALUE,
     )
     if facts.made_for_kids:
@@ -409,7 +409,7 @@ def write_report(paths: PlanerPaths, text: str, now_local: datetime) -> Path:
     return report_path
 
 
-def build_package_lines(scan: PromoScan, config: PlanerConfig) -> list[ReportPackageLine]:
+def build_package_lines(scan: BcastScan, config: PlanerConfig) -> list[ReportPackageLine]:
     all_past: set[Path] = {package.path for package in scan.all_past_packages}
     lines: list[ReportPackageLine] = [
         _accepted_line(item, config, is_all_past=item.package.path in all_past)
@@ -419,7 +419,7 @@ def build_package_lines(scan: PromoScan, config: PlanerConfig) -> list[ReportPac
     return lines
 
 
-def build_skipped_lines(scan: PromoScan, selection: Selection, config: PlanerConfig) -> list[SkippedLine]:
+def build_skipped_lines(scan: BcastScan, selection: Selection, config: PlanerConfig) -> list[SkippedLine]:
     """«Уже прошло» — только слоты моих языков; плюс too_late / no_channel из отбора (§7.2)."""
     entries: list[tuple[Slot, SkippedLine]] = [
         (slot, _skipped_line(SkipKind.PAST, slot))
@@ -427,7 +427,7 @@ def build_skipped_lines(scan: PromoScan, selection: Selection, config: PlanerCon
         if slot.language in config.served_languages
     ]
     entries.extend(
-        (item.slot, _skipped_line(SkipKind.TOO_LATE, item.slot, minutes=config.min_lead_minutes))
+        (item.slot, _skipped_line(SkipKind.TOO_LATE, item.slot, minutes=config.settings.min_lead_minutes))
         for item in selection.planned
         if item.is_too_late
     )

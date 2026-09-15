@@ -1,0 +1,7 @@
+{
+    "min_lead_minutes": 10,
+    "keep_days": 30,
+    "auto_start": true,
+    "set_thumbnail": true,
+    "category_id": "22"
+}

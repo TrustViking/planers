@@ -69,7 +69,7 @@ def test_two_channels_for_one_language_give_two_objects(now: datetime, make_conf
     slot: Slot = _slot(now, minutes=180, language="uk")
     config: PlanerConfig = make_config([("yt_b", ["uk"]), ("yt_a", ["uk"])])
     selection: Selection = _select(_slot_map(slot), config, now)
-    assert [item.channel.id for item in selection.planned] == ["yt_a", "yt_b"]
+    assert [item.channel.account_name for item in selection.planned] == ["yt_a", "yt_b"]
 
 
 def test_objects_are_ordered_by_start_language_and_channel(now: datetime, make_config: ConfigFactory) -> None:
@@ -77,7 +77,7 @@ def test_objects_are_ordered_by_start_language_and_channel(now: datetime, make_c
     early_uk: Slot = _slot(now, minutes=120, language="uk")
     early_ru: Slot = _slot(now, minutes=120, language="ru")
     selection: Selection = _select(_slot_map(later_en, early_uk, early_ru), make_config(), now)
-    assert [(item.slot.slot_id, item.channel.id) for item in selection.planned] == [
+    assert [(item.slot.slot_id, item.channel.account_name) for item in selection.planned] == [
         (early_ru.slot_id, "yt_ru"),
         (early_uk.slot_id, "yt_ua"),
         (later_en.slot_id, "yt_ru"),

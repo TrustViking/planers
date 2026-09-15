@@ -1,4 +1,4 @@
-"""promo\\ → единая карта слотов (ТЗ §7.1): все пакеты лежат одним списком, планер только читает их."""
+"""bcast\\ → единая карта слотов (ТЗ §7.1): все пакеты лежат одним списком, планер только читает их."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,7 +11,7 @@ from app.package.model import Package, PackageError, PackageErrorReason, Slot, s
 from app.package.reader import read_package
 from app.paths import PlanerPaths
 
-LOGGER = get_logger("promo")
+LOGGER = get_logger("bcast")
 PACKAGE_GLOB: Final[str] = "*.bcast"
 
 
@@ -31,7 +31,7 @@ class AcceptedPackage:
 
 
 @dataclass(frozen=True)
-class PromoScan:
+class BcastScan:
     packages: tuple[AcceptedPackage, ...]       # по generated_at, от старого к новому
     problems: tuple[PackageProblem, ...]
     slot_map: dict[str, Slot]                   # будущие слоты всех пакетов, новее побеждает
@@ -45,17 +45,17 @@ class PromoScan:
 
 
 def list_package_files(paths: PlanerPaths) -> list[Path]:
-    """Все *.bcast из promo\\ — подпапок там нет, читается весь список."""
-    return sorted(path for path in paths.promo_dir.glob(PACKAGE_GLOB) if path.is_file())
+    """Все *.bcast из bcast\\ — подпапок там нет, читается весь список."""
+    return sorted(path for path in paths.bcast_dir.glob(PACKAGE_GLOB) if path.is_file())
 
 
-def scan_promo(paths: PlanerPaths, now: datetime) -> PromoScan:
+def scan_bcast(paths: PlanerPaths, now: datetime) -> BcastScan:
     """Читает все пакеты, сливает слоты по slot_id (новее побеждает), отделяет прошлое."""
     packages, problems = _read_packages(list_package_files(paths))
     packages.sort(key=lambda package: (package.generated_at, package.path.name))
     merged, slot_sources = _merge_slots(packages)
     stats: tuple[AcceptedPackage, ...] = tuple(_package_stats(package, now) for package in packages)
-    scan: PromoScan = PromoScan(
+    scan: BcastScan = BcastScan(
         packages=stats,
         problems=tuple(problems),
         slot_map={slot_id: slot for slot_id, slot in merged.items() if slot.start > now},
@@ -64,7 +64,7 @@ def scan_promo(paths: PlanerPaths, now: datetime) -> PromoScan:
         slot_sources=slot_sources,
     )
     LOGGER.info(
-        "promo_scanned packages=%d problems=%d active_slots=%d past_slots=%d all_past_packages=%d",
+        "bcast_scanned packages=%d problems=%d active_slots=%d past_slots=%d all_past_packages=%d",
         len(scan.packages),
         len(scan.problems),
         len(scan.slot_map),

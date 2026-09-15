@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import Final
@@ -26,7 +27,7 @@ LOCAL_SERVER_PORT: Final[int] = 0          # 0 — любой свободный
 ACCESS_TYPE: Final[str] = "offline"        # без него Google не выдаст refresh-токен
 PROMPT: Final[str] = "consent"             # при повторной авторизации refresh-токен выдаётся заново
 TOKEN_ENCODING: Final[str] = "utf-8"
-TOKEN_FILE_TEMPLATE: Final[str] = "{channel_key}.token.json"
+TOKEN_FILE_TEMPLATE: Final[str] = "{account_name}.token.json"
 
 
 class AuthErrorReason(str, Enum):
@@ -45,31 +46,48 @@ class AuthError(Exception):
         self.detail: str = detail
 
 
-def token_file_for(secrets_dir: Path, channel_key: str) -> Path:
-    """secrets\\<channel_key>.token.json — единственный источник имени файла токена."""
-    return secrets_dir / TOKEN_FILE_TEMPLATE.format(channel_key=channel_key)
+def token_file_for(secrets_dir: Path, account_name: str) -> Path:
+    """secrets\\<account_name>.token.json — единственный источник имени файла токена."""
+    return secrets_dir / TOKEN_FILE_TEMPLATE.format(account_name=account_name)
 
 
 def load_credentials(
     client_secret_file: Path,
     token_file: Path,
+    login_hint: str,
     force_reauth: bool = False,
+    on_login: Callable[[], None] | None = None,
 ) -> Credentials:
-    """Готовые к работе учётные данные: из токена, обновлением или через браузер."""
+    """Готовые к работе учётные данные: из токена, обновлением или через браузер.
+
+    login_hint — почта аккаунта Google канала (google_account): браузер сразу предлагает этот аккаунт.
+    on_login вызывается ровно перед открытием браузера: владелец должен знать, какой канал выбирать.
+    """
     if not client_secret_file.is_file():
         raise AuthError(AuthErrorReason.CLIENT_SECRET_MISSING, str(client_secret_file))
     if force_reauth:
         _drop_token(token_file)
-        return _run_flow(client_secret_file, token_file)
+        return _login(client_secret_file, token_file, login_hint, on_login)
     credentials: Credentials | None = _load_token(token_file)
     if credentials is None:
-        return _run_flow(client_secret_file, token_file)
+        return _login(client_secret_file, token_file, login_hint, on_login)
     if credentials.valid:
         return credentials
     refreshed: Credentials | None = _refresh(credentials, token_file)
     if refreshed is not None:
         return refreshed
-    return _run_flow(client_secret_file, token_file)
+    return _login(client_secret_file, token_file, login_hint, on_login)
+
+
+def _login(
+    client_secret_file: Path,
+    token_file: Path,
+    login_hint: str,
+    on_login: Callable[[], None] | None,
+) -> Credentials:
+    if on_login is not None:
+        on_login()
+    return _run_flow(client_secret_file, token_file, login_hint)
 
 
 def _drop_token(token_file: Path) -> None:
@@ -106,7 +124,7 @@ def _refresh(credentials: Credentials, token_file: Path) -> Credentials | None:
     return credentials
 
 
-def _run_flow(client_secret_file: Path, token_file: Path) -> Credentials:
+def _run_flow(client_secret_file: Path, token_file: Path, login_hint: str) -> Credentials:
     try:
         flow: InstalledAppFlow = InstalledAppFlow.from_client_secrets_file(
             str(client_secret_file),
@@ -116,6 +134,7 @@ def _run_flow(client_secret_file: Path, token_file: Path) -> Credentials:
             port=LOCAL_SERVER_PORT,
             access_type=ACCESS_TYPE,
             prompt=PROMPT,
+            login_hint=login_hint,
         )
     except (OSError, ValueError, RefreshError, TransportError) as error:
         raise AuthError(AuthErrorReason.FLOW_FAILED, str(error)) from error

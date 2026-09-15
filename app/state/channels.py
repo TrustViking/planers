@@ -1,7 +1,8 @@
-"""Привязки каналов state\\channels.json (ТЗ §5.3): какой YouTube-канал за каким токеном.
+"""Привязки каналов app\\state\\bindings.json (ТЗ §5.3): какой YouTube-канал за каким account_name.
 
-Защита от «авторизовался не тем аккаунтом»: после первой авторизации ключ канала из
-channels.yaml намертво связан с youtube_channel_id. Только runtime-данные, запись атомарная.
+Защита от «вошёл не тем аккаунтом»: при первом обращении к каналу его account_name из
+channels.json намертво связывается с youtube_channel_id. Один YouTube-канал — одно имя.
+Только runtime-данные, запись атомарная.
 """
 from __future__ import annotations
 
@@ -11,14 +12,15 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
 
 from app.core.dates import format_datetime_text, parse_datetime_text
 
-CHANNELS_SCHEMA_VERSION: Final[int] = 1
-CHANNELS_ENCODING: Final[str] = "utf-8"
+BINDINGS_SCHEMA_VERSION: Final[int] = 1
+BINDINGS_ENCODING: Final[str] = "utf-8"
 JSON_INDENT: Final[int] = 2
 TEMP_SUFFIX: Final[str] = ".tmp"
 BINDINGS_SECTION: Final[str] = "channels"
@@ -28,11 +30,18 @@ class ChannelsStateError(Exception):
     """Файл привязок не читается: битый JSON, неизвестная версия, неверная структура."""
 
 
+class BindingVerdict(str, Enum):
+    NEW = "new"            # имени ещё нет, YouTube-канал свободен — записать привязку
+    SAME = "same"          # имя уже привязано к этому же YouTube-каналу
+    MISMATCH = "mismatch"  # имя привязано к другому YouTube-каналу
+    TAKEN = "taken"        # этот YouTube-канал записан под другим именем
+
+
 @dataclass(frozen=True)
 class ChannelBinding:
-    channel_key: str          # id канала из config\channels.yaml
+    account_name: str         # account_name канала из config\channels.json
     youtube_channel_id: str   # настоящий id канала на YouTube
-    title: str                # название канала на YouTube на момент авторизации
+    title: str                # название канала на YouTube на момент привязки
     authorized_at: datetime
 
 
@@ -52,7 +61,7 @@ class ChannelBindings:
         payload: dict[str, Any] = _read_payload(path)
         section: Any = payload.get(BINDINGS_SECTION, {})
         if not isinstance(section, dict):
-            raise ChannelsStateError(f"channels state {BINDINGS_SECTION} is not an object: {path}")
+            raise ChannelsStateError(f"bindings {BINDINGS_SECTION} is not an object: {path}")
         return cls(
             bindings={
                 str(key): _binding_from_json(str(key), raw, path=path) for key, raw in section.items()
@@ -61,30 +70,45 @@ class ChannelBindings:
 
     def save(self, path: Path) -> None:
         payload: dict[str, Any] = {
-            "schema_version": CHANNELS_SCHEMA_VERSION,
+            "schema_version": BINDINGS_SCHEMA_VERSION,
             BINDINGS_SECTION: {
                 key: _binding_to_json(binding) for key, binding in self._bindings.items()
             },
         }
         _write_atomically(path, json.dumps(payload, ensure_ascii=False, indent=JSON_INDENT) + "\n")
 
-    def get(self, channel_key: str) -> ChannelBinding | None:
-        return self._bindings.get(channel_key)
+    def get(self, account_name: str) -> ChannelBinding | None:
+        return self._bindings.get(account_name)
+
+    def find_by_youtube_channel_id(self, youtube_channel_id: str) -> ChannelBinding | None:
+        for binding in self._bindings.values():
+            if binding.youtube_channel_id == youtube_channel_id:
+                return binding
+        return None
+
+    def verdict(self, account_name: str, youtube_channel_id: str) -> BindingVerdict:
+        """Сначала своё имя, потом чужое: переименованный канал — это TAKEN, а не NEW."""
+        known: ChannelBinding | None = self.get(account_name)
+        if known is not None:
+            return BindingVerdict.SAME if known.youtube_channel_id == youtube_channel_id else BindingVerdict.MISMATCH
+        if self.find_by_youtube_channel_id(youtube_channel_id) is not None:
+            return BindingVerdict.TAKEN
+        return BindingVerdict.NEW
 
     def upsert(self, binding: ChannelBinding) -> None:
-        self._bindings[binding.channel_key] = binding
+        self._bindings[binding.account_name] = binding
 
 
 def _read_payload(path: Path) -> dict[str, Any]:
     try:
-        payload: Any = json.loads(path.read_text(encoding=CHANNELS_ENCODING))
+        payload: Any = json.loads(path.read_text(encoding=BINDINGS_ENCODING))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ChannelsStateError(f"channels state unreadable: {path}: {error}") from error
+        raise ChannelsStateError(f"bindings unreadable: {path}: {error}") from error
     if not isinstance(payload, dict):
-        raise ChannelsStateError(f"channels state root is not an object: {path}")
+        raise ChannelsStateError(f"bindings root is not an object: {path}")
     version: Any = payload.get("schema_version")
-    if type(version) is not int or version != CHANNELS_SCHEMA_VERSION:
-        raise ChannelsStateError(f"unsupported channels state schema_version={version!r}: {path}")
+    if type(version) is not int or version != BINDINGS_SCHEMA_VERSION:
+        raise ChannelsStateError(f"unsupported bindings schema_version={version!r}: {path}")
     return payload
 
 
@@ -95,8 +119,8 @@ def _text(raw: dict[str, Any], name: str, *, where: str) -> str:
     return value
 
 
-def _binding_from_json(channel_key: str, raw: Any, *, path: Path) -> ChannelBinding:
-    where: str = f"{channel_key} ({path})"
+def _binding_from_json(account_name: str, raw: Any, *, path: Path) -> ChannelBinding:
+    where: str = f"{account_name!r} ({path})"
     if not isinstance(raw, dict):
         raise ChannelsStateError(f"channel binding {where} is not an object")
     authorized_text: str = _text(raw, "authorized_at", where=where)
@@ -105,7 +129,7 @@ def _binding_from_json(channel_key: str, raw: Any, *, path: Path) -> ChannelBind
     except ValueError as error:
         raise ChannelsStateError(f"channel binding {where}: authorized_at={authorized_text!r}") from error
     return ChannelBinding(
-        channel_key=channel_key,
+        account_name=account_name,
         youtube_channel_id=_text(raw, "youtube_channel_id", where=where),
         title=_text(raw, "title", where=where),
         authorized_at=authorized_at,
@@ -126,7 +150,7 @@ def _write_atomically(path: Path, text: str) -> None:
     file_descriptor, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}_", suffix=TEMP_SUFFIX)
     temp_path: Path = Path(temp_name)
     try:
-        with os.fdopen(file_descriptor, "w", encoding=CHANNELS_ENCODING, newline="\n") as handle:
+        with os.fdopen(file_descriptor, "w", encoding=BINDINGS_ENCODING, newline="\n") as handle:
             handle.write(text)
         os.replace(temp_path, path)
     except BaseException:

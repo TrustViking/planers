@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from app.config.loader import ChannelConfig, Platform, PlanerConfig, Privacy
+from app.config.loader import ChannelConfig, Platform, PlanerConfig, PlanerSettings, Privacy
 from app.core.dates import build_slot_id, format_date, format_time, parse_date, parse_time
 from app.form.base import FormSendResult
 from app.package.model import FormSpec, Package, Slot
@@ -78,22 +78,28 @@ def build_config(
     *,
     min_lead_minutes: int = 60,
     keep_days: int = 30,
+    auto_start: bool = True,
+    set_thumbnail: bool = True,
+    category_id: str = "22",
 ) -> PlanerConfig:
+    """Каналы — пары (account_name, языки); настройки — как в config\\planer.json."""
     return PlanerConfig(
-        min_lead_minutes=min_lead_minutes,
-        keep_days=keep_days,
+        settings=PlanerSettings(
+            min_lead_minutes=min_lead_minutes,
+            keep_days=keep_days,
+            auto_start=auto_start,
+            set_thumbnail=set_thumbnail,
+            category_id=category_id,
+        ),
         channels=tuple(
             ChannelConfig(
-                id=channel_id,
                 platform=Platform.YOUTUBE,
-                account_name=f"Account {channel_id}",
+                account_name=account_name,
+                google_account="owner@gmail.com",
                 languages=tuple(languages),
                 privacy=Privacy.PUBLIC,
-                auto_start=True,
-                set_thumbnail=True,
-        category_id="22",
             )
-            for channel_id, languages in channels
+            for account_name, languages in channels
         ),
     )
 
@@ -169,7 +175,7 @@ def build_planned(
 @dataclass(frozen=True)
 class FormCall:
     slot_id: str
-    channel_id: str
+    account_name: str
     stream_key: str | None
     form_url: str
 
@@ -183,7 +189,7 @@ class FakeFormSender:
         self.calls: list[FormCall] = []
 
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
-        self.calls.append(FormCall(planned.slot_id, planned.channel.id, planned.stream_key, planned.form.url))
+        self.calls.append(FormCall(planned.slot_id, planned.account_name, planned.stream_key, planned.form.url))
         return FormSendResult(confirmed=self.confirmed, error=self.error)
 
 
@@ -213,13 +219,15 @@ def make_slot_object() -> Callable[..., Slot]:
 
 
 @pytest.fixture
-def repo_config_example() -> Path:
-    return REPO_ROOT / "config" / "planer.example.yaml"
+def repo_planer_config() -> Path:
+    """config\\planer.json репо — единственный источник и для dev, и для сборки."""
+    return REPO_ROOT / "config" / "planer.json"
 
 
 @pytest.fixture
 def repo_channels_example() -> Path:
-    return REPO_ROOT / "config" / "channels.example.yaml"
+    """Шаблон каналов для репозитория и README; в коде приложения не упоминается."""
+    return REPO_ROOT / "app" / "examples" / "channels.example.json"
 
 
 @pytest.fixture

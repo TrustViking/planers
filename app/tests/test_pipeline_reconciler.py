@@ -305,7 +305,7 @@ def test_marker_of_slot_outside_the_map_is_an_orphan(
     moved_broadcast: UpcomingBroadcast = _seed_like(fake_platform, "yt_ua", moved)
     [item] = _objects(make_config(), slot)
     [orphan] = _reconcile(fake_platform, make_config(), item)
-    assert (orphan.channel.id, orphan.broadcast, orphan.marker) == ("yt_ua", moved_broadcast, moved.slot_id)
+    assert (orphan.channel.account_name, orphan.broadcast, orphan.marker) == ("yt_ua", moved_broadcast, moved.slot_id)
     assert split_marker(orphan.marker) == MarkerParts(date="19-03-2027", time="12:00", language="uk")
     assert item.decision is Decision.CREATE
 

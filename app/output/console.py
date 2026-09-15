@@ -2,7 +2,8 @@
 
 У каждой поверхности свой читатель: консоль — короткая сводка без markdown, отчёт в logs\\ —
 подробности, лог — диагностика для разработки. Счётчики — из build_totals, те же, что в «Итоге» отчёта.
-Подробности у счётчика — только у ненулевого; ошибки и предупреждения — всегда полным текстом.
+Подробности у счётчика — только у ненулевого; под «создано», «исправлено», «совпадает» — строка на каждый
+исход; ошибки и предупреждения — всегда полным текстом.
 """
 from __future__ import annotations
 
@@ -32,7 +33,6 @@ from app.output.report import (
 )
 from app.ui import messages_ru as msg
 
-SINGLE_ITEM: Final[int] = 1   # у счётчика из одного исхода подробность — сам исход
 _TITLES: Final[dict[RunMode, str]] = {
     RunMode.FULL: msg.CONSOLE_TITLE,
     RunMode.DRY_RUN: msg.CONSOLE_TITLE_DRY_RUN,
@@ -70,7 +70,8 @@ def _counter(label: str, count: int, detail: str = "") -> str:
 def _counter_lines(report: RunReport, totals: RunTotals) -> list[str]:
     if report.mode is RunMode.STATUS:
         return [
-            _counter(msg.CONSOLE_LABEL_SCHEDULED, totals.matched, _single_detail(report, frozenset({OutcomeKind.MATCHED}), _prefix_only)),
+            _counter(msg.CONSOLE_LABEL_SCHEDULED, totals.matched),
+            *_outcome_lines(report, frozenset({OutcomeKind.MATCHED}), _prefix_only),
             _counter(msg.CONSOLE_LABEL_ERRORS, totals.errors),
         ]
     is_dry_run: bool = report.mode is RunMode.DRY_RUN
@@ -79,14 +80,17 @@ def _counter_lines(report: RunReport, totals: RunTotals) -> list[str]:
         _counter(
             msg.CONSOLE_LABEL_CREATE_PLANNED if is_dry_run else msg.CONSOLE_LABEL_CREATED,
             totals.created,
-            _created_detail(report, totals, is_dry_run=is_dry_run),
+            "" if is_dry_run else msg.CONSOLE_FORMS_SENT.format(sent=totals.form_sent, total=totals.created),
         ),
-        _counter(
-            msg.CONSOLE_LABEL_FIX_PLANNED if is_dry_run else msg.CONSOLE_LABEL_FIXED,
-            totals.fixed,
-            _single_detail(report, frozenset({OutcomeKind.FIXED}), _fix_planned_detail if is_dry_run else _fixed_detail),
+        *_outcome_lines(report, CREATED_OUTCOME_KINDS, _prefix_only if is_dry_run else _created_one_detail),
+        _counter(msg.CONSOLE_LABEL_FIX_PLANNED if is_dry_run else msg.CONSOLE_LABEL_FIXED, totals.fixed),
+        *_outcome_lines(
+            report,
+            frozenset({OutcomeKind.FIXED}),
+            _fix_planned_detail if is_dry_run else _fixed_detail,
         ),
-        _counter(msg.CONSOLE_LABEL_MATCHED, totals.matched, _single_detail(report, frozenset({OutcomeKind.MATCHED}), _prefix_only)),
+        _counter(msg.CONSOLE_LABEL_MATCHED, totals.matched),
+        *_outcome_lines(report, frozenset({OutcomeKind.MATCHED}), _prefix_only),
         _counter(msg.CONSOLE_LABEL_SKIPPED, totals.skipped, _skipped_detail(report.skipped)),
         _counter(msg.CONSOLE_LABEL_ERRORS, totals.errors),
     ]
@@ -99,18 +103,13 @@ def _packages_detail(totals: RunTotals) -> str:
     return msg.CONSOLE_DETAIL_JOINER.join(parts)
 
 
-def _created_detail(report: RunReport, totals: RunTotals, *, is_dry_run: bool) -> str:
-    if totals.created == SINGLE_ITEM:
-        return _single_detail(report, CREATED_OUTCOME_KINDS, _prefix_only if is_dry_run else _created_one_detail)
-    if is_dry_run:
-        return ""
-    return msg.CONSOLE_FORMS_SENT.format(sent=totals.form_sent, total=totals.created)
-
-
-def _single_detail(report: RunReport, kinds: frozenset[OutcomeKind], render: Callable[[PairOutcome], str]) -> str:
-    """Подробность — сам исход, если он один; при нескольких подробности в отчёте."""
-    matching: list[PairOutcome] = [outcome for outcome in report.outcomes if outcome.kind in kinds]
-    return render(matching[0]) if len(matching) == SINGLE_ITEM else ""
+def _outcome_lines(report: RunReport, kinds: frozenset[OutcomeKind], render: Callable[[PairOutcome], str]) -> list[str]:
+    """Строка на каждый исход этих видов, в колонке подробностей счётчика; исходов нет — строк нет."""
+    return [
+        msg.CONSOLE_OUTCOME.format(detail=render(outcome))
+        for outcome in report.outcomes
+        if outcome.kind in kinds
+    ]
 
 
 def _prefix_only(outcome: PairOutcome) -> str:
@@ -118,10 +117,11 @@ def _prefix_only(outcome: PairOutcome) -> str:
 
 
 def _created_one_detail(outcome: PairOutcome) -> str:
-    if outcome.form is None:
+    """Норму («ключ передан в форму: N из M») несёт сводка на строке счётчика «создано»;
+    строка эфира отмечает только то, что от нормы отличается, — ключ в форму не ушёл."""
+    if outcome.form is None or outcome.form is FormState.SENT:
         return outcome_prefix(outcome)
-    mark: str = msg.FORM_MARK_SENT if outcome.form is FormState.SENT else msg.CONSOLE_FORM_NOT_SENT
-    return msg.CONSOLE_DETAIL_JOINER.join((outcome_prefix(outcome), mark))
+    return msg.CONSOLE_DETAIL_JOINER.join((outcome_prefix(outcome), msg.CONSOLE_FORM_NOT_SENT))
 
 
 def _fixed_detail(outcome: PairOutcome) -> str:

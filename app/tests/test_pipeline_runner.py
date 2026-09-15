@@ -73,7 +73,7 @@ def test_full_create_registers_and_confirms_form(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk", previews=2)])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk", previews=2)])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
     [created] = fake_platform.created
@@ -81,9 +81,9 @@ def test_full_create_registers_and_confirms_form(
     assert thumbnail.preview == b"x"
     assert fake_platform.languages == {created.broadcast_id: "uk"}
     [form_call] = form_sender.calls
-    assert (form_call.slot_id, form_call.channel_id, form_call.form_url) == (UK_SLOT, "yt_ua", FORM_SPEC["url"])
+    assert (form_call.slot_id, form_call.account_name, form_call.form_url) == (UK_SLOT, "yt_ua", FORM_SPEC["url"])
     keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
-    assert "fake-0001-0000-0000-0000" in keys_text and "форма  передан " in keys_text
+    assert "fake-0001-0000-0000-0000" in keys_text and "форма  отправлен в форму " in keys_text
     assert outcome.report is not None
     [pair_outcome] = outcome.report.outcomes
     assert (pair_outcome.kind, pair_outcome.form) == (OutcomeKind.CREATED, FormState.SENT)
@@ -95,7 +95,7 @@ def test_full_create_failure_is_an_error_and_sends_nothing(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     fake_platform.fail_create[UK_SLOT] = PlatformError("liveStreamingNotEnabled", "на канале не включены трансляции")
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.ERRORS
@@ -109,27 +109,27 @@ def test_failed_form_is_reported_and_never_retried(
     fake_platform: FakePlatform, now: datetime, rng: random.Random,
 ) -> None:
     """Новый ключ не дошёл — код 1; следующий запуск видит тот же эфир с тем же ключом и в форму не шлёт."""
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     sender: FakeFormSender = FakeFormSender(confirmed=False, error="ошибка сети")
     first: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
     assert first.exit_code == ExitCode.ERRORS
     assert first.report is not None and first.report.outcomes[0].form is FormState.FAILED
-    assert "форма  НЕ передан — отправка не удалась (ошибка сети)" in planer_paths.keys_file.read_text(encoding="utf-8")
+    assert "форма  НЕ отправлен: отправка не удалась (ошибка сети) — передайте стримеру вручную" in planer_paths.keys_file.read_text(encoding="utf-8")
     assert "повторно планер его не отправит" in _report_text(first)
     second: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
     assert len(sender.calls) == 1                      # повтора нет: ключ прежний
     assert second.exit_code == ExitCode.OK
     assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.MATCHED
-    assert "ключ прежний, в этом запуске не передавался" in planer_paths.keys_file.read_text(encoding="utf-8")
+    assert "эфир уже стоял, ключ не менялся — в форму не отправляется" in planer_paths.keys_file.read_text(encoding="utf-8")
 
 
-def test_processed_package_stays_in_promo(
+def test_processed_package_stays_in_bcast(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     """Планер пакеты не двигает и не удаляет: обработанный остаётся там же (§7.1)."""
     path: Path = make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         slots=[make_slot("15-03-2027", "19:00", "uk"), make_slot("17-03-2027", "19:00", "hu"), make_slot("17-03-2027", "19:00", "uk")],
     )
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
@@ -145,14 +145,14 @@ def test_each_slot_uses_the_form_url_of_its_own_package(
     old_url: str = "https://forms.gle/OldFormAAA"
     new_url: str = "https://forms.gle/NewFormBBB"
     make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         generated_at="13-09-2026 10:15",
         file_name="old.bcast",
         form={**FORM_SPEC, "url": old_url},
         slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "uk")],
     )
     make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         generated_at="14-09-2026 09:00",
         file_name="new.bcast",
         form={**FORM_SPEC, "url": new_url},
@@ -163,12 +163,12 @@ def test_each_slot_uses_the_form_url_of_its_own_package(
     assert urls == {"17-03-2027_1900_uk": old_url, "18-03-2027_1900_uk": new_url}
 
 
-def test_too_late_slot_keeps_package_in_promo(
+def test_too_late_slot_keeps_package_in_bcast(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     path: Path = make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         slots=[make_slot("16-03-2027", "12:30", "uk"), make_slot("17-03-2027", "19:00", "uk")],
     )
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
@@ -182,7 +182,7 @@ def test_missing_broadcast_is_a_plain_create(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     """Эфира на площадке нет: обычное создание, без «заново» и без истории id."""
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
     assert "recreate" not in {decision.value for decision in Decision}
@@ -197,7 +197,7 @@ def test_matched_key_comes_from_the_platform(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT, stream_key=PLATFORM_KEY
     )
@@ -205,7 +205,7 @@ def test_matched_key_comes_from_the_platform(
     assert outcome.exit_code == ExitCode.OK
     keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
     assert PLATFORM_KEY in keys_text
-    assert "ключ прежний, в этом запуске не передавался" in keys_text
+    assert "эфир уже стоял, ключ не менялся — в форму не отправляется" in keys_text
     assert form_sender.calls == [] and fake_platform.created == []
     assert outcome.report is not None
     [pair_outcome] = outcome.report.outcomes
@@ -218,13 +218,13 @@ def test_matched_broadcast_is_never_sent_to_the_form(
 ) -> None:
     """Прошлая отправка не подтвердилась — всё равно не шлём: повтор задвоил бы ключ у стримера."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     fake_platform.seed_broadcast("yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT)
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert form_sender.calls == []
     assert outcome.exit_code == ExitCode.OK            # отсутствие отправки по совпавшему эфиру — не ошибка
     assert len(_kept_key_lines(outcome)) == 1
-    assert "повторно в форму он не отправляется" in _report_text(outcome)
+    assert "эфир уже стоял, ключ не менялся — в форму не отправляется" in _report_text(outcome)
 
 
 def test_two_packages_with_one_slot_give_one_object_per_channel(
@@ -233,9 +233,9 @@ def test_two_packages_with_one_slot_give_one_object_per_channel(
 ) -> None:
     """Слоты сливаются по slot_id ДО размножения по каналам: два пакета — один эфир."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, file_name="old.bcast", generated_at="13-09-2026 10:15", slots=[spec])
+    make_package(planer_paths.bcast_dir, file_name="old.bcast", generated_at="13-09-2026 10:15", slots=[spec])
     newer: dict[str, Any] = dict(spec, title="Новое название")
-    make_package(planer_paths.promo_dir, file_name="new.bcast", generated_at="14-09-2026 09:00", slots=[newer])
+    make_package(planer_paths.bcast_dir, file_name="new.bcast", generated_at="14-09-2026 09:00", slots=[newer])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None
     assert len(outcome.report.outcomes) == 1
@@ -250,7 +250,7 @@ def test_broadcast_without_stream_is_reported_and_gets_no_key(
 ) -> None:
     """Эфир есть, потока нет: планер привязывает поток и получает ключ (§7.3)."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=None
     )
@@ -269,7 +269,7 @@ def test_package_fields_of_the_object_survive_the_whole_run(
 ) -> None:
     """Поля из пакета задаются в конструкторе и не переприсваиваются ни сверкой, ни действиями."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     # эфир без потока: привязка даёт новый ключ, значит объект дойдёт до формы
     fake_platform.seed_broadcast("yt_ua", UK_START, "Другое название", "Другое описание", marker=None)
     captured: list[PlannedBroadcast] = []
@@ -289,7 +289,7 @@ def test_package_fields_of_the_object_survive_the_whole_run(
     assert item.slot.slot_id == UK_SLOT
     assert item.slot.title == spec["title"]                    # слот не переписан текстами с площадки
     assert item.expected.title == spec["title"]
-    assert item.channel.id == "yt_ua"
+    assert item.channel.account_name == "yt_ua"
     assert item.source_package.path.name.endswith(".bcast")
     assert item.actual is not None and item.actual.title == "Другое название"
 
@@ -298,7 +298,7 @@ def test_too_late_slot_reads_its_key_from_the_platform_and_writes_nothing(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     """Слот внутри min_lead_minutes: ключ с площадки остаётся в keys.txt, действий нет (§5.5, §7.2)."""
-    make_package(planer_paths.promo_dir, slots=[make_slot("16-03-2027", "12:30", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("16-03-2027", "12:30", "uk")])
     soon_start: datetime = datetime.fromisoformat("2027-03-16T12:30:00+02:00")
     fake_platform.seed_broadcast(
         "yt_ua", soon_start, "Другое название", "", marker="16-03-2027_1230_uk", stream_key="soon-soon-soon-soon-soon"
@@ -320,7 +320,7 @@ def test_too_late_slot_without_broadcast_has_no_key_row(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("16-03-2027", "12:30", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("16-03-2027", "12:30", "uk")])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
     assert fake_platform.created == [] and form_sender.calls == []
@@ -332,7 +332,7 @@ def test_thumbnail_failure_is_a_warning_not_an_error(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk", previews=1)])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk", previews=1)])
     fake_platform.fail_thumbnail["fakebc00001"] = PlatformError("forbidden", "канал не подтверждён")
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
@@ -344,7 +344,7 @@ def test_video_settings_failure_is_a_warning_not_an_error(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     fake_platform.fail_settings["fakebc00001"] = PlatformError("forbidden", "нельзя")
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
@@ -355,7 +355,7 @@ def test_language_is_set_from_the_slot(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "ru")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "ru")])
     _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert fake_platform.languages == {"fakebc00001": "ru"}
 
@@ -365,7 +365,7 @@ def test_attach_failure_stays_an_error(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=None
     )
@@ -380,7 +380,7 @@ def test_second_run_matches_without_writes(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     """Второй прогон по тому же слоту: ни одного создания и исправления."""
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert len(fake_platform.created) == 1 and fake_platform.updated == []
@@ -394,7 +394,7 @@ def test_fix_keeps_key_and_url(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, "Старое название", spec["description"], marker=UK_SLOT,
         stream_key="abcd-abcd-abcd-abcd-abcd",
@@ -406,7 +406,7 @@ def test_fix_keeps_key_and_url(
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.FIXED
     assert form_sender.calls == []                     # исправление текстов ключ не трогает и в форму не шлёт
     assert outcome.exit_code == ExitCode.OK
-    assert "обновлено. Ключ и ссылка прежние" in _report_text(outcome)
+    assert "обновлено, ключ и ссылка не менялись" in _report_text(outcome)
 
 
 def test_one_failed_object_does_not_block_the_others(
@@ -414,7 +414,7 @@ def test_one_failed_object_does_not_block_the_others(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "ru")],
     )
     fake_platform.fail_create[UK_SLOT] = PlatformError("liveStreamingNotEnabled", "выключены")
@@ -428,7 +428,7 @@ def test_made_for_kids_is_fixed_and_warned(
 ) -> None:
     """Настройка канала может перебить флаг: планер снимает его и говорит об этом владельцу."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT,
     )
@@ -443,7 +443,7 @@ def test_audience_failure_is_a_warning_too(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     fake_platform.fail_settings["fakebc00001"] = PlatformError("forbidden", "нельзя")
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
@@ -456,7 +456,7 @@ def test_age_restricted_broadcast_is_reported_but_not_an_error(
 ) -> None:
     """Возрастное ограничение через API не снимается — только сказать владельцу."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT,
     )
@@ -471,7 +471,7 @@ def test_facts_are_read_once_per_object(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "ru")],
     )
     _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
@@ -486,7 +486,7 @@ def test_facts_are_not_read_for_too_late_and_ambiguous(
     """too_late и AMBIGUOUS — не эфиры планера: их не трогают."""
     soon: dict[str, Any] = make_slot("16-03-2027", "12:30", "uk")
     ambiguous: dict[str, Any] = make_slot("18-03-2027", "19:00", "ru")
-    make_package(planer_paths.promo_dir, slots=[soon, ambiguous])
+    make_package(planer_paths.bcast_dir, slots=[soon, ambiguous])
     start: datetime = datetime.fromisoformat("2027-03-18T19:00:00+02:00")
     fake_platform.seed_broadcast("yt_ru", start, "Ручной 1", "", marker=None)
     fake_platform.seed_broadcast("yt_ru", start, "Ручной 2", "", marker="Мой поток")
@@ -500,7 +500,7 @@ def test_matching_broadcast_has_no_mismatch_section(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None and outcome.report.mismatches == []
     assert "Расхождения с платформой" not in _report_text(outcome)
@@ -512,7 +512,7 @@ def test_full_match_reports_no_mismatch_at_all(
 ) -> None:
     """Регрессия на живой случай 13-09-2026: время, тексты и маркер совпали — расхождений нет."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     [created] = fake_platform.created
     facts = fake_platform.read_facts(make_config().channels[0], created.broadcast_id)
@@ -529,7 +529,7 @@ def test_description_mismatch_is_reported_shortened(
     """Описание в отчёт целиком не выводится: длина и начало."""
     long_text: str = "Очень длинное описание эфира. " * 40
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk", description=long_text)
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], long_text, marker=UK_SLOT,
     )
@@ -562,7 +562,7 @@ def test_expected_and_actual_log_lines_share_keys(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Наборы ключей не должны разъезжаться: сравнивать строки иначе бессмысленно."""
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     with caplog.at_level("INFO"):
         _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     lines: dict[str, str] = {
@@ -580,15 +580,24 @@ def test_expected_and_actual_log_lines_share_keys(
     assert "description_head" in keys["broadcast_expected"]
     assert "made_for_kids" in keys["broadcast_facts"]
 
-def test_category_of_the_channel_is_used_everywhere(
+def test_category_from_planer_json_is_used_everywhere(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    """Категория берётся из channels.yaml и при создании, и при настройке ресурса видео."""
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
-    _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    """Категория берётся из planer.json — одна на все каналы — и при создании, и при настройке ресурса видео."""
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    _run(RunMode.FULL, planer_paths, make_config(category_id="25"), fake_platform, form_sender, now, rng)
     [created] = fake_platform.created
-    assert fake_platform.categories[created.broadcast_id] == "22"
+    assert fake_platform.categories[created.broadcast_id] == "25"
+
+
+def test_set_thumbnail_false_in_planer_json_skips_preview(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk", previews=2)])
+    _run(RunMode.FULL, planer_paths, make_config(set_thumbnail=False), fake_platform, form_sender, now, rng)
+    assert len(fake_platform.created) == 1 and fake_platform.thumbnails == []
 
 
 def test_video_resource_is_touched_once_per_broadcast(
@@ -596,7 +605,7 @@ def test_video_resource_is_touched_once_per_broadcast(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     """Регрессия: раньше по каждому эфиру ресурс видео читался трижды."""
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     [created] = fake_platform.created
     assert fake_platform.settings_calls == [created.broadcast_id]
@@ -608,7 +617,7 @@ def test_second_run_writes_no_video_settings(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     """Совпало всё — запись не делается: чтение есть, записи нет."""
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     writes_after_first: int = len(fake_platform.settings_writes)
     _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
@@ -621,7 +630,7 @@ def test_category_mismatch_is_reported(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT,
     )
@@ -650,7 +659,7 @@ def test_live_chat_is_warned_once_per_run(
 ) -> None:
     """Чат отключается в Студии на весь канал, поэтому строка одна, а не по разу на эфир."""
     make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "ru")],
     )
     first: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
@@ -669,7 +678,7 @@ def test_no_live_chat_no_warning(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None
     assert [line for line in outcome.report.warnings if "живой чат" in line] == []
@@ -681,7 +690,7 @@ def test_facts_without_start_give_no_time_mismatch(
 ) -> None:
     """Нет времени в фактах — сравнивать не с чем; прочерк владелец читал бы как расхождение."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
-    make_package(planer_paths.promo_dir, slots=[spec])
+    make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT,
     )
@@ -709,7 +718,7 @@ def test_unconfirmed_form_keeps_pending_and_exits_1(
 ) -> None:
     """Два объекта: одному форма подтверждена, другому нет — код выхода 1, ключ не потерян."""
     make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "ru")],
     )
     sender: _PartialFormSender = _PartialFormSender(confirmed_slot_id=UK_SLOT)
@@ -724,7 +733,7 @@ def test_all_past_package_stays_and_is_reported(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    path: Path = make_package(planer_paths.promo_dir, slots=[make_slot("14-03-2027", "19:00", "uk")])
+    path: Path = make_package(planer_paths.bcast_dir, slots=[make_slot("14-03-2027", "19:00", "uk")])
     dry: RunOutcome = _run(RunMode.DRY_RUN, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert path.exists()
     assert dry.report is not None and dry.report.packages[0].status is PackageLineStatus.ALL_PAST
@@ -737,7 +746,7 @@ def test_dry_run_changes_nothing(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    path: Path = make_package(planer_paths.promo_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    path: Path = make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     outcome: RunOutcome = _run(RunMode.DRY_RUN, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.OK
     assert path.exists()
@@ -766,15 +775,15 @@ def test_status_lists_marked_broadcasts_into_keys_file(
     lines: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").splitlines()
     blocks: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").split("\n\n")[1:]
     assert len(lines) == 3 + 2 * 6                   # шапка и два блока: пустая строка, заголовок, 4 поля
-    assert "  ключ   aaaa-aaaa-aaaa-aaaa-aaaa" in blocks[0] and "ключ прежний, в этом запуске не передавался" in blocks[0]
-    assert "  ключ   bbbb-bbbb-bbbb-bbbb-bbbb" in blocks[1] and "ключ прежний, в этом запуске не передавался" in blocks[1]
+    assert "  ключ   aaaa-aaaa-aaaa-aaaa-aaaa" in blocks[0] and "эфир уже стоял, ключ не менялся — в форму не отправляется" in blocks[0]
+    assert "  ключ   bbbb-bbbb-bbbb-bbbb-bbbb" in blocks[1] and "эфир уже стоял, ключ не менялся — в форму не отправляется" in blocks[1]
     assert outcome.report is not None
     assert [item.kind for item in outcome.report.outcomes] == [OutcomeKind.MATCHED, OutcomeKind.MATCHED]
 
 
-def test_empty_promo_exits_3(
+def test_empty_bcast_exits_3(
     planer_paths: PlanerPaths, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
     outcome: RunOutcome = _run(RunMode.DRY_RUN, planer_paths, make_config(), fake_platform, form_sender, now, rng)
-    assert (outcome.exit_code, outcome.problem) == (ExitCode.PROMO_EMPTY, RunProblem.PROMO_EMPTY)
+    assert (outcome.exit_code, outcome.problem) == (ExitCode.BCAST_EMPTY, RunProblem.BCAST_EMPTY)

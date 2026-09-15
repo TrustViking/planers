@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
@@ -16,7 +17,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
 
-from app.config.loader import ChannelConfig
+from app.config.loader import ChannelConfig, PlanerSettings
 from app.google.api_retry import GoogleApiRetryPolicy, execute_with_retry
 from app.google.auth import AuthError, load_credentials, token_file_for
 from app.observability.logging_setup import get_logger, mask_stream_key
@@ -94,11 +95,23 @@ RETRY_POLICY: Final[GoogleApiRetryPolicy] = GoogleApiRetryPolicy(
 
 
 class YouTubePlatform:
-    """Клиент строится лениво и кешируется по channel.id: один токен — один канал."""
+    """Клиент строится лениво и кешируется по channel.account_name: один токен — один канал.
 
-    def __init__(self, client_secret_file: Path, secrets_dir: Path) -> None:
+    Настройки эфира (auto_start, category_id) — из planer.json, общие для всех каналов (§7.4).
+    on_login вызывается ровно перед открытием браузера для входа в канал.
+    """
+
+    def __init__(
+        self,
+        client_secret_file: Path,
+        secrets_dir: Path,
+        settings: PlanerSettings,
+        on_login: Callable[[ChannelConfig], None] | None = None,
+    ) -> None:
         self._client_secret_file: Path = client_secret_file
         self._secrets_dir: Path = secrets_dir
+        self._settings: PlanerSettings = settings
+        self._on_login: Callable[[ChannelConfig], None] | None = on_login
         self._services: dict[str, Any] = {}
         self._channels: dict[str, ChannelInfo] = {}
 
@@ -111,7 +124,7 @@ class YouTubePlatform:
 
     def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
         """Кеш на процесс: за запуск канал спрашивается один раз (квота §6.1 п.3)."""
-        cached: ChannelInfo | None = self._channels.get(channel.id)
+        cached: ChannelInfo | None = self._channels.get(channel.account_name)
         if cached is not None:
             return cached
         response: dict[str, Any] = self._execute(
@@ -121,7 +134,10 @@ class YouTubePlatform:
         )
         items: list[dict[str, Any]] = _items(response)
         if not items:
-            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"channels.list(mine=true) is empty for {channel.id}")
+            raise PlatformError(
+                ERROR_CHANNEL_NOT_FOUND,
+                f"channels.list(mine=true) is empty for {channel.account_name}",
+            )
         item: dict[str, Any] = items[0]
         snippet: dict[str, Any] = _mapping(item, "snippet")
         info: ChannelInfo = ChannelInfo(
@@ -130,12 +146,12 @@ class YouTubePlatform:
             default_language=_channel_language(item, snippet),
         )
         LOGGER.info(
-            "channel_described channel=%s youtube_channel_id=%s language=%s",
-            channel.id,
+            'channel_described channel="%s" youtube_channel_id=%s language=%s',
+            channel.account_name,
             info.youtube_channel_id,
             info.default_language or "-",
         )
-        self._channels[channel.id] = info
+        self._channels[channel.account_name] = info
         return info
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
@@ -158,11 +174,11 @@ class YouTubePlatform:
                     pageToken=token,
                 ),
             )
-            broadcasts.extend(_broadcasts_from_page(_items(response), channel.id))
+            broadcasts.extend(_broadcasts_from_page(_items(response), channel.account_name))
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
-        LOGGER.info("broadcasts_listed channel=%s count=%d", channel.id, len(broadcasts))
+        LOGGER.info('broadcasts_listed channel="%s" count=%d', channel.account_name, len(broadcasts))
         return broadcasts
 
     def get_stream(self, channel: ChannelConfig, stream_id: str) -> StreamInfo | None:
@@ -182,7 +198,7 @@ class YouTubePlatform:
             ingestion_address=_text(ingestion, "ingestionAddress", allow_empty=True),
             stream_name=_text(ingestion, "streamName", allow_empty=True),
         )
-        _warn_on_unexpected_key(channel.id, stream)
+        _warn_on_unexpected_key(channel.account_name, stream)
         return stream
 
     def create_broadcast(self, channel: ChannelConfig, spec: BroadcastSpec) -> CreatedBroadcast:
@@ -192,11 +208,11 @@ class YouTubePlatform:
             "liveBroadcasts.insert",
             lambda service: service.liveBroadcasts().insert(
                 part=BROADCAST_INSERT_PARTS,
-                body=_broadcast_body(channel, spec),
+                body=_broadcast_body(channel, spec, self._settings),
             ),
         )
         broadcast_id: str = _text(response, "id")
-        LOGGER.info("broadcast_inserted channel=%s broadcast_id=%s", channel.id, broadcast_id)
+        LOGGER.info('broadcast_inserted channel="%s" broadcast_id=%s', channel.account_name, broadcast_id)
         return self._attach_new_stream(channel, broadcast_id, spec)
 
     def attach_stream(
@@ -214,12 +230,12 @@ class YouTubePlatform:
         broadcast_id: str,
         spec: BroadcastSpec,
     ) -> None:
-        """update заменяет часть целиком: время и категорию канала отправляем всегда."""
+        """update заменяет часть целиком: время и категорию из planer.json отправляем всегда."""
         snippet: dict[str, Any] = {
             "title": spec.title,
             "description": spec.description,
             "scheduledStartTime": _rfc3339(spec.start_minute),
-            "categoryId": channel.category_id,
+            "categoryId": self._settings.category_id,
         }
         self._execute(
             channel,
@@ -229,7 +245,7 @@ class YouTubePlatform:
                 body={"id": broadcast_id, "snippet": snippet},
             ),
         )
-        LOGGER.info("broadcast_updated channel=%s broadcast_id=%s", channel.id, broadcast_id)
+        LOGGER.info('broadcast_updated channel="%s" broadcast_id=%s', channel.account_name, broadcast_id)
 
     def apply_video_settings(
         self,
@@ -268,8 +284,8 @@ class YouTubePlatform:
             ),
         )
         LOGGER.info(
-            "video_settings_applied channel=%s broadcast_id=%s language=%s category=%s audience=%s",
-            channel.id,
+            'video_settings_applied channel="%s" broadcast_id=%s language=%s category=%s audience=%s',
+            channel.account_name,
             broadcast_id,
             fixes.language_set,
             fixes.category_set,
@@ -321,7 +337,7 @@ class YouTubePlatform:
             lambda service: service.liveBroadcasts().list(part=BROADCAST_PARTS, id=broadcast_id),
         )
         items: list[dict[str, Any]] = _items(response)
-        return _broadcast_from_item(items[0], channel.id) if items else None
+        return _broadcast_from_item(items[0], channel.account_name) if items else None
 
     def _video_item(self, channel: ChannelConfig, broadcast_id: str, part: str) -> dict[str, Any]:
         """videos.list по id эфира: read-modify-write без чтения невозможен."""
@@ -355,8 +371,8 @@ class YouTubePlatform:
         stream_key: str = _text(ingestion, "streamName")
         if not YOUTUBE_STREAM_KEY_PATTERN.fullmatch(stream_key):
             LOGGER.error(
-                "stream_key_rejected channel=%s stream_id=%s stream_key=%s",
-                channel.id,
+                'stream_key_rejected channel="%s" stream_id=%s stream_key=%s',
+                channel.account_name,
                 stream_id,
                 mask_stream_key(stream_key),
             )
@@ -371,8 +387,8 @@ class YouTubePlatform:
             ),
         )
         LOGGER.info(
-            "stream_bound channel=%s broadcast_id=%s stream_id=%s stream_key=%s",
-            channel.id,
+            'stream_bound channel="%s" broadcast_id=%s stream_id=%s stream_key=%s',
+            channel.account_name,
             broadcast_id,
             stream_id,
             mask_stream_key(stream_key),
@@ -393,22 +409,30 @@ class YouTubePlatform:
             "thumbnails.set",
             lambda service: service.thumbnails().set(videoId=broadcast_id, media_body=media),
         )
-        LOGGER.info("thumbnail_set channel=%s broadcast_id=%s", channel.id, broadcast_id)
+        LOGGER.info('thumbnail_set channel="%s" broadcast_id=%s', channel.account_name, broadcast_id)
 
     def _service(self, channel: ChannelConfig) -> Any:
-        cached: Any = self._services.get(channel.id)
+        cached: Any = self._services.get(channel.account_name)
         if cached is not None:
             return cached
         try:
             credentials: Any = load_credentials(
                 self._client_secret_file,
-                token_file_for(self._secrets_dir, channel.id),
+                token_file_for(self._secrets_dir, channel.account_name),
+                login_hint=channel.google_account,
+                on_login=self._login_callback(channel),
             )
         except AuthError as error:
             raise PlatformError(ERROR_AUTH, f"{error.reason.value}: {error.detail}") from error
         service: Any = build(API_SERVICE_NAME, API_VERSION, credentials=credentials, cache_discovery=False)
-        self._services[channel.id] = service
+        self._services[channel.account_name] = service
         return service
+
+    def _login_callback(self, channel: ChannelConfig) -> Callable[[], None] | None:
+        if self._on_login is None:
+            return None
+        on_login: Callable[[ChannelConfig], None] = self._on_login
+        return lambda: on_login(channel)
 
     def _execute(self, channel: ChannelConfig, operation: str, request_builder: Any) -> dict[str, Any]:
         """Временная недоступность площадки (5xx) — не повод ронять канал: повторяем."""
@@ -420,16 +444,16 @@ class YouTubePlatform:
                     raise
                 delay_sec: float = RETRY_POLICY.compute_delay(attempt)
                 LOGGER.warning(
-                    "request_retry operation=%s channel=%s attempt=%d/%d delay_sec=%.1f code=%s",
+                    'request_retry operation=%s channel="%s" attempt=%d/%d delay_sec=%.1f code=%s',
                     operation,
-                    channel.id,
+                    channel.account_name,
                     attempt,
                     RETRY_MAX_ATTEMPTS,
                     delay_sec,
                     error.code,
                 )
                 time.sleep(delay_sec)
-        raise PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.id}: retries exhausted")
+        raise PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.account_name}: retries exhausted")
 
     def _execute_once(self, channel: ChannelConfig, operation: str, request_builder: Any) -> dict[str, Any]:
         service: Any = self._service(channel)
@@ -438,13 +462,13 @@ class YouTubePlatform:
                 policy=RETRY_POLICY,
                 logger=LOGGER,
                 operation_name=operation,
-                resource_id=channel.id,
+                resource_id=channel.account_name,
                 request_callable=lambda: request_builder(service).execute(),
             )
         except HttpError as error:
             raise _platform_error_from_http(error) from error
         except OSError as error:
-            raise PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.id}: {error}") from error
+            raise PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.account_name}: {error}") from error
         if not isinstance(response, dict):
             raise PlatformError(ERROR_BAD_RESPONSE, f"{operation} returned {type(response).__name__}")
         return response
@@ -482,20 +506,21 @@ def _rfc3339(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime(RFC3339_FORMAT)
 
 
-def _broadcast_body(channel: ChannelConfig, spec: BroadcastSpec) -> dict[str, Any]:
+def _broadcast_body(channel: ChannelConfig, spec: BroadcastSpec, settings: PlanerSettings) -> dict[str, Any]:
+    """Видимость — из канала; автостарт и категория — из planer.json."""
     return {
         "snippet": {
             "title": spec.title,
             "description": spec.description,
             "scheduledStartTime": _rfc3339(spec.start_minute),
-            "categoryId": channel.category_id,
+            "categoryId": settings.category_id,
         },
         "status": {
             "privacyStatus": channel.privacy.value,
             "selfDeclaredMadeForKids": False,
         },
         "contentDetails": {
-            "enableAutoStart": channel.auto_start,
+            "enableAutoStart": settings.auto_start,
             "enableAutoStop": True,
             "latencyPreference": LATENCY_PREFERENCE,
         },
@@ -545,16 +570,16 @@ def _channel_language(item: dict[str, Any], snippet: dict[str, Any]) -> str | No
     return None
 
 
-def _broadcasts_from_page(items: list[dict[str, Any]], channel_key: str) -> list[UpcomingBroadcast]:
+def _broadcasts_from_page(items: list[dict[str, Any]], account_name: str) -> list[UpcomingBroadcast]:
     broadcasts: list[UpcomingBroadcast] = []
     for item in items:
-        broadcast: UpcomingBroadcast | None = _broadcast_from_item(item, channel_key)
+        broadcast: UpcomingBroadcast | None = _broadcast_from_item(item, account_name)
         if broadcast is not None:
             broadcasts.append(broadcast)
     return broadcasts
 
 
-def _broadcast_from_item(item: dict[str, Any], channel_key: str) -> UpcomingBroadcast | None:
+def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBroadcast | None:
     """Эфир без разбираемого времени старта пропускается: сверять его не с чем."""
     snippet: dict[str, Any] = _mapping(item, "snippet")
     broadcast_id: str = _text(item, "id")
@@ -563,8 +588,8 @@ def _broadcast_from_item(item: dict[str, Any], channel_key: str) -> UpcomingBroa
     if start_utc is None:
         # у канала бывает дефолтный эфир без времени старта — это норма, не проблема
         LOGGER.debug(
-            "broadcast_without_start channel=%s broadcast_id=%s value=%r",
-            channel_key,
+            'broadcast_without_start channel="%s" broadcast_id=%s value=%r',
+            account_name,
             broadcast_id,
             start_text,
         )
@@ -598,12 +623,12 @@ def _bound_stream_id(item: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _warn_on_unexpected_key(channel_key: str, stream: StreamInfo) -> None:
+def _warn_on_unexpected_key(account_name: str, stream: StreamInfo) -> None:
     """Ключ неожиданного вида не отбрасывается — только предупреждение (маска обязательна)."""
     if stream.stream_name and not YOUTUBE_STREAM_KEY_PATTERN.fullmatch(stream.stream_name):
         LOGGER.warning(
-            "stream_key_unexpected_format channel=%s stream_id=%s stream_key=%s",
-            channel_key,
+            'stream_key_unexpected_format channel="%s" stream_id=%s stream_key=%s',
+            account_name,
             stream.stream_id,
             mask_stream_key(stream.stream_name),
         )

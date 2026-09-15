@@ -7,32 +7,58 @@ from typing import Final
 CLI_DESCRIPTION: Final[str] = "Планер: регистрация трансляций по пакетам броадкастера."
 HELP_DRY_RUN: Final[str] = "прочитать пакеты и показать, что было бы сделано; ничего не создавать, не переносить и не удалять"
 HELP_CHECK: Final[str] = "проверить авторизацию и права каждого канала"
-HELP_AUTH: Final[str] = "заново авторизовать канал (ключ из channels.yaml) или all — все каналы"
-HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из promo"
+HELP_AUTH: Final[str] = "заново авторизовать канал (account_name из channels.json) или all — все каналы"
+HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из bcast"
 HELP_DEBUG: Final[str] = "подробный лог в консоли"
 HELP_VERSION: Final[str] = "показать номер версии и выйти"
 VERSION_TEXT: Final[str] = "Планер {version}"
 
-# --- конфиг (ТЗ §5.2)
-CONFIG_CREATED_FROM_EXAMPLE: Final[str] = (
-    "Создан {path} из примера. Проверьте значения в нём и запустите планер снова."
-)
+# --- конфиг (ТЗ §5.2): два JSON, все поля обязательные, примеров и копирования нет
 CONFIG_ERROR: Final[str] = "Ошибка в конфиге {path}: {key} — {problem}"
 CONFIG_ROOT_KEY: Final[str] = "(корень файла)"
-CONFIG_PROBLEM_EXAMPLE_MISSING: Final[str] = "файла нет, и нет примера {example}, из которого его создать"
-CONFIG_PROBLEM_YAML: Final[str] = "файл не читается как YAML: {error}"
-CONFIG_PROBLEM_NOT_MAPPING: Final[str] = "нужен набор ключей (словарь)"
-CONFIG_PROBLEM_MISSING_KEY: Final[str] = "обязательный ключ отсутствует"
-CONFIG_PROBLEM_UNKNOWN_KEY: Final[str] = "неизвестный ключ"
-CONFIG_PROBLEM_NON_EMPTY_STRING: Final[str] = "нужна непустая строка"
+CONFIG_CHANNELS_HINT: Final[str] = "Создайте файл {path} с таким содержимым и впишите свои значения:"
+CONFIG_PLANER_HINT: Final[str] = "Восстановите файл {path} с таким содержимым и впишите свои значения:"
+# Точные шаблоны файлов для консоли: печатаются, когда файла или поля нет. В код как умолчания не идут.
+CONFIG_CHANNELS_TEMPLATE: Final[str] = """{
+  "channels": [
+    {"platform": "youtube", "account_name": "Osvald.X", "google_account": "you@gmail.com",
+     "languages": ["ru"], "privacy": "unlisted"}
+  ]
+}"""
+CONFIG_PLANER_TEMPLATE: Final[str] = """{"min_lead_minutes": 60, "keep_days": 30,
+ "auto_start": true, "set_thumbnail": true, "category_id": "22"}"""
+CONFIG_PROBLEM_FILE_MISSING: Final[str] = "файла нет"
+CONFIG_PROBLEM_JSON: Final[str] = "файл не читается как JSON: {error}"
+CONFIG_PROBLEM_NOT_MAPPING: Final[str] = "нужен объект JSON в фигурных скобках"
+CONFIG_PROBLEM_MISSING_KEY: Final[str] = "обязательное поле отсутствует"
+CONFIG_PROBLEM_UNKNOWN_KEY: Final[str] = "неизвестное поле"
+CONFIG_PROBLEM_DUPLICATE_KEY: Final[str] = "поле указано дважды"
+CONFIG_PROBLEM_NON_EMPTY_STRING: Final[str] = "нужна непустая строка в кавычках"
 CONFIG_PROBLEM_INT_MIN: Final[str] = "нужно целое число не меньше {minimum}"
 CONFIG_PROBLEM_BOOL: Final[str] = "нужно true или false"
 CONFIG_PROBLEM_CHANNELS_EMPTY: Final[str] = "нужен непустой список каналов"
-CONFIG_PROBLEM_CHANNEL_ID: Final[str] = "только латиница в нижнем регистре, цифры и _"
-CONFIG_PROBLEM_CHANNEL_ID_DUPLICATE: Final[str] = "id «{value}» уже есть у другого канала"
+CONFIG_PROBLEM_ACCOUNT_NAME_CHAR: Final[str] = (
+    "символ «{char}» в имени канала недопустим: имя канала — это имя файла токена, "
+    r'в нём нельзя \ / : * ? " < > |'
+)
+CONFIG_PROBLEM_ACCOUNT_NAME_TOO_LONG: Final[str] = (
+    "имя канала длиннее {maximum} символов (сейчас {length}): оно становится именем файла токена"
+)
+CONFIG_PROBLEM_ACCOUNT_NAME_CONTROL: Final[str] = "в имени канала есть управляющий символ (перевод строки, табуляция)"
+CONFIG_PROBLEM_ACCOUNT_NAME_EDGE: Final[str] = "имя канала начинается или заканчивается пробелом или точкой: «{value}»"
+CONFIG_PROBLEM_ACCOUNT_NAME_RESERVED: Final[str] = "«{value}» — зарезервированное имя Windows, файлом его назвать нельзя"
+CONFIG_PROBLEM_ACCOUNT_NAME_AUTH_ALL: Final[str] = (
+    "имя «{value}» занято режимом --auth {auth_all} (вход во все каналы сразу); назовите канал иначе"
+)
+CONFIG_PROBLEM_GOOGLE_ACCOUNT: Final[str] = (
+    "«{value}» не похоже на почту аккаунта Google: нужен вид имя@домен, ровно один @ и без пробелов"
+)
+CONFIG_PROBLEM_ACCOUNT_NAME_DUPLICATE: Final[str] = (
+    "имя «{value}» уже есть у другого канала (большие и маленькие буквы не различаются: это имя файла)"
+)
 CONFIG_PROBLEM_PLATFORM_FACEBOOK: Final[str] = "Facebook появится на этапе 6; сейчас поддерживается только youtube"
 CONFIG_PROBLEM_PLATFORM_UNKNOWN: Final[str] = "неизвестная площадка «{value}»; допустимо: {allowed}"
-CONFIG_PROBLEM_LANGUAGES: Final[str] = "нужен непустой список языков строчными буквами, например [uk]"
+CONFIG_PROBLEM_LANGUAGES: Final[str] = "нужен непустой список кодов языков строчными буквами, например [\"uk\"]"
 CONFIG_PROBLEM_LANGUAGE_DUPLICATE: Final[str] = "язык «{value}» указан дважды"
 CONFIG_PROBLEM_CHOICE: Final[str] = "допустимо: {allowed}"
 
@@ -42,26 +68,32 @@ CLIENT_SECRET_MISSING: Final[str] = (
     "Возьмите его у оператора и положите рядом с программой, в папку secrets."
 )
 CHANNELS_STATE_UNREADABLE: Final[str] = "Файл привязок каналов {path} не читается: {error}. Ничего не делалось."
-AUTH_UNKNOWN_CHANNEL: Final[str] = "В {path} нет канала с ключом «{key}». Известные ключи: {known}."
-AUTH_STARTING: Final[str] = "Канал «{key}» ({account_name}): сейчас откроется браузер."
+AUTH_UNKNOWN_CHANNEL: Final[str] = "В {path} нет канала «{account_name}». Каналы в файле: {known}."
+AUTH_STARTING: Final[str] = "Канал «{account_name}»: нужен вход в Google — сейчас откроется браузер."
 AUTH_UNVERIFIED_APP_WARNING: Final[str] = (
     "Google покажет предупреждение «Google hasn't verified this app» — это ожидаемо, "
     "приложение ещё не проходило проверку Google. Нажмите Advanced, затем ссылку "
     "Go to ... (unsafe), затем Continue. На экране согласия должен быть пункт про управление "
     "вашим аккаунтом YouTube — отметьте его и подтвердите."
 )
+AUTH_CHOOSE_ACCOUNT: Final[str] = "Войдите в аккаунт Google {google_account} — это аккаунт канала «{account_name}»."
 AUTH_CHOOSE_RIGHT_CHANNEL: Final[str] = (
-    "Выбирайте тот аккаунт и тот канал, который в channels.yaml записан как «{account_name}»."
+    "Если в этом аккаунте несколько каналов, выберите тот, что в channels.json записан как «{account_name}»."
 )
-AUTH_OK: Final[str] = "Канал «{key}» авторизован: {title} (id {youtube_channel_id})."
-AUTH_BINDING_SAVED: Final[str] = "Привязка записана в {path}."
-AUTH_BINDING_UPDATED: Final[str] = "Привязка подтверждена: это тот же канал, что и раньше."
+AUTH_OK: Final[str] = "Канал «{account_name}»: вход выполнен — {title} (id {youtube_channel_id})."
+AUTH_BINDING_SAVED: Final[str] = "Привязка канала «{account_name}» записана в {path}."
 AUTH_BINDING_MISMATCH: Final[str] = (
-    "Ключ «{key}» уже привязан к каналу {expected_title} (id {expected_id}), "
-    "а токен ведёт на {actual_title} (id {actual_id}). Ничего не переписано. "
-    "Либо авторизуйтесь заново и выберите правильный канал, либо исправьте channels.yaml."
+    "канал «{account_name}» уже привязан к YouTube-каналу {expected_title} (id {expected_id}), "
+    "а токен ведёт на {actual_title} (id {actual_id}); ничего не переписано. "
+    "Войдите заново и выберите правильный канал: planer.bat --auth \"{account_name}\""
 )
-AUTH_FAILED: Final[str] = "Канал «{key}»: авторизация не удалась — {reason}."
+AUTH_BINDING_TAKEN: Final[str] = (
+    "токен канала «{account_name}» ведёт на YouTube-канал {actual_title} (id {actual_id}), "
+    "а он уже записан под именем «{other_account_name}»; ничего не переписано. "
+    "Один YouTube-канал — одно имя в channels.json: войдите заново и выберите правильный канал "
+    "или исправьте account_name"
+)
+AUTH_FAILED: Final[str] = "Канал «{account_name}»: вход не удался — {reason}."
 AUTH_SCOPE_HINT: Final[str] = (
     "Если на экране согласия не было пункта про управление YouTube-аккаунтом — "
     "значит скоуп youtube не добавлен в настройках доступа приложения в Google Cloud."
@@ -77,23 +109,22 @@ AUTH_REASON_TEXT: Final[dict[str, str]] = {
 # --- проверка каналов (--check)
 CHECK_HEADER: Final[str] = "Проверка каналов по {path}:"
 CHECK_CHANNEL_OK: Final[str] = (
-    "- {key}: {title} (id {youtube_channel_id}), язык канала на YouTube: {channel_language}; "
-    "языки стримов из channels.yaml: {languages}; запланированных эфиров: {upcoming}"
+    "- {account_name}: {title} (id {youtube_channel_id}), язык канала на YouTube: {channel_language}; "
+    "языки стримов из channels.json: {languages}; запланированных эфиров: {upcoming}"
 )
 CHECK_CHANNEL_LANGUAGE_UNSET: Final[str] = "не указан"
 CHECK_CHANNEL_LANGUAGE_NOTE: Final[str] = (
     "Язык канала на YouTube — справочный, на решения планера он не влияет: "
-    "язык стрима задаёт оператор в channels.yaml."
+    "язык стрима задаёт оператор в channels.json."
 )
-CHECK_NEEDS_AUTH: Final[str] = "- {key}: нужна авторизация — запустите: planer.bat --auth {key}"
-CHECK_AUTHORIZING: Final[str] = "- {key}: токена нет, авторизую канал."
-CHECK_CHANNEL_FAILED: Final[str] = "- {key}: {code} ({message})"
+CHECK_CHANNEL_FAILED: Final[str] = "- {account_name}: {code} ({message})"
+CHECK_CHANNEL_REFUSED: Final[str] = "- {message}"
+CHANNEL_NAME_QUOTED: Final[str] = "«{account_name}»"
 CHECK_ALL_OK: Final[str] = "Все каналы на месте, трансляции включены."
 CHECK_HAS_PROBLEMS: Final[str] = "Часть каналов не прошла проверку — см. строки выше."
-BINDINGS_NOT_VERIFIED: Final[str] = "Каналы не проверены, ничего не читалось и не записывалось."
 
-# --- promo и пакеты (ТЗ §7.1)
-PROMO_EMPTY: Final[str] = "В {path} нет пакетов *.bcast — сохраните туда пакет от оператора и запустите снова."
+# --- bcast и пакеты (ТЗ §7.1)
+BCAST_EMPTY: Final[str] = "В {path} нет пакетов *.bcast — сохраните туда пакет от оператора и запустите снова."
 PACKAGE_ACCEPTED: Final[str] = "{file} — принят, слотов {total}, из них под мои языки {mine}"
 PACKAGE_DAMAGED: Final[str] = "{file} — пакет повреждён: {reason}; файл не тронут"
 PACKAGE_UNSUPPORTED_SCHEMA: Final[str] = (
@@ -123,7 +154,7 @@ OUTCOME_SLOT_PREFIX: Final[str] = "{date} {time} {language} -> {account_name}"
 OUTCOME_CHANNEL_PREFIX: Final[str] = "{account_name}"
 OUTCOME_CREATED: Final[str] = "{prefix} — эфир создан, {form}"
 OUTCOME_CREATE_PLANNED: Final[str] = "{prefix} — эфира нет, будет создан"
-OUTCOME_FIXED: Final[str] = "{prefix} — на YouTube было другое {what}; обновлено. Ключ и ссылка прежние"
+OUTCOME_FIXED: Final[str] = "{prefix} — на YouTube было другое {what}; обновлено, ключ и ссылка не менялись"
 OUTCOME_FIX_PLANNED: Final[str] = "{prefix} — на YouTube другое {what}; будет обновлено"
 OUTCOME_MATCHED: Final[str] = "{prefix} — {url}"
 OUTCOME_NO_STREAM: Final[str] = (
@@ -146,9 +177,9 @@ MISMATCH_FIELD_CATEGORY: Final[str] = "категория"
 WARNING_FORM_DIAGNOSTIC: Final[str] = "ответ формы сохранён для разбора: {path}"
 # Постоянные особенности площадки — только в отчёте, разделом «Особенности площадки» (ТЗ §5.6).
 WARNING_KEPT_KEY: Final[str] = (
-    "у совпавших и исправленных эфиров ключ прежний, повторно в форму он не отправляется: "
-    "повтор задвоил бы ключ у стримера. Если стример ключа не получил — передайте его из keys.txt "
-    "вручную или удалите эфир на YouTube: планер создаст его заново с новым ключом и отправит"
+    "эфир уже стоял, ключ не менялся — в форму не отправляется: повтор задвоил бы ключ у стримера. "
+    "Если стример ключа не получил — передайте его из keys.txt вручную или удалите эфир на YouTube: "
+    "планер создаст его заново с новым ключом и отправит"
 )
 WARNING_LIVE_CHAT: Final[str] = (
     "у эфиров YouTube всегда включён живой чат. Через API он не отключается: если чат не нужен, "
@@ -161,7 +192,7 @@ WARNING_STEP_TEXT: Final[dict[str, str]] = {
     "thumbnail": "обложка не поставлена (нужен подтверждённый канал); эфир и ключ в силе",
     "language": "язык эфира не записан; эфир и ключ в силе",
     "audience": "аудитория эфира была «для детей» (настройка канала) — планер снял её; проверьте настройки канала",
-    "category": "категория эфира была другой — планер поставил ту, что в channels.yaml",
+    "category": "категория эфира была другой — планер поставил ту, что в planer.json",
     "settings": "не удалось применить настройки эфира (язык, категория, аудитория); эфир и ключ в силе",
     "age_restricted": "на эфире стоит возрастное ограничение 18+; через API оно не снимается — снимите вручную в Студии",
     "facts": "не удалось перечитать эфир после планирования; на сам эфир это не влияет",
@@ -231,7 +262,19 @@ REPORT_TOTAL_KEYS_FILE: Final[str] = " Файл ключей: {path}"
 CONSOLE_TITLE: Final[str] = "Планер — {generated_at}"
 CONSOLE_TITLE_DRY_RUN: Final[str] = "Планер — {generated_at} — dry-run: ничего не создано и в форму не отправлено"
 CONSOLE_TITLE_STATUS: Final[str] = "Планер — {generated_at} — --status: эфиры планера на каналах"
-CONSOLE_COUNTER: Final[str] = "  {label:<14}{count:>3}   {detail}"
+CONSOLE_INDENT: Final[str] = "  "
+CONSOLE_LABEL_WIDTH: Final[int] = 14
+CONSOLE_COUNT_WIDTH: Final[int] = 3
+CONSOLE_COLUMN_GAP: Final[str] = "   "
+CONSOLE_COUNTER: Final[str] = (
+    CONSOLE_INDENT + "{label:<" + str(CONSOLE_LABEL_WIDTH) + "}{count:>" + str(CONSOLE_COUNT_WIDTH) + "}"
+    + CONSOLE_COLUMN_GAP + "{detail}"
+)
+# строка исхода под счётчиком — ровно в колонке подробностей CONSOLE_COUNTER
+CONSOLE_OUTCOME_INDENT: Final[str] = " " * (
+    len(CONSOLE_INDENT) + CONSOLE_LABEL_WIDTH + CONSOLE_COUNT_WIDTH + len(CONSOLE_COLUMN_GAP)
+)
+CONSOLE_OUTCOME: Final[str] = CONSOLE_OUTCOME_INDENT + "{detail}"
 CONSOLE_LABEL_PACKAGES: Final[str] = "пакеты"
 CONSOLE_LABEL_CREATED: Final[str] = "создано"
 CONSOLE_LABEL_FIXED: Final[str] = "исправлено"
@@ -266,13 +309,14 @@ CONSOLE_LABEL_LOG: Final[str] = "лог"
 KEYS_FILE_HEADER: Final[tuple[str, ...]] = (
     "# Ключи трансляций. Сгенерировано планером {generated_at}.",
     "# Файл перезаписывается на каждом запуске — не править.",
-    "# Если в строке «форма» стоит «НЕ передан» — передайте ключ стримеру вручную.",
+    "# Строка «форма»: «отправлен в форму» — ключ у стримера; «эфир уже стоял, ключ не менялся» — "
+    "ключ прежний; «НЕ отправлен» — передайте ключ стримеру вручную.",
 )
 KEYS_BLOCK_TITLE: Final[str] = "{date} {time}  {language}  {account_name}"
 KEYS_BLOCK_KEY: Final[str] = "  ключ   {value}"
 KEYS_BLOCK_STREAM: Final[str] = "  поток  {value}"
 KEYS_BLOCK_BROADCAST: Final[str] = "  эфир   {value}"
 KEYS_BLOCK_FORM: Final[str] = "  форма  {value}"
-KEY_FORM_SENT: Final[str] = "передан {sent_at}"
-KEY_FORM_KEPT: Final[str] = "ключ прежний, в этом запуске не передавался"
-KEY_FORM_FAILED: Final[str] = "НЕ передан — {reason}"
+KEY_FORM_SENT: Final[str] = "отправлен в форму {sent_at}"
+KEY_FORM_KEPT: Final[str] = "эфир уже стоял, ключ не менялся — в форму не отправляется"
+KEY_FORM_FAILED: Final[str] = "НЕ отправлен: {reason} — передайте стримеру вручную"

@@ -1,4 +1,4 @@
-"""Чистка старья (ТЗ §5.7): файлы старше `keep_days` дней в `promo\\` и `logs\\`.
+"""Чистка старья (ТЗ §5.7): файлы старше `keep_days` дней в `bcast\\` и `logs\\`.
 
 Единственное место, где планер что-то удаляет. Срок один на обе папки и берётся
 из конфига; текущий лог и сегодняшний отчёт под него не попадают по возрасту.
@@ -19,7 +19,7 @@ def cleanup_expired(paths: PlanerPaths, keep_days: int, now: datetime) -> list[P
     """Удаляет файлы, изменённые раньше, чем keep_days дней назад; возвращает удалённые."""
     border: datetime = now - timedelta(days=keep_days)
     removed: list[Path] = []
-    for directory in (paths.promo_dir, paths.logs_dir):
+    for directory in (paths.bcast_dir, paths.logs_dir):
         for file_path in _files_older_than(directory, border):
             try:
                 file_path.unlink()

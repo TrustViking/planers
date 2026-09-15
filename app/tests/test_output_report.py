@@ -28,7 +28,7 @@ from app.output.report import (
     skip_text,
     write_report,
 )
-from app.package.promo import PromoScan, scan_promo
+from app.package.bcast import BcastScan, scan_bcast
 from app.paths import PlanerPaths
 from app.pipeline.plan import Decision, OutcomeError, PlannedBroadcast
 from app.pipeline.selection import Selection, build_planned
@@ -47,20 +47,20 @@ TZ_SAMPLE_REPORT: str = f"""# Планер {APP_VERSION} — отчёт 13-09-20
 Итог: создано 2, исправлено 1, совпадает 1, пропущено 3, ошибок 1. Файл ключей: keystreams\\keys.txt
 
 ## Ключ не дошёл до стримера
-- 18-09-2026 19:00 uk -> Іван UA — форма не подтвердила запись ответа (notConfirmed); эфир на канале стоит — передайте ключ стримеру из keys.txt вручную
+- 18-09-2026 19:00 uk -> Канал UA — форма не подтвердила запись ответа (notConfirmed); эфир на канале стоит — передайте ключ стримеру из keys.txt вручную
 
 ## Ошибки
-- 19-09-2026 19:00 uk -> Іван UA — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)
+- 19-09-2026 19:00 uk -> Канал UA — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)
 
 ## Создано (2)
-- 16-09-2026 19:00 uk -> Іван UA — эфир создан, ключ передан в форму
-- 18-09-2026 19:00 uk -> Іван UA — эфир создан, ключ в форму НЕ передан — форма не подтвердила запись ответа (notConfirmed); повторно планер его не отправит, передайте ключ стримеру из keys.txt вручную
+- 16-09-2026 19:00 uk -> Канал UA — эфир создан, ключ передан в форму
+- 18-09-2026 19:00 uk -> Канал UA — эфир создан, ключ в форму НЕ передан — форма не подтвердила запись ответа (notConfirmed); повторно планер его не отправит, передайте ключ стримеру из keys.txt вручную
 
 ## Исправлено (1)
-- 17-09-2026 19:00 uk -> Іван UA — на YouTube было другое описание; обновлено. Ключ и ссылка прежние
+- 17-09-2026 19:00 uk -> Канал UA — на YouTube было другое описание; обновлено, ключ и ссылка не менялись
 
 ## Уже запланировано, совпадает (1)
-- 16-09-2026 21:00 ru -> Иван RU — https://www.youtube.com/watch?v=def456
+- 16-09-2026 21:00 ru -> Канал RU — https://www.youtube.com/watch?v=def456
 
 ## Пропущено
 - 14-09-2026 19:00 uk — уже прошло
@@ -121,12 +121,12 @@ def test_render_matches_tz_structure() -> None:
             ),
         ],
         outcomes=[
-            PairOutcome(OutcomeKind.CREATED, "Іван UA", "16-09-2026", "19:00", "uk", form=FormState.SENT),
-            PairOutcome(OutcomeKind.CREATED, "Іван UA", "18-09-2026", "19:00", "uk", form=FormState.FAILED),
-            PairOutcome(OutcomeKind.FIXED, "Іван UA", "17-09-2026", "19:00", "uk", changed_fields=("description",)),
+            PairOutcome(OutcomeKind.CREATED, "Канал UA", "16-09-2026", "19:00", "uk", form=FormState.SENT),
+            PairOutcome(OutcomeKind.CREATED, "Канал UA", "18-09-2026", "19:00", "uk", form=FormState.FAILED),
+            PairOutcome(OutcomeKind.FIXED, "Канал UA", "17-09-2026", "19:00", "uk", changed_fields=("description",)),
             PairOutcome(
                 OutcomeKind.MATCHED,
-                "Иван RU",
+                "Канал RU",
                 "16-09-2026",
                 "21:00",
                 "ru",
@@ -134,7 +134,7 @@ def test_render_matches_tz_structure() -> None:
             ),
             PairOutcome(
                 OutcomeKind.ERROR,
-                "Іван UA",
+                "Канал UA",
                 "19-09-2026",
                 "19:00",
                 "uk",
@@ -208,7 +208,7 @@ def test_matched_fixed_ambiguous_and_planer_error_texts() -> None:
     )
     text: str = render_report(report)
     assert "-> Test UA — u1\n" in text
-    assert "другое название и описание; обновлено. Ключ и ссылка прежние\n" in text
+    assert "другое название и описание; обновлено, ключ и ссылка не менялись\n" in text
     assert "эфир создан, ключ передан в форму\n" in text
     assert "несколько эфиров на эту минуту без маркера планера" in text
     assert "у найденного эфира нет привязанного потока" in text
@@ -360,7 +360,7 @@ def test_package_and_skipped_lines_from_scan_and_selection(
     now: datetime,
 ) -> None:
     make_package(
-        planer_paths.promo_dir,
+        planer_paths.bcast_dir,
         file_name="plan.bcast",
         slots=[
             make_slot("15-03-2027", "19:00", "uk"),
@@ -371,7 +371,7 @@ def test_package_and_skipped_lines_from_scan_and_selection(
         ],
     )
     config: PlanerConfig = make_config()
-    scan: PromoScan = scan_promo(planer_paths, now)
+    scan: BcastScan = scan_bcast(planer_paths, now)
     selection: Selection = build_planned(
         scan.slot_map, scan.slot_sources, config, FakePlatform().limits, now
     )
