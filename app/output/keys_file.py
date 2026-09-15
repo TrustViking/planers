@@ -37,12 +37,12 @@ class KeyRow:
 
 
 def form_status_text(item: PlannedBroadcast) -> str:
-    """Только этот запуск: передан сейчас, не передан новый или ключ прежний."""
+    """Только этот запуск: передан сейчас, должен был уйти и не ушёл, или в этом запуске не отправлялся."""
     if item.is_form_sent:
         return msg.KEY_FORM_SENT.format(
             sent_at=format_datetime_text(item.form_sent_at) if item.form_sent_at else MISSING_VALUE
         )
-    if item.is_new_key:
+    if item.should_send_key:
         return msg.KEY_FORM_FAILED.format(reason=form_reason_text(item.last_error))
     return msg.KEY_FORM_KEPT
 

@@ -16,16 +16,25 @@ from typing import Final
 
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import FILE_STAMP_FORMAT
-from app.core.text import normalize_description, normalize_title
 from app.form.base import FORM_CODE_NOT_CONFIRMED
 from app.package.bcast import AcceptedPackage, BcastScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
 from app.paths import PlanerPaths
-from app.pipeline.plan import Decision, OutcomeError, PlannedBroadcast
+from app.pipeline.plan import (
+    WARNING_STEP_AMBIGUOUS,
+    WARNING_STEP_REPORTED_FIELD,
+    BroadcastSpec,
+    ChangedField,
+    Decision,
+    OutcomeError,
+    OutcomeWarning,
+    PlannedBroadcast,
+    SpecValue,
+)
 from app.pipeline.reconciler import MarkedBroadcast
 from app.pipeline.selection import Selection, SkippedSlot, SkipReason
-from app.platforms.base import BroadcastFacts, PlatformError, broadcast_url_for
+from app.platforms.base import BroadcastFacts, PlatformError, PlatformLimits, broadcast_url_for
 from app.ui import messages_ru as msg
 from app.version import APP_VERSION
 
@@ -77,7 +86,7 @@ class SkipKind(str, Enum):
 
 
 class FormState(str, Enum):
-    """Только для нового ключа этого запуска: прежний ключ в форму не уходит (§7.5)."""
+    """Только для ключа, который в этом запуске должен был дойти до стримера (§7.5)."""
 
     SENT = "sent"          # ответ формы подтверждён
     FAILED = "failed"      # не подтверждён; повтора не будет
@@ -120,9 +129,9 @@ class PairOutcome:
     time: str | None = None
     language: str | None = None
     broadcast_url: str | None = None
-    changed_fields: tuple[str, ...] = ()   # "title", "description"
-    form: FormState | None = None          # None — нового ключа нет, форма не отправлялась
-    form_error: str | None = None          # причина, по которой новый ключ не ушёл (§7.5)
+    changed_fields: tuple[str, ...] = ()   # значения ChangedField: "title", "privacy", ...
+    form: FormState | None = None          # None — ключ в этом запуске в форму не шёл
+    form_error: str | None = None          # причина, по которой ключ не ушёл (§7.5)
     error: OutcomeError | None = None
 
 
@@ -199,7 +208,12 @@ def build_totals(report: RunReport) -> RunTotals:
         slots_total=sum(line.slots_total for line in accepted),
         slots_mine=sum(line.slots_mine for line in accepted),
         created=sum(1 for kind in kinds if kind in CREATED_OUTCOME_KINDS),
-        form_sent=forms.count(FormState.SENT),
+        # сводка «ключ передан в форму: N из M» стоит у «создано»: считаем только созданные
+        form_sent=sum(
+            1
+            for kind, form in zip(kinds, forms)
+            if kind in CREATED_OUTCOME_KINDS and form is FormState.SENT
+        ),
         fixed=kinds.count(OutcomeKind.FIXED),
         matched=kinds.count(OutcomeKind.MATCHED),
         orphans=len(report.orphans),
@@ -235,7 +249,7 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
         broadcast_url=item.broadcast_url or item.found_url,
         changed_fields=tuple(changed.value for changed in item.changed_fields),
         form=None if is_dry_run else _form_state(item),
-        form_error=item.last_error if item.is_new_key else None,
+        form_error=item.last_error if item.should_send_key else None,
         error=item.error,
     )
 
@@ -279,18 +293,39 @@ def build_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequen
 
 def build_run_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequence[str] = ()) -> list[str]:
     """Предупреждения этого запуска (§7.4 п.4): эфир в силе, код выхода не меняется."""
-    lines: list[str] = [
-        msg.WARNING_LINE.format(
-            prefix=_slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name),
-            step=msg.WARNING_STEP_TEXT.get(warning.step, warning.step),
-            code=warning.code,
-            message=warning.message,
-        )
-        for item in planned
-        for warning in item.warnings
-    ]
+    lines: list[str] = [_warning_text(item, warning) for item in planned for warning in item.warnings]
     lines.extend(msg.WARNING_FORM_DIAGNOSTIC.format(path=path) for path in diagnostics)
     return lines
+
+
+def _warning_text(item: PlannedBroadcast, warning: OutcomeWarning) -> str:
+    """Предупреждения сверки собирают текст из объекта: значения полей и ссылки на эфиры."""
+    prefix: str = _slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name)
+    if warning.step == WARNING_STEP_REPORTED_FIELD and item.actual is not None:
+        name: ChangedField = ChangedField(warning.code)
+        return msg.WARNING_REPORTED_FIELD.format(
+            prefix=prefix,
+            field=msg.CHANGED_FIELD_TEXT[name.value],
+            wanted=spec_value_text(item.expected.value(name)),
+            actual=spec_value_text(item.actual.value(name)),
+        )
+    if warning.step == WARNING_STEP_AMBIGUOUS:
+        return msg.WARNING_AMBIGUOUS.format(prefix=prefix, urls=msg.AMBIGUOUS_URL_JOINER.join(item.ambiguous_urls))
+    return msg.WARNING_LINE.format(
+        prefix=prefix,
+        step=msg.WARNING_STEP_TEXT.get(warning.step, warning.step),
+        code=warning.code,
+        message=warning.message,
+    )
+
+
+def spec_value_text(value: SpecValue) -> str:
+    """Значение поля спеки для владельца: да/нет, прочерк, как есть."""
+    if value is None or value == "":
+        return MISSING_VALUE
+    if isinstance(value, bool):
+        return msg.SPEC_VALUE_TRUE if value else msg.SPEC_VALUE_FALSE
+    return value
 
 
 def build_platform_note_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
@@ -311,7 +346,7 @@ def _unique(lines: Iterable[SkippedLine]) -> list[SkippedLine]:
     return list(seen)
 
 
-def build_mismatch_lines(planned: Sequence[PlannedBroadcast], category_id: str) -> list[str]:
+def build_mismatch_lines(planned: Sequence[PlannedBroadcast], limits: PlatformLimits) -> list[str]:
     """Что хотели и что лежит на платформе (§5.6). Совпало всё — раздела в отчёте нет."""
     lines: list[str] = []
     for item in planned:
@@ -319,14 +354,21 @@ def build_mismatch_lines(planned: Sequence[PlannedBroadcast], category_id: str) 
             continue
         prefix: str = _slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name)
         lines.extend(msg.MISMATCH_LINE.format(prefix=prefix, field=field, wanted=wanted, actual=actual)
-                     for field, wanted, actual in _mismatches(item, item.facts, category_id))
+                     for field, wanted, actual in _mismatches(item, limits))
     return lines
 
 
-def _mismatches(item: PlannedBroadcast, facts: BroadcastFacts, category_id: str) -> list[tuple[str, str, str]]:
-    found: list[tuple[str, str, str]] = []
-    _add_if_different(found, msg.MISMATCH_FIELD_TITLE, item.expected.title, normalize_title(facts.title))
-    _add_description(found, item, facts)
+def _mismatches(item: PlannedBroadcast, limits: PlatformLimits) -> list[tuple[str, str, str]]:
+    """Поля спеки — тем же diff, что решает сверку: новое поле нельзя забыть добавить сюда."""
+    if item.facts is None:
+        return []
+    facts_spec: BroadcastSpec = BroadcastSpec.from_facts(item.facts, limits, item.expected.start_minute)
+    found: list[tuple[str, str, str]] = [
+        _spec_mismatch(name, item.expected, facts_spec)
+        for name in facts_spec.diff(item.expected)
+        if not (name is ChangedField.MARKER and _is_stream_new(item))
+    ]
+    facts: BroadcastFacts = item.facts
     if facts.start_utc is not None:
         # нет времени — сравнивать не с чем; прочерк владелец читал бы как расхождение
         _add_if_different(
@@ -335,32 +377,27 @@ def _mismatches(item: PlannedBroadcast, facts: BroadcastFacts, category_id: str)
             item.expected.start_minute.isoformat(),
             facts.start_utc.isoformat(),
         )
-    _add_if_different(found, msg.MISMATCH_FIELD_MARKER, item.expected.marker, facts.stream_marker or MISSING_VALUE)
     _add_if_different(found, msg.MISMATCH_FIELD_LANGUAGE, item.language, facts.default_language or MISSING_VALUE)
-    _add_if_different(
-        found,
-        msg.MISMATCH_FIELD_CATEGORY,
-        category_id,
-        facts.category_id or MISSING_VALUE,
-    )
     if facts.made_for_kids:
         found.append((msg.MISMATCH_FIELD_AUDIENCE, msg.AUDIENCE_NOT_FOR_KIDS, msg.AUDIENCE_FOR_KIDS))
     return found
 
 
-def _add_description(found: list[tuple[str, str, str]], item: PlannedBroadcast, facts: BroadcastFacts) -> None:
+def _is_stream_new(item: PlannedBroadcast) -> bool:
+    """Поток создан или привязан этим запуском: перечитывание фактов может его ещё не видеть (14-09-2026)."""
+    return item.decision is Decision.CREATE or item.stream_attached
+
+
+def _spec_mismatch(name: ChangedField, wanted: BroadcastSpec, actual: BroadcastSpec) -> tuple[str, str, str]:
     """Описание целиком в отчёт не выводится: длина и начало каждой стороны."""
-    wanted: str = item.expected.description
-    actual: str = normalize_description(facts.description)
-    if wanted == actual:
-        return
-    found.append(
-        (
-            msg.MISMATCH_FIELD_DESCRIPTION,
-            msg.MISMATCH_DESCRIPTION.format(length=len(wanted), head=_head(wanted)),
-            msg.MISMATCH_DESCRIPTION.format(length=len(actual), head=_head(actual)),
+    label: str = msg.CHANGED_FIELD_TEXT[name.value]
+    if name is ChangedField.DESCRIPTION:
+        return (
+            label,
+            msg.MISMATCH_DESCRIPTION.format(length=len(wanted.description), head=_head(wanted.description)),
+            msg.MISMATCH_DESCRIPTION.format(length=len(actual.description), head=_head(actual.description)),
         )
-    )
+    return label, spec_value_text(wanted.value(name)), spec_value_text(actual.value(name))
 
 
 def _head(text: str) -> str:
@@ -373,8 +410,8 @@ def _add_if_different(found: list[tuple[str, str, str]], field: str, wanted: str
 
 
 def _form_state(item: PlannedBroadcast) -> FormState | None:
-    """None — нового ключа нет: прежний ключ планер в форму не отправляет (§7.5)."""
-    if not item.is_new_key or not item.stream_key:
+    """None — в этом запуске ключ в форму не шёл: эфир с меткой планера совпал (§7.5)."""
+    if not item.should_send_key or not item.stream_key:
         return None
     return FormState.SENT if item.is_form_sent else FormState.FAILED
 
@@ -601,8 +638,10 @@ def changed_fields_text(outcome: PairOutcome) -> str:
 
 
 def _fixed_text(outcome: PairOutcome, prefix: str, *, is_dry_run: bool) -> str:
-    template: str = msg.OUTCOME_FIX_PLANNED if is_dry_run else msg.OUTCOME_FIXED
-    return template.format(prefix=prefix, what=changed_fields_text(outcome))
+    if is_dry_run:
+        return msg.OUTCOME_FIX_PLANNED.format(prefix=prefix, what=changed_fields_text(outcome))
+    form: str = msg.OUTCOME_FIXED_FORM.format(mark=form_mark(outcome.form, outcome.form_error)) if outcome.form else ""
+    return msg.OUTCOME_FIXED.format(prefix=prefix, what=changed_fields_text(outcome), form=form)
 
 
 def _matched_text(outcome: PairOutcome, prefix: str) -> str:

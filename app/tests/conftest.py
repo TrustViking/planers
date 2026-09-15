@@ -161,14 +161,16 @@ def build_planned(
     *,
     limits: PlatformLimits | None = None,
     package: Package | None = None,
+    settings: PlanerSettings | None = None,
 ) -> PlannedBroadcast:
     """Объект так же, как его строит production-путь (app/pipeline/selection.py)."""
     platform_limits: PlatformLimits = limits or FakePlatform().limits
+    planer_settings: PlanerSettings = settings or build_config().settings
     return PlannedBroadcast(
         slot=slot,
         source_package=package or build_package_object(),
         channel=channel,
-        expected=BroadcastSpec.from_slot(slot, platform_limits),
+        expected=BroadcastSpec.from_slot(slot, platform_limits, channel, planer_settings),
     )
 
 

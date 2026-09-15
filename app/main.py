@@ -25,7 +25,6 @@ from app.config.loader import (
     ChannelConfig,
     ConfigError,
     PlanerConfig,
-    PlanerSettings,
     load_planer_config,
 )
 from app.form.base import FormSender
@@ -104,9 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_platform(paths: PlanerPaths, settings: PlanerSettings, console: ChannelConsole) -> BroadcastPlatform:
-    """Боевая площадка; FakePlatform остаётся только для тестов."""
-    return YouTubePlatform(paths.client_secret_file, paths.secrets_dir, settings, on_login=console.on_login)
+def build_platform(paths: PlanerPaths, console: ChannelConsole) -> BroadcastPlatform:
+    """Боевая площадка; FakePlatform остаётся только для тестов. Настройки эфира площадка получает спекой."""
+    return YouTubePlatform(paths.client_secret_file, paths.secrets_dir, on_login=console.on_login)
 
 
 def build_form_sender(paths: PlanerPaths, now_utc: datetime) -> FormSender:
@@ -185,7 +184,7 @@ def _build_dependencies(paths: PlanerPaths) -> _Dependencies | None:
         return None
     console: ChannelConsole = ChannelConsole(paths)
     platform: VerifiedPlatform = VerifiedPlatform(
-        build_platform(paths, config.settings, console),
+        build_platform(paths, console),
         bindings,
         paths.bindings_file,
         listener=console,

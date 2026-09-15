@@ -22,10 +22,16 @@ BROADCAST_URL_TEMPLATES: Final[dict[Platform, str]] = {
 
 @dataclass(frozen=True)
 class PlatformLimits:
-    """Лимиты площадки на тексты эфира: единственный источник — сама площадка."""
+    """Что задаёт сама площадка: лимиты текстов эфира и постоянные настройки эфира планера на ней.
+
+    Единственный источник — сама площадка (для YouTube — константы app/platforms/youtube.py):
+    спека берёт их отсюда, чтобы отправляемое и сравниваемое совпадали по построению.
+    """
 
     title_max_chars: int
     description_max_chars: int
+    auto_stop: bool               # enableAutoStop: эфир завершается сам, когда поток пропал
+    latency_preference: str       # latencyPreference
 
 
 @dataclass(frozen=True)
@@ -45,7 +51,11 @@ class UpcomingBroadcast:
     description: str
     stream_id: str | None      # привязанный поток; None — поток не привязан
     live_chat_id: str | None = None   # чат заведён; включением чата API не управляет
-    category_id: str | None = None   # snippet.categoryId: update заменяет часть ресурса целиком
+    category_id: str | None = None   # snippet.categoryId; None — площадка его в списке эфиров не вернула
+    privacy_status: str | None = None       # status.privacyStatus
+    auto_start: bool | None = None          # contentDetails.enableAutoStart
+    auto_stop: bool | None = None           # contentDetails.enableAutoStop
+    latency_preference: str | None = None   # contentDetails.latencyPreference
 
 
 @dataclass(frozen=True)
@@ -78,6 +88,10 @@ class BroadcastFacts:
     stream_marker: str | None
     live_chat_id: str | None = None
     thumbnail_url: str | None = None
+    # у ресурса videos этих полей нет: они из liveBroadcasts.list того же эфира
+    auto_start: bool | None = None
+    auto_stop: bool | None = None
+    latency_preference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,10 +101,11 @@ class VideoFixes:
     language_set: bool = False
     category_set: bool = False
     audience_cleared: bool = False
+    privacy_set: bool = False
 
     @property
     def any_fix(self) -> bool:
-        return self.language_set or self.category_set or self.audience_cleared
+        return self.language_set or self.category_set or self.audience_cleared or self.privacy_set
 
 
 @dataclass(frozen=True)
@@ -165,11 +180,17 @@ class BroadcastPlatform(Protocol):
         broadcast_id: str,
         language: str,
         category_id: str,
+        privacy: str,
     ) -> VideoFixes:
-        """Язык, категория и аудитория у ресурса videos — одним чтением и не более чем одной записью.
+        """Язык, категория, видимость и аудитория у ресурса videos — одним чтением и не более чем одной записью.
 
-        У liveBroadcast этих полей нет. Совпало всё — записи не делается вовсе.
+        Язык и аудиторию у liveBroadcast не записать; видимость и категорию ресурс videos держит
+        сам. Совпало всё — записи не делается вовсе.
         """
+        ...
+
+    def set_stream_marker(self, channel: ChannelConfig, stream_id: str, marker: str) -> None:
+        """Метка планера на уже существующем потоке: название — slot_id, описание — чей это ключ."""
         ...
 
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:

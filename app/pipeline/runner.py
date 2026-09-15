@@ -2,7 +2,7 @@
 
 main.py только разбирает флаги, строит зависимости и печатает результат.
 Рабочая единица — PlannedBroadcast: один эфир одного слота на одном канале.
-Отправка в форму — отдельным финальным проходом, только новые ключи этого запуска (§7.5).
+Отправка в форму — отдельным финальным проходом: ключи, которые в этом запуске должны дойти до стримера (§7.5).
 Истина об эфирах — на площадке: планер не держит своей памяти о прошлых запусках.
 """
 from __future__ import annotations
@@ -50,9 +50,9 @@ from app.package.bcast import BcastScan, scan_bcast
 from app.paths import PlanerPaths
 from app.pipeline.plan import (
     BroadcastSpec,
+    SpecValue,
     WARNING_STEP_AGE_RESTRICTED,
     WARNING_STEP_AUDIENCE,
-    WARNING_STEP_CATEGORY,
     WARNING_STEP_FACTS,
     WARNING_STEP_SETTINGS,
     WARNING_STEP_THUMBNAIL,
@@ -89,6 +89,16 @@ SPEC_LOG_KEYS: Final[tuple[str, ...]] = (
     "title_len",
     "description_len",
     "description_head",
+    "privacy",
+    "category_id",
+    "auto_start",
+    "auto_stop",
+    "latency",
+)
+# Как чинится каждое исправимое поле: эти — liveBroadcasts.update (snippet); видимость и категорию
+# ресурс videos берёт в apply_video_settings; маркер — set_stream_marker.
+BROADCAST_UPDATE_FIELDS: Final[frozenset[ChangedField]] = frozenset(
+    {ChangedField.TITLE, ChangedField.DESCRIPTION, ChangedField.CATEGORY}
 )
 
 
@@ -191,13 +201,13 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         outcomes=outcomes,
         orphans=[_orphan_line(orphan) for orphan in orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
-        mismatches=build_mismatch_lines(selection.planned, context.config.settings.category_id),
+        mismatches=build_mismatch_lines(selection.planned, context.platform.limits),
         warnings=build_warning_lines(selection.planned, context.form_diagnostics),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )
-    # новый ключ, не дошедший до стримера, — это код выхода 1; прежний ключ форму не ждёт (§7.5)
-    form_pending: bool = context.is_full and any(item.is_new_key_undelivered for item in selection.planned)
+    # ключ, который должен был дойти до стримера и не дошёл, — это код выхода 1 (§7.5)
+    form_pending: bool = context.is_full and any(item.is_key_undelivered for item in selection.planned)
     has_errors: bool = _has_error_outcomes(report.outcomes) or bool(scan.problems) or form_pending
     return _complete(context, report, has_errors=has_errors)
 
@@ -279,15 +289,15 @@ def _write_keys(context: _RunContext, rows: list[KeyRow]) -> tuple[Path | None, 
 
 
 def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[str]:
-    """Финальный проход (§7.5): только ключ, полученный в этом запуске.
+    """Финальный проход (§7.5): ключи с should_send_key — создан, привязан поток, исправлен, усыновлён.
 
-    Прежний ключ совпавшего или исправленного эфира не отправляется никогда — даже если
-    прошлая отправка не подтвердилась: повтор задвоил бы ключ у стримера.
+    Совпавший эфир с меткой планера ключ не шлёт. Задвоение строки у стримера допустимо:
+    он берёт последнюю по дате, каналу и языку.
     Возвращает пути сохранённых диагностических файлов формы — они идут в отчёт.
     """
     diagnostics: list[str] = []
     for item in planned:
-        if not item.is_new_key_undelivered:
+        if not item.is_key_undelivered:
             continue
         result: FormSendResult = context.form_sender.send(item)
         if result.confirmed:
@@ -319,7 +329,16 @@ def _describe_spec(spec: BroadcastSpec | None) -> dict[str, object]:
         "title_len": len(spec.title),
         "description_len": len(spec.description),
         "description_head": _quoted(spec.description[:DESCRIPTION_HEAD_CHARS]),
+        "privacy": _log_value(spec.privacy),
+        "category_id": _log_value(spec.category_id),
+        "auto_start": _log_value(spec.auto_start),
+        "auto_stop": _log_value(spec.auto_stop),
+        "latency": _log_value(spec.latency_preference),
     }
+
+
+def _log_value(value: SpecValue) -> object:
+    return MISSING_FIELD if value is None else value
 
 
 def _describe_facts(facts: BroadcastFacts) -> dict[str, object]:
@@ -332,6 +351,9 @@ def _describe_facts(facts: BroadcastFacts) -> dict[str, object]:
         "category_id": facts.category_id or MISSING_FIELD,
         "bound_stream_id": facts.bound_stream_id or MISSING_FIELD,
         "stream_marker": facts.stream_marker or MISSING_FIELD,
+        "auto_start": _log_value(facts.auto_start),
+        "auto_stop": _log_value(facts.auto_stop),
+        "latency": _log_value(facts.latency_preference),
     }
 
 
@@ -356,6 +378,38 @@ def _log_broadcast_fields(item: PlannedBroadcast) -> None:
     LOGGER.info("broadcast_actual %s", _log_line(item, _describe_spec(item.actual)))
     if item.facts is not None:
         LOGGER.info("broadcast_facts %s", _log_line(item, _describe_facts(item.facts)))
+
+
+def _required_text(value: str | None, name: str) -> str:
+    """Спека из слота заполняет все диктуемые поля; пустое — ошибка построения, а не площадки."""
+    if value is None:
+        raise ValueError(f"expected spec has no {name}")
+    return value
+
+
+def _mark_video_fixes(item: PlannedBroadcast, fixes: VideoFixes) -> None:
+    """Категория и видимость, исправленные у ресурса видео, — это исправление эфира: UPDATE и ключ в форму.
+
+    Категорию список эфиров YouTube не возвращает, поэтому её расхождение видно только здесь.
+    """
+    fixed: list[ChangedField] = []
+    if fixes.category_set:
+        fixed.append(ChangedField.CATEGORY)
+    if fixes.privacy_set:
+        fixed.append(ChangedField.PRIVACY)
+    added: list[ChangedField] = [name for name in fixed if name not in item.changed_fields]
+    if not added:
+        return
+    item.changed_fields = tuple(name for name in ChangedField if name in (*item.changed_fields, *added))
+    if item.decision is Decision.MATCH:
+        item.decision = Decision.UPDATE
+    item.require_key_delivery()
+    LOGGER.info(
+        'video_fields_fixed slot_id=%s channel="%s" fields=%s',
+        item.slot_id,
+        item.channel.account_name,
+        ",".join(name.value for name in added),
+    )
 
 
 class _Executor:
@@ -390,8 +444,8 @@ class _Executor:
             self._create(item)
             return
         if item.decision is Decision.UPDATE:
-            self._update(item)
-        # MATCH: ключ и ссылку сверка уже взяла с площадки, действий нет
+            self._fix(item)
+        # MATCH: ключ и ссылку сверка уже взяла с площадки, действий нет; ключ в форму не идёт
 
     def _create(self, item: PlannedBroadcast) -> None:
         created: CreatedBroadcast = self._platform.create_broadcast(item.channel, item.expected)
@@ -423,19 +477,20 @@ class _Executor:
             attached.broadcast_id,
             mask_stream_key(attached.stream_key),
         )
-        changed: tuple[ChangedField, ...] = item.actual.diff(item.expected) if item.actual else ()
-        item.changed_fields = changed
-        item.decision = Decision.UPDATE if changed else Decision.MATCH
-        if changed:
-            self._update(item)
+        # исправимые поля сверка уже посчитала (метку новый поток получил при создании)
+        item.decision = Decision.UPDATE if item.changed_fields else Decision.MATCH
+        if item.changed_fields:
+            self._fix(item)
 
-    def _update(self, item: PlannedBroadcast) -> None:
+    def _fix(self, item: PlannedBroadcast) -> None:
+        """Привести найденный эфир к пакету: каждое поле — своим вызовом; видимость — в _finish."""
         broadcast_id: str = item.found.broadcast_id if item.found else ""
-        self._platform.update_broadcast(
-            item.channel,
-            broadcast_id,
-            item.expected,
-        )
+        if BROADCAST_UPDATE_FIELDS.intersection(item.changed_fields):
+            self._platform.update_broadcast(item.channel, broadcast_id, item.expected)
+        if ChangedField.MARKER in item.changed_fields and item.found_stream is not None:
+            # ручной эфир усыновлён: со следующего запуска видно, что ключ уходил стримеру
+            self._platform.set_stream_marker(item.channel, item.found_stream.stream_id, item.expected.marker)
+        item.require_key_delivery()
         LOGGER.info(
             'broadcast_updated slot_id=%s channel="%s" broadcast_id=%s fields=%s',
             item.slot_id,
@@ -462,13 +517,14 @@ class _Executor:
         return item.broadcast_id or (item.found.broadcast_id if item.found else None)
 
     def _apply_video_settings(self, item: PlannedBroadcast, broadcast_id: str) -> None:
-        """Язык, категория и аудитория — одним проходом по ресурсу видео (§7.4)."""
+        """Язык, категория, видимость и аудитория — одним проходом по ресурсу видео (§7.4)."""
         try:
             fixes: VideoFixes = self._platform.apply_video_settings(
                 item.channel,
                 broadcast_id,
                 item.language,
-                self._context.config.settings.category_id,
+                _required_text(item.expected.category_id, "category_id"),
+                _required_text(item.expected.privacy, "privacy"),
             )
         except PlatformError as error:
             LOGGER.warning(
@@ -481,9 +537,9 @@ class _Executor:
             return
         if fixes.audience_cleared:
             item.warn(OutcomeWarning(WARNING_STEP_AUDIENCE, "fixed"))
-        if fixes.category_set and item.found is not None:
-            # категория была другой только у найденного эфира: у созданного её ставит планер
-            item.warn(OutcomeWarning(WARNING_STEP_CATEGORY, self._context.config.settings.category_id))
+        if item.found is not None:
+            # у созданного эфира категорию и видимость ставит планер; у найденного это исправление
+            _mark_video_fixes(item, fixes)
 
     def _read_facts(self, item: PlannedBroadcast, broadcast_id: str) -> None:
         """Один раз на объект: что по факту лежит на платформе (§5.6)."""

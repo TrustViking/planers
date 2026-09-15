@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from app import main as main_module
-from app.config.loader import PlanerSettings
 from app.google.auth import AuthError, AuthErrorReason
 from app.main import ChannelConsole, run_cli
 from app.paths import ROOT_ENV_VAR, PlanerPaths
@@ -44,7 +43,7 @@ def fake_platform_in_main(monkeypatch: pytest.MonkeyPatch) -> FakePlatform:
     """
     platform: FakePlatform = FakePlatform()
 
-    def _build(paths: PlanerPaths, settings: PlanerSettings, console: ChannelConsole) -> BroadcastPlatform:
+    def _build(paths: PlanerPaths, console: ChannelConsole) -> BroadcastPlatform:
         platform.on_login = console.on_login
         return platform
 

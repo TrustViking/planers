@@ -35,6 +35,12 @@ NOT_FOUND_CODE: Final[str] = "broadcastNotFound"
 # Те же лимиты, что у YouTube: тесты должны ловить реальное поведение обрезки.
 FAKE_TITLE_MAX_CHARS: Final[int] = 100
 FAKE_DESCRIPTION_MAX_CHARS: Final[int] = 5000
+FAKE_AUTO_STOP: Final[bool] = True
+FAKE_LATENCY_PREFERENCE: Final[str] = "normal"
+# Посеянный эфир по умолчанию выглядит так, как его поставил бы планер с настройками build_config.
+SEED_PRIVACY: Final[str] = "public"
+SEED_AUTO_START: Final[bool] = True
+SEED_CATEGORY_ID: Final[str] = "22"
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,8 @@ class FakePlatform:
         self.facts_override: dict[str, BroadcastFacts] = {}  # broadcast_id → готовый ответ read_facts
         self.thumbnails: list[FakeCall] = []
         self.attached: list[FakeCall] = []
+        self.markers_set: list[FakeCall] = []                 # set_stream_marker: (канал, поток, метка)
+        self.fail_marker: dict[str, PlatformError] = {}      # stream_id → ошибка set_stream_marker
         self.languages: dict[str, str] = {}                # broadcast_id → записанный язык
         self.channel_info: dict[str, ChannelInfo] = {}     # account_name → ответ describe_channel
         self.describe_calls: list[str] = []
@@ -87,8 +95,17 @@ class FakePlatform:
         description: str,
         marker: str | None = None,
         stream_key: str | None = None,
+        *,
+        privacy: str = SEED_PRIVACY,
+        auto_start: bool = SEED_AUTO_START,
+        auto_stop: bool = FAKE_AUTO_STOP,
+        latency_preference: str = FAKE_LATENCY_PREFERENCE,
+        category_id: str = SEED_CATEGORY_ID,
     ) -> UpcomingBroadcast:
-        """Эфир «уже на канале». marker — название потока (поток создаётся); без marker — эфир без потока."""
+        """Эфир «уже на канале». marker — название потока (поток создаётся); без marker — эфир без потока.
+
+        Категория, как у YouTube, лежит только у ресурса видео: в списке эфиров её нет.
+        """
         number: int = self._next_number()
         stream_id: str | None = None
         if marker is not None:
@@ -105,8 +122,13 @@ class FakePlatform:
             title=title,
             description=description,
             stream_id=stream_id,
+            privacy_status=privacy,
+            auto_start=auto_start,
+            auto_stop=auto_stop,
+            latency_preference=latency_preference,
         )
         self._broadcasts.setdefault(channel_id, {})[broadcast.broadcast_id] = broadcast
+        self.categories[broadcast.broadcast_id] = category_id
         return broadcast
 
     def remove_broadcast(self, channel_id: str, broadcast_id: str) -> None:
@@ -118,6 +140,8 @@ class FakePlatform:
         return PlatformLimits(
             title_max_chars=FAKE_TITLE_MAX_CHARS,
             description_max_chars=FAKE_DESCRIPTION_MAX_CHARS,
+            auto_stop=FAKE_AUTO_STOP,
+            latency_preference=FAKE_LATENCY_PREFERENCE,
         )
 
     def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
@@ -164,6 +188,10 @@ class FakePlatform:
             title=spec.title,
             description=spec.description,
             stream_id=stream.stream_id,
+            privacy_status=spec.privacy,
+            auto_start=spec.auto_start,
+            auto_stop=spec.auto_stop,
+            latency_preference=spec.latency_preference,
         )
         self._streams.setdefault(channel.account_name, {})[stream.stream_id] = stream
         self._broadcasts.setdefault(channel.account_name, {})[broadcast.broadcast_id] = broadcast
@@ -230,22 +258,36 @@ class FakePlatform:
         broadcast_id: str,
         language: str,
         category_id: str,
+        privacy: str,
     ) -> VideoFixes:
         self.settings_calls.append(broadcast_id)
         if broadcast_id in self.fail_settings:
             raise self.fail_settings[broadcast_id]
+        current: UpcomingBroadcast | None = self._broadcasts.get(channel.account_name, {}).get(broadcast_id)
         fixes: VideoFixes = VideoFixes(
             language_set=self.languages.get(broadcast_id) != language,
             category_set=self.categories.get(broadcast_id) != category_id,
             audience_cleared=self.made_for_kids.get(broadcast_id, False),
+            privacy_set=current is not None and current.privacy_status != privacy,
         )
         if not fixes.any_fix:
             return fixes
         self.languages[broadcast_id] = language
         self.categories[broadcast_id] = category_id
         self.made_for_kids[broadcast_id] = False
+        if current is not None:
+            self._broadcasts[channel.account_name][broadcast_id] = replace(current, privacy_status=privacy)
         self.settings_writes.append(broadcast_id)
         return fixes
+
+    def set_stream_marker(self, channel: ChannelConfig, stream_id: str, marker: str) -> None:
+        if stream_id in self.fail_marker:
+            raise self.fail_marker[stream_id]
+        stream: StreamInfo | None = self._streams.get(channel.account_name, {}).get(stream_id)
+        if stream is None:
+            raise PlatformError(NOT_FOUND_CODE, f"stream {stream_id} not found on {channel.account_name}")
+        self._streams[channel.account_name][stream_id] = replace(stream, title=marker)
+        self.markers_set.append(FakeCall(channel.account_name, stream_id, marker, None))
 
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
         if broadcast_id in self.fail_thumbnail:
@@ -270,7 +312,7 @@ class FakePlatform:
             title=broadcast.title,
             description=broadcast.description,
             start_utc=broadcast.start_utc,
-            privacy_status=channel.privacy.value,
+            privacy_status=broadcast.privacy_status,
             made_for_kids=self.made_for_kids.get(broadcast_id, False),
             age_restricted=broadcast_id in self.age_restricted,
             default_language=self.languages.get(broadcast_id),
@@ -279,6 +321,9 @@ class FakePlatform:
             bound_stream_id=broadcast.stream_id,
             stream_marker=stream.title if stream is not None else None,
             live_chat_id=self.live_chat_ids.get(broadcast_id),
+            auto_start=broadcast.auto_start,
+            auto_stop=broadcast.auto_stop,
+            latency_preference=broadcast.latency_preference,
         )
 
     def _login_if_needed(self, channel: ChannelConfig) -> None:

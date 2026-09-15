@@ -125,9 +125,14 @@ class VerifiedPlatform:
         broadcast_id: str,
         language: str,
         category_id: str,
+        privacy: str,
     ) -> VideoFixes:
         self.verify(channel)
-        return self._platform.apply_video_settings(channel, broadcast_id, language, category_id)
+        return self._platform.apply_video_settings(channel, broadcast_id, language, category_id, privacy)
+
+    def set_stream_marker(self, channel: ChannelConfig, stream_id: str, marker: str) -> None:
+        self.verify(channel)
+        self._platform.set_stream_marker(channel, stream_id, marker)
 
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
         self.verify(channel)

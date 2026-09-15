@@ -5,7 +5,8 @@
 Решения и найденные данные записываются в сами объекты; наружу отдаются только эфиры,
 у которых есть маркер планера, но нет соответствующего слота (сироты, §12 п.4).
 Маркер планера — slot_id в названии привязанного потока. Поток с другим названием
-(ручной эфир) считается эфиром без маркера.
+(ручной эфир) считается эфиром без маркера; найденный такой эфир планер усыновляет —
+расхождение по MARKER исправимо, как и прочие поля FIXABLE_FIELDS.
 """
 from __future__ import annotations
 
@@ -18,8 +19,18 @@ from typing import Final
 from app.config.loader import ChannelConfig
 from app.core.dates import SLOT_TIME_FORMAT, build_slot_id, format_date, format_time, parse_date
 from app.observability.logging_setup import get_logger, mask_stream_key
-from app.pipeline.plan import BroadcastSpec, Decision, OutcomeError, PlannedBroadcast, to_minute
-from app.platforms.base import BroadcastPlatform, PlatformError, StreamInfo, UpcomingBroadcast
+from app.pipeline.plan import (
+    WARNING_STEP_AMBIGUOUS,
+    WARNING_STEP_REPORTED_FIELD,
+    BroadcastSpec,
+    ChangedField,
+    Decision,
+    OutcomeError,
+    OutcomeWarning,
+    PlannedBroadcast,
+    to_minute,
+)
+from app.platforms.base import BroadcastPlatform, PlatformError, StreamInfo, UpcomingBroadcast, broadcast_url_for
 
 LOGGER = get_logger("reconciler")
 # Форма маркера планера — единственный источник.
@@ -61,6 +72,19 @@ class ChannelFailure:
 class MarkedScan:
     broadcasts: tuple[MarkedBroadcast, ...]
     failures: tuple[ChannelFailure, ...]
+
+
+@dataclass(frozen=True)
+class CandidatePick:
+    """Итог опознания на минуту старта: найденный эфир или все неразличимые кандидаты."""
+
+    broadcast: UpcomingBroadcast | None = None
+    stream: StreamInfo | None = None
+    ambiguous: tuple[UpcomingBroadcast, ...] = ()   # два и более эфира без маркера
+
+    @property
+    def is_ambiguous(self) -> bool:
+        return bool(self.ambiguous)
 
 
 def split_marker(marker: str) -> MarkerParts | None:
@@ -148,48 +172,78 @@ class Reconciler:
             else:
                 self._decide(item, broadcasts)
             LOGGER.info(
-                'pair_decision slot_id=%s channel="%s" decision=%s broadcast_id=%s stream_key=%s',
+                'pair_decision slot_id=%s channel="%s" decision=%s broadcast_id=%s stream_key=%s fixable=%s reported=%s',
                 item.slot_id,
                 channel.account_name,
                 item.decision.value,
                 item.found.broadcast_id if item.found else "-",
                 mask_stream_key(item.stream_key),
+                ",".join(name.value for name in item.changed_fields) or "-",
+                ",".join(name.value for name in item.reported_fields) or "-",
             )
         return self._orphans(channel, broadcasts, slot_ids)
 
     def _decide(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> None:
         """Эфира на площадке нет — CREATE: памяти о прошлых запусках у планера нет, действие одно и то же."""
-        found, stream, is_ambiguous = self._find(item, broadcasts)
-        if is_ambiguous:
+        pick: CandidatePick = self._find(item, broadcasts)
+        if pick.is_ambiguous:
             item.decision = Decision.AMBIGUOUS
+            self._warn_ambiguous(item, pick.ambiguous)
             return
-        if found is None:
+        if pick.broadcast is None:
             item.decision = Decision.CREATE
             return
-        item.found = found
-        item.found_stream = stream
-        item.actual = BroadcastSpec.from_platform(found, stream, self._platform.limits)
-        if stream is None:
+        item.found = pick.broadcast
+        item.found_stream = pick.stream
+        item.actual = BroadcastSpec.from_platform(pick.broadcast, pick.stream, self._platform.limits)
+        changed: tuple[ChangedField, ...] = item.actual.diff(item.expected)
+        if pick.stream is None:
+            # поток будет создан уже с меткой планера: чинить метку нечему
+            changed = tuple(name for name in changed if name is not ChangedField.MARKER)
+        item.split_changed(changed)
+        self._warn_reported(item)
+        if pick.stream is None:
             item.decision = Decision.NO_STREAM
             return
         item.take_found_key()
-        item.changed_fields = item.actual.diff(item.expected)
         item.decision = Decision.UPDATE if item.changed_fields else Decision.MATCH
 
     def _read_key_only(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> None:
         """too_late: только опознать эфир и взять его ключ; не нашёлся — ключа нет, решение прежнее."""
-        found, stream, is_ambiguous = self._find(item, broadcasts)
-        if is_ambiguous or found is None or stream is None:
+        pick: CandidatePick = self._find(item, broadcasts)
+        if pick.is_ambiguous or pick.broadcast is None or pick.stream is None:
             return
-        item.found = found
-        item.found_stream = stream
+        item.found = pick.broadcast
+        item.found_stream = pick.stream
         item.take_found_key()
 
-    def _find(
-        self,
-        item: PlannedBroadcast,
-        broadcasts: list[UpcomingBroadcast],
-    ) -> tuple[UpcomingBroadcast | None, StreamInfo | None, bool]:
+    def _warn_reported(self, item: PlannedBroadcast) -> None:
+        """Расходится, но через API не исправляется: лог и предупреждение объекта, решение не меняется."""
+        if item.actual is None:
+            return
+        for name in item.reported_fields:
+            LOGGER.warning(
+                'broadcast_setting_not_fixable slot_id=%s channel="%s" field=%s wanted=%s actual=%s',
+                item.slot_id,
+                item.channel.account_name,
+                name.value,
+                item.expected.value(name),
+                item.actual.value(name),
+            )
+            item.warn(OutcomeWarning(WARNING_STEP_REPORTED_FIELD, name.value))
+
+    def _warn_ambiguous(self, item: PlannedBroadcast, candidates: tuple[UpcomingBroadcast, ...]) -> None:
+        """Планер не выбирает и не удаляет (инвариант 8), но обязан сказать, какие эфиры мешают."""
+        item.ambiguous_urls = tuple(broadcast_url_for(item.channel, broadcast.broadcast_id) for broadcast in candidates)
+        LOGGER.warning(
+            'broadcast_ambiguous slot_id=%s channel="%s" candidates=%s',
+            item.slot_id,
+            item.channel.account_name,
+            ",".join(broadcast.broadcast_id for broadcast in candidates),
+        )
+        item.warn(OutcomeWarning(WARNING_STEP_AMBIGUOUS, str(len(candidates))))
+
+    def _find(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> CandidatePick:
         candidates: list[UpcomingBroadcast] = [
             broadcast for broadcast in broadcasts if to_minute(broadcast.start_utc) == item.expected.start_minute
         ]
@@ -200,22 +254,22 @@ class Reconciler:
         channel: ChannelConfig,
         slot_id: str,
         candidates: list[UpcomingBroadcast],
-    ) -> tuple[UpcomingBroadcast | None, StreamInfo | None, bool]:
-        """(эфир, поток, неоднозначно): свой маркер → он; маркер другого слота — мимо; без маркера — только один."""
+    ) -> CandidatePick:
+        """Свой маркер → он; маркер другого слота — мимо; без маркера — только один, иначе все они неразличимы."""
         unmarked: list[tuple[UpcomingBroadcast, StreamInfo | None]] = []
         for candidate in candidates:
             stream: StreamInfo | None = self._stream(channel, candidate.stream_id)
             marker: str | None = stream.title if stream is not None else None
             if marker == slot_id:
-                return candidate, stream, False
+                return CandidatePick(broadcast=candidate, stream=stream)
             if marker is not None and PLANER_MARKER_PATTERN.fullmatch(marker):
                 continue
             unmarked.append((candidate, stream))
         if len(unmarked) > 1:
-            return None, None, True
+            return CandidatePick(ambiguous=tuple(broadcast for broadcast, _ in unmarked))
         if unmarked:
-            return unmarked[0][0], unmarked[0][1], False
-        return None, None, False
+            return CandidatePick(broadcast=unmarked[0][0], stream=unmarked[0][1])
+        return CandidatePick()
 
     def _orphans(
         self,

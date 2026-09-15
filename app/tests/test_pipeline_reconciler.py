@@ -5,7 +5,13 @@ from datetime import datetime, timedelta
 
 from app.config.loader import PlanerConfig
 from app.package.model import Slot
-from app.pipeline.plan import ChangedField, Decision, PlannedBroadcast
+from app.pipeline.plan import (
+    WARNING_STEP_AMBIGUOUS,
+    WARNING_STEP_REPORTED_FIELD,
+    ChangedField,
+    Decision,
+    PlannedBroadcast,
+)
 from app.pipeline.reconciler import MarkerParts, OrphanBroadcast, Reconciler, split_marker
 from app.platforms.base import PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
@@ -77,8 +83,8 @@ def test_marked_broadcast_with_same_texts_matches(
     assert item.decision is Decision.MATCH
     assert item.found == seeded
     assert item.found_stream is not None and item.found_stream.stream_name == "abcd-abcd-abcd-abcd-abcd"
-    # ключ и ссылка — те, что сейчас на площадке; новым такой ключ не считается
-    assert (item.broadcast_id, item.stream_key, item.is_new_key) == (
+    # ключ и ссылка — те, что сейчас на площадке; эфир с нашей меткой совпал — в форму ключ не идёт
+    assert (item.broadcast_id, item.stream_key, item.should_send_key) == (
         seeded.broadcast_id,
         "abcd-abcd-abcd-abcd-abcd",
         False,
@@ -171,17 +177,19 @@ def test_two_languages_on_one_minute_each_find_their_marker(
     assert len(fake_platform.stream_calls) == len(set(fake_platform.stream_calls))
 
 
-def test_single_manual_broadcast_matches_with_its_platform_key(
+def test_single_manual_broadcast_is_adopted_with_its_platform_key(
     fake_platform: FakePlatform,
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
     now: datetime,
 ) -> None:
+    """Ручной эфир без метки опознан: метка планера — исправимое поле, значит UPDATE."""
     slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
     manual: UpcomingBroadcast = _seed_like(fake_platform, "yt_ua", slot, marker="Мой поток")
     [item] = _objects(make_config(), slot)
     _reconcile(fake_platform, make_config(), item)
-    assert item.decision is Decision.MATCH
+    assert item.decision is Decision.UPDATE
+    assert item.changed_fields == (ChangedField.MARKER,)
     assert item.found == manual
     assert item.found_stream is not None
     assert item.stream_key == item.found_stream.stream_name
@@ -210,11 +218,48 @@ def test_two_manual_broadcasts_are_ambiguous(
     now: datetime,
 ) -> None:
     slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
-    _seed_like(fake_platform, "yt_ua", slot, marker=None)
-    _seed_like(fake_platform, "yt_ua", slot, marker="Мой поток")
+    first: UpcomingBroadcast = _seed_like(fake_platform, "yt_ua", slot, marker=None)
+    second: UpcomingBroadcast = _seed_like(fake_platform, "yt_ua", slot, marker="Мой поток")
     [item] = _objects(make_config(), slot)
     _reconcile(fake_platform, make_config(), item)
     assert item.decision is Decision.AMBIGUOUS
+    # планер не выбирает, но называет все эфиры-кандидаты: предупреждение объекта со ссылками
+    assert item.ambiguous_urls == (
+        f"https://www.youtube.com/watch?v={first.broadcast_id}",
+        f"https://www.youtube.com/watch?v={second.broadcast_id}",
+    )
+    assert [warning.step for warning in item.warnings] == [WARNING_STEP_AMBIGUOUS]
+
+
+def test_privacy_only_difference_means_update(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """Живой прогон 15-09: владелец поставил Private, тексты совпадали — раньше это было decision=match."""
+    slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    _seed_like(fake_platform, "yt_ua", slot, privacy="private")
+    [item] = _objects(make_config(), slot)
+    _reconcile(fake_platform, make_config(), item)
+    assert item.decision is Decision.UPDATE
+    assert (item.changed_fields, item.reported_fields) == ((ChangedField.PRIVACY,), ())
+
+
+def test_auto_start_difference_is_reported_but_keeps_the_decision(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """Автостарт через API не исправить (monitorStream): решение прежнее, но владелец узнаёт."""
+    slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    _seed_like(fake_platform, "yt_ua", slot, auto_start=False)
+    [item] = _objects(make_config(), slot)
+    _reconcile(fake_platform, make_config(), item)
+    assert item.decision is Decision.MATCH
+    assert (item.changed_fields, item.reported_fields) == ((), (ChangedField.AUTO_START,))
+    assert [(warning.step, warning.code) for warning in item.warnings] == [(WARNING_STEP_REPORTED_FIELD, "auto_start")]
 
 
 def test_list_failure_is_isolated_to_its_channel(
@@ -261,7 +306,7 @@ def test_too_late_object_only_reads_its_key(
     [later_item] = _objects(make_config(), later)
     _reconcile(fake_platform, make_config(), _too_late(soon_item), later_item)
     assert soon_item.decision is Decision.TOO_LATE
-    assert (soon_item.found, soon_item.stream_key, soon_item.is_new_key) == (seeded, "soon-soon-soon-soon-soon", False)
+    assert (soon_item.found, soon_item.stream_key, soon_item.should_send_key) == (seeded, "soon-soon-soon-soon-soon", False)
     assert (soon_item.actual, soon_item.changed_fields) == (None, ())
     assert later_item.decision is Decision.MATCH
     assert fake_platform.list_calls == ["yt_ua", "yt_ru"]                        # по-прежнему раз на канал

@@ -8,7 +8,9 @@ from typing import Any
 import pytest
 from googleapiclient.errors import HttpError
 
-from app.config.loader import ChannelConfig, Platform, PlanerSettings, Privacy
+from dataclasses import replace
+
+from app.config.loader import ChannelConfig, Platform, Privacy
 from app.google import api_retry
 from app.platforms import youtube as youtube_module
 from app.pipeline.plan import BroadcastSpec
@@ -29,13 +31,6 @@ CHANNEL: ChannelConfig = ChannelConfig(
     google_account="owner@gmail.com",
     languages=("uk",),
     privacy=Privacy.PUBLIC,
-)
-SETTINGS: PlanerSettings = PlanerSettings(
-    min_lead_minutes=60,
-    keep_days=30,
-    auto_start=True,
-    set_thumbnail=True,
-    category_id="22",
 )
 GOOD_KEY: str = "abcd-1234-efgh-5678-ijkl"
 
@@ -104,7 +99,7 @@ class _FakeService:
 def platform(tmp_path: Path) -> YouTubePlatform:
     client_secret: Path = tmp_path / "client_secret.json"
     client_secret.write_text("{}", encoding="utf-8")
-    return YouTubePlatform(client_secret, tmp_path, SETTINGS)
+    return YouTubePlatform(client_secret, tmp_path)
 
 
 def _install(
@@ -251,10 +246,29 @@ def test_broadcast_without_start_is_skipped(
     item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
     item["snippet"].pop("scheduledStartTime")
     _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
-    with caplog.at_level("DEBUG"):
+    with caplog.at_level("WARNING"):
         assert platform.list_upcoming(CHANNEL) == []
-    # дефолтный эфир канала без времени старта — норма, поэтому debug, а не warning
-    assert "broadcast_without_start" in caplog.text
+    # такой эфир планер не видит вовсе: владелец должен узнать, какой именно
+    assert "broadcast_without_start" in caplog.text and "Эфир B1" in caplog.text
+
+
+def test_list_upcoming_reads_privacy_and_content_details(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Части status и contentDetails уже запрашиваются: новых вызовов API нет."""
+    item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    item["status"] = {"privacyStatus": "private"}
+    item["contentDetails"].update({"enableAutoStart": False, "enableAutoStop": True, "latencyPreference": "low"})
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
+    [broadcast] = platform.list_upcoming(CHANNEL)
+    assert (broadcast.privacy_status, broadcast.auto_start, broadcast.auto_stop, broadcast.latency_preference) == (
+        "private",
+        False,
+        True,
+        "low",
+    )
+    assert len(service.calls) == 1 and service.calls[0]["part"] == "snippet,contentDetails,status"
 
 
 def test_get_stream_reads_marker_and_key(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -383,6 +397,11 @@ def _spec(now: datetime) -> BroadcastSpec:
         marker="17-03-2027_1900_uk",
         title="Эфир",
         description="Описание",
+        privacy="public",
+        category_id="22",
+        auto_start=True,
+        auto_stop=True,
+        latency_preference="normal",
     )
 
 
@@ -408,7 +427,7 @@ def test_create_broadcast_inserts_binds_and_returns_key(
     insert: dict[str, Any] = service.calls[0]["body"]
     assert insert["snippet"]["scheduledStartTime"] == "2027-03-17T17:00:00Z"
     assert insert["snippet"]["title"] == "Эфир"
-    assert insert["snippet"]["categoryId"] == SETTINGS.category_id
+    assert insert["snippet"]["categoryId"] == spec.category_id
     assert insert["status"]["privacyStatus"] == "public"
     assert insert["status"]["selfDeclaredMadeForKids"] is False
     assert insert["contentDetails"] == {
@@ -418,33 +437,33 @@ def test_create_broadcast_inserts_binds_and_returns_key(
     }
     stream_body: dict[str, Any] = service.calls[1]["body"]
     assert stream_body["snippet"]["title"] == spec.marker      # маркер планера (§7.3)
+    # описание ключа в Студии: чей ключ и для какого эфира
+    assert stream_body["snippet"]["description"].startswith("Ключ планера: канал «Канал UA», эфир 17-03-2027 19:00, язык uk")
     assert stream_body["cdn"] == {"ingestionType": "rtmp", "resolution": "variable", "frameRate": "variable"}
     assert service.calls[2]["method"] == "bind"
     assert (service.calls[2]["id"], service.calls[2]["streamId"]) == ("B1", "S1")
 
 
-def test_auto_start_and_category_come_from_planer_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Настройки эфира общие для всех каналов: канал в channels.json их не задаёт."""
-    client_secret: Path = tmp_path / "client_secret.json"
-    client_secret.write_text("{}", encoding="utf-8")
-    settings: PlanerSettings = PlanerSettings(
-        min_lead_minutes=60,
-        keep_days=30,
-        auto_start=False,
-        set_thumbnail=False,
-        category_id="25",
-    )
-    platform: YouTubePlatform = YouTubePlatform(client_secret, tmp_path, settings)
+def test_broadcast_body_comes_from_the_spec(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Всё, что уходит в эфир, — из спеки: там же оно сверяется с площадкой."""
     service: _FakeService = _install(
         platform,
         monkeypatch,
         _FakeService(liveBroadcasts=[{"id": "B1"}, {"id": "B1"}, {"id": "B1"}], liveStreams=[_stream_response()]),
     )
-    spec: BroadcastSpec = _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc))
+    spec: BroadcastSpec = replace(
+        _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)),
+        auto_start=False,
+        category_id="25",
+        privacy="unlisted",
+        latency_preference="low",
+    )
     platform.create_broadcast(CHANNEL, spec)
     platform.update_broadcast(CHANNEL, "B1", spec)
     insert: dict[str, Any] = service.calls[0]["body"]
     assert insert["contentDetails"]["enableAutoStart"] is False
+    assert insert["contentDetails"]["latencyPreference"] == "low"
+    assert insert["status"]["privacyStatus"] == "unlisted"
     assert insert["snippet"]["categoryId"] == "25"
     assert service.calls[3]["body"]["snippet"]["categoryId"] == "25"
 
@@ -457,7 +476,6 @@ def test_login_callback_gets_the_channel_before_the_browser(tmp_path: Path, monk
     platform: YouTubePlatform = YouTubePlatform(
         client_secret,
         tmp_path,
-        SETTINGS,
         on_login=lambda channel: logins.append(channel.account_name),
     )
     token_files: list[Path] = []
@@ -529,12 +547,30 @@ def test_update_sends_time_and_category(
 ) -> None:
     """update заменяет snippet целиком: без времени и категории они бы потерялись."""
     service: _FakeService = _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"id": "B1"}]))
-    platform.update_broadcast(CHANNEL, "B1", _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
+    spec: BroadcastSpec = _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc))
+    platform.update_broadcast(CHANNEL, "B1", spec)
     body: dict[str, Any] = service.calls[0]["body"]
     assert service.calls[0]["part"] == "snippet"      # contentDetails тянет monitorStream
     assert body["id"] == "B1"
     assert body["snippet"]["scheduledStartTime"] == "2027-03-17T17:00:00Z"
-    assert body["snippet"]["categoryId"] == SETTINGS.category_id   # категория канала, а не найденная
+    assert body["snippet"]["categoryId"] == spec.category_id   # категория из спеки, а не найденная
+
+
+def test_set_stream_marker_rewrites_snippet_whole(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    """liveStreams.update(part=snippet): читаем snippet целиком, меняем название и описание, пишем обратно."""
+    stream_snippet: dict[str, Any] = {"title": "Мой ключ", "description": "", "isDefaultStream": False, "channelId": "UC1"}
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveStreams=[{"items": [{"id": "S1", "snippet": stream_snippet}]}, {"id": "S1"}]),
+    )
+    platform.set_stream_marker(CHANNEL, "S1", "17-03-2027_1900_uk")
+    assert [(call["method"], call["part"]) for call in service.calls] == [("list", "snippet"), ("update", "snippet")]
+    body: dict[str, Any] = service.calls[1]["body"]
+    assert body["id"] == "S1"
+    assert body["snippet"]["title"] == "17-03-2027_1900_uk"
+    assert body["snippet"]["description"].startswith("Ключ планера: канал «Канал UA», эфир 17-03-2027 19:00, язык uk")
+    assert (body["snippet"]["channelId"], body["snippet"]["isDefaultStream"]) == ("UC1", False)   # не затёрты
 
 
 def _video_item(**overrides: Any) -> dict[str, Any]:
@@ -562,8 +598,9 @@ def test_video_settings_are_applied_in_one_write(
             ]
         ),
     )
-    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22")
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22", "unlisted")
     assert (fixes.language_set, fixes.category_set, fixes.audience_cleared) == (True, True, True)
+    assert fixes.privacy_set is False
     assert len(service.calls) == 2
     body: dict[str, Any] = service.calls[1]["body"]
     assert service.calls[1]["part"] == "snippet,status"
@@ -580,7 +617,7 @@ def test_matching_video_settings_are_not_written(
 ) -> None:
     """Совпало всё — записи не делается вовсе: лишняя квота и лишний риск."""
     service: _FakeService = _install(platform, monkeypatch, _FakeService(videos=[_video_item()]))
-    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22")
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22", "unlisted")
     assert fixes.any_fix is False
     assert len(service.calls) == 1
 
@@ -595,8 +632,25 @@ def test_channel_level_audience_is_also_fixed(
         monkeypatch,
         _FakeService(videos=[_video_item(status={"madeForKids": True}), {"id": "B1"}]),
     )
-    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22")
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22", "unlisted")
     assert fixes.audience_cleared is True
+
+
+def test_privacy_is_restored_in_the_same_write(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Владелец поставил Private: видимость возвращается тем же videos.update, status — целиком."""
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(videos=[_video_item(status={"privacyStatus": "private", "embeddable": True}), {"id": "B1"}]),
+    )
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22", "unlisted")
+    assert (fixes.privacy_set, fixes.language_set, fixes.category_set) == (True, False, False)
+    body: dict[str, Any] = service.calls[1]["body"]
+    assert body["status"]["privacyStatus"] == "unlisted"
+    assert body["status"]["embeddable"] is True
 
 def test_read_facts_collects_language_audience_and_age(
     platform: YouTubePlatform,

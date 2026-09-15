@@ -1,5 +1,5 @@
 {
-    "min_lead_minutes": 10,
+    "min_lead_minutes": 60,
     "keep_days": 30,
     "auto_start": true,
     "set_thumbnail": true,

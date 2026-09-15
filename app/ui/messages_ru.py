@@ -154,8 +154,9 @@ OUTCOME_SLOT_PREFIX: Final[str] = "{date} {time} {language} -> {account_name}"
 OUTCOME_CHANNEL_PREFIX: Final[str] = "{account_name}"
 OUTCOME_CREATED: Final[str] = "{prefix} — эфир создан, {form}"
 OUTCOME_CREATE_PLANNED: Final[str] = "{prefix} — эфира нет, будет создан"
-OUTCOME_FIXED: Final[str] = "{prefix} — на YouTube было другое {what}; обновлено, ключ и ссылка не менялись"
-OUTCOME_FIX_PLANNED: Final[str] = "{prefix} — на YouTube другое {what}; будет обновлено"
+OUTCOME_FIXED: Final[str] = "{prefix} — на YouTube отличалось: {what}; исправлено, ключ и ссылка прежние{form}"
+OUTCOME_FIXED_FORM: Final[str] = ", {mark}"
+OUTCOME_FIX_PLANNED: Final[str] = "{prefix} — на YouTube отличается: {what}; будет исправлено, ключ уйдёт в форму"
 OUTCOME_MATCHED: Final[str] = "{prefix} — {url}"
 OUTCOME_NO_STREAM: Final[str] = (
     "{prefix} — эфир на канале есть ({url}), но к нему не привязан поток: ключ взять неоткуда. "
@@ -167,17 +168,29 @@ OUTCOME_STREAM_ATTACHED: Final[str] = (
 WARNING_LINE: Final[str] = "{prefix}: {step} — {code} ({message})"
 # ключи — WARNING_STEP_* (app/pipeline/plan.py)
 MISMATCH_LINE: Final[str] = "{prefix}: {field} — хотели: {wanted}; на платформе: {actual}"
-MISMATCH_FIELD_TITLE: Final[str] = "название"
-MISMATCH_FIELD_DESCRIPTION: Final[str] = "описание"
+# поля спеки называются по CHANGED_FIELD_TEXT; здесь — только то, чего в спеке нет
 MISMATCH_FIELD_START: Final[str] = "время старта"
-MISMATCH_FIELD_MARKER: Final[str] = "маркер потока"
 MISMATCH_FIELD_LANGUAGE: Final[str] = "язык"
 MISMATCH_FIELD_AUDIENCE: Final[str] = "аудитория"
-MISMATCH_FIELD_CATEGORY: Final[str] = "категория"
+SPEC_VALUE_TRUE: Final[str] = "да"
+SPEC_VALUE_FALSE: Final[str] = "нет"
+WARNING_REPORTED_FIELD: Final[str] = (
+    "{prefix}: {field} — хотели: {wanted}; на YouTube: {actual}. Через API это не исправляется "
+    "(нужен monitorStream) — поправьте в Студии; эфир и ключ в силе"
+)
+WARNING_AMBIGUOUS: Final[str] = (
+    "{prefix}: на канале несколько эфиров без метки планера на эту минуту — планер не выбирает и не удаляет; "
+    "оставьте один: {urls}"
+)
+AMBIGUOUS_URL_JOINER: Final[str] = ", "
+# Описание ключа потока в Студии (Создать -> Управление ключами трансляции); зрителям не видно.
+STREAM_DESCRIPTION: Final[str] = (
+    "Ключ планера: канал «{account_name}», эфир {date} {time}, язык {language}; записано планером {written_at}"
+)
 WARNING_FORM_DIAGNOSTIC: Final[str] = "ответ формы сохранён для разбора: {path}"
 # Постоянные особенности площадки — только в отчёте, разделом «Особенности площадки» (ТЗ §5.6).
 WARNING_KEPT_KEY: Final[str] = (
-    "эфир уже стоял, ключ не менялся — в форму не отправляется: повтор задвоил бы ключ у стримера. "
+    "эфир с меткой планера совпал с пакетом — его ключ уже уходил в форму раньше и повторно не отправляется. "
     "Если стример ключа не получил — передайте его из keys.txt вручную или удалите эфир на YouTube: "
     "планер создаст его заново с новым ключом и отправит"
 )
@@ -192,7 +205,6 @@ WARNING_STEP_TEXT: Final[dict[str, str]] = {
     "thumbnail": "обложка не поставлена (нужен подтверждённый канал); эфир и ключ в силе",
     "language": "язык эфира не записан; эфир и ключ в силе",
     "audience": "аудитория эфира была «для детей» (настройка канала) — планер снял её; проверьте настройки канала",
-    "category": "категория эфира была другой — планер поставил ту, что в planer.json",
     "settings": "не удалось применить настройки эфира (язык, категория, аудитория); эфир и ключ в силе",
     "age_restricted": "на эфире стоит возрастное ограничение 18+; через API оно не снимается — снимите вручную в Студии",
     "facts": "не удалось перечитать эфир после планирования; на сам эфир это не влияет",
@@ -217,9 +229,18 @@ FORM_REASON_TEXT: Final[dict[str, str]] = {
     "notConfirmed": "форма не подтвердила запись ответа ({detail})",
 }
 FORM_REASON_UNKNOWN: Final[str] = "отправка не удалась ({detail})"
-# ключи — значения ChangedField (app/pipeline/reconciler.py)
-CHANGED_FIELD_TEXT: Final[dict[str, str]] = {"title": "название", "description": "описание"}
-CHANGED_FIELDS_JOINER: Final[str] = " и "
+# ключи — значения ChangedField (app/pipeline/plan.py)
+CHANGED_FIELD_TEXT: Final[dict[str, str]] = {
+    "title": "название",
+    "description": "описание",
+    "category": "категория",
+    "privacy": "видимость",
+    "marker": "маркер потока",
+    "auto_start": "автостарт",
+    "auto_stop": "автостоп",
+    "latency": "задержка трансляции",
+}
+CHANGED_FIELDS_JOINER: Final[str] = ", "
 # ключи — OutcomeError.origin: значения Platform (app/config/loader.py) и источники планера
 ERROR_ORIGIN_TEXT: Final[dict[str, str]] = {
     "youtube": "YouTube",
@@ -309,8 +330,8 @@ CONSOLE_LABEL_LOG: Final[str] = "лог"
 KEYS_FILE_HEADER: Final[tuple[str, ...]] = (
     "# Ключи трансляций. Сгенерировано планером {generated_at}.",
     "# Файл перезаписывается на каждом запуске — не править.",
-    "# Строка «форма»: «отправлен в форму» — ключ у стримера; «эфир уже стоял, ключ не менялся» — "
-    "ключ прежний; «НЕ отправлен» — передайте ключ стримеру вручную.",
+    "# Строка «форма»: «отправлен в форму» — ключ у стримера; «в этом запуске в форму не отправлялся» — "
+    "эфир с меткой планера совпал, ключ уходил раньше; «НЕ отправлен» — передайте ключ стримеру вручную.",
 )
 KEYS_BLOCK_TITLE: Final[str] = "{date} {time}  {language}  {account_name}"
 KEYS_BLOCK_KEY: Final[str] = "  ключ   {value}"
@@ -318,5 +339,5 @@ KEYS_BLOCK_STREAM: Final[str] = "  поток  {value}"
 KEYS_BLOCK_BROADCAST: Final[str] = "  эфир   {value}"
 KEYS_BLOCK_FORM: Final[str] = "  форма  {value}"
 KEY_FORM_SENT: Final[str] = "отправлен в форму {sent_at}"
-KEY_FORM_KEPT: Final[str] = "эфир уже стоял, ключ не менялся — в форму не отправляется"
+KEY_FORM_KEPT: Final[str] = "в этом запуске в форму не отправлялся: эфир уже стоял с этим ключом"
 KEY_FORM_FAILED: Final[str] = "НЕ отправлен: {reason} — передайте стримеру вручную"

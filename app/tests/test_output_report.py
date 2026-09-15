@@ -57,7 +57,7 @@ TZ_SAMPLE_REPORT: str = f"""# Планер {APP_VERSION} — отчёт 13-09-20
 - 18-09-2026 19:00 uk -> Канал UA — эфир создан, ключ в форму НЕ передан — форма не подтвердила запись ответа (notConfirmed); повторно планер его не отправит, передайте ключ стримеру из keys.txt вручную
 
 ## Исправлено (1)
-- 17-09-2026 19:00 uk -> Канал UA — на YouTube было другое описание; обновлено, ключ и ссылка не менялись
+- 17-09-2026 19:00 uk -> Канал UA — на YouTube отличалось: описание; исправлено, ключ и ссылка прежние, ключ передан в форму
 
 ## Уже запланировано, совпадает (1)
 - 16-09-2026 21:00 ru -> Канал RU — https://www.youtube.com/watch?v=def456
@@ -123,7 +123,10 @@ def test_render_matches_tz_structure() -> None:
         outcomes=[
             PairOutcome(OutcomeKind.CREATED, "Канал UA", "16-09-2026", "19:00", "uk", form=FormState.SENT),
             PairOutcome(OutcomeKind.CREATED, "Канал UA", "18-09-2026", "19:00", "uk", form=FormState.FAILED),
-            PairOutcome(OutcomeKind.FIXED, "Канал UA", "17-09-2026", "19:00", "uk", changed_fields=("description",)),
+            PairOutcome(
+                OutcomeKind.FIXED, "Канал UA", "17-09-2026", "19:00", "uk",
+                changed_fields=("description",), form=FormState.SENT,
+            ),
             PairOutcome(
                 OutcomeKind.MATCHED,
                 "Канал RU",
@@ -208,7 +211,7 @@ def test_matched_fixed_ambiguous_and_planer_error_texts() -> None:
     )
     text: str = render_report(report)
     assert "-> Test UA — u1\n" in text
-    assert "другое название и описание; обновлено, ключ и ссылка не менялись\n" in text
+    assert "отличалось: название, описание; исправлено, ключ и ссылка прежние\n" in text
     assert "эфир создан, ключ передан в форму\n" in text
     assert "несколько эфиров на эту минуту без маркера планера" in text
     assert "у найденного эфира нет привязанного потока" in text

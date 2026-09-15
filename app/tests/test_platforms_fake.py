@@ -11,6 +11,7 @@ from app.package.model import Slot
 from app.platforms.base import PlatformError, StreamInfo, UpcomingBroadcast
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.fake import FakeCall, FakePlatform
+from app.tests.conftest import build_config
 
 # Регулярка ключа YouTube (ТЗ §7.4): фейковые ключи должны её проходить.
 YOUTUBE_KEY_PATTERN: re.Pattern[str] = re.compile(r"^[a-z0-9]{4}(-[a-z0-9]{4}){3,4}$")
@@ -53,7 +54,8 @@ def test_seed_without_marker_has_no_stream(
 
 def _spec(platform: FakePlatform, slot: Slot) -> BroadcastSpec:
     """Площадка получает спеку, а не слот (ТЗ §7.4)."""
-    return BroadcastSpec.from_slot(slot, platform.limits)
+    config: PlanerConfig = build_config()
+    return BroadcastSpec.from_slot(slot, platform.limits, config.channels[0], config.settings)
 
 
 def test_create_broadcast_is_deterministic_and_marked(

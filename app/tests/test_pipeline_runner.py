@@ -12,7 +12,8 @@ from typing import Any
 from app.config.loader import PlanerConfig
 from app.output.report import FormState, OutcomeKind, PackageLineStatus, SkipKind, SkippedLine
 from app.paths import PlanerPaths
-from app.pipeline.plan import Decision, PlannedBroadcast
+from app.output.console import render_console
+from app.pipeline.plan import ChangedField, Decision, PlannedBroadcast
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.form.base import FORM_CODE_NOT_CONFIRMED, FormSendResult
 from app.platforms.base import BroadcastFacts, PlatformError, UpcomingBroadcast
@@ -120,7 +121,7 @@ def test_failed_form_is_reported_and_never_retried(
     assert len(sender.calls) == 1                      # повтора нет: ключ прежний
     assert second.exit_code == ExitCode.OK
     assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.MATCHED
-    assert "эфир уже стоял, ключ не менялся — в форму не отправляется" in planer_paths.keys_file.read_text(encoding="utf-8")
+    assert msg.KEY_FORM_KEPT in planer_paths.keys_file.read_text(encoding="utf-8")
 
 
 def test_processed_package_stays_in_bcast(
@@ -205,7 +206,7 @@ def test_matched_key_comes_from_the_platform(
     assert outcome.exit_code == ExitCode.OK
     keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
     assert PLATFORM_KEY in keys_text
-    assert "эфир уже стоял, ключ не менялся — в форму не отправляется" in keys_text
+    assert msg.KEY_FORM_KEPT in keys_text
     assert form_sender.calls == [] and fake_platform.created == []
     assert outcome.report is not None
     [pair_outcome] = outcome.report.outcomes
@@ -216,7 +217,7 @@ def test_matched_broadcast_is_never_sent_to_the_form(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    """Прошлая отправка не подтвердилась — всё равно не шлём: повтор задвоил бы ключ у стримера."""
+    """Эфир с нашей меткой совпал с пакетом: ключ уже уходил раньше, в этом запуске его не шлём."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
     make_package(planer_paths.bcast_dir, slots=[spec])
     fake_platform.seed_broadcast("yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT)
@@ -224,7 +225,7 @@ def test_matched_broadcast_is_never_sent_to_the_form(
     assert form_sender.calls == []
     assert outcome.exit_code == ExitCode.OK            # отсутствие отправки по совпавшему эфиру — не ошибка
     assert len(_kept_key_lines(outcome)) == 1
-    assert "эфир уже стоял, ключ не менялся — в форму не отправляется" in _report_text(outcome)
+    assert msg.WARNING_KEPT_KEY in _report_text(outcome)
 
 
 def test_two_packages_with_one_slot_give_one_object_per_channel(
@@ -404,9 +405,10 @@ def test_fix_keeps_key_and_url(
     keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
     assert "abcd-abcd-abcd-abcd-abcd" in keys_text and found.broadcast_id in keys_text
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.FIXED
-    assert form_sender.calls == []                     # исправление текстов ключ не трогает и в форму не шлёт
+    # исправили — ключ прежний, но стример получает его в этом запуске (решение 15-09-2026)
+    assert [(call.slot_id, call.stream_key) for call in form_sender.calls] == [(UK_SLOT, "abcd-abcd-abcd-abcd-abcd")]
     assert outcome.exit_code == ExitCode.OK
-    assert "обновлено, ключ и ссылка не менялись" in _report_text(outcome)
+    assert "исправлено, ключ и ссылка прежние, ключ передан в форму" in _report_text(outcome)
 
 
 def test_one_failed_object_does_not_block_the_others(
@@ -775,8 +777,8 @@ def test_status_lists_marked_broadcasts_into_keys_file(
     lines: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").splitlines()
     blocks: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").split("\n\n")[1:]
     assert len(lines) == 3 + 2 * 6                   # шапка и два блока: пустая строка, заголовок, 4 поля
-    assert "  ключ   aaaa-aaaa-aaaa-aaaa-aaaa" in blocks[0] and "эфир уже стоял, ключ не менялся — в форму не отправляется" in blocks[0]
-    assert "  ключ   bbbb-bbbb-bbbb-bbbb-bbbb" in blocks[1] and "эфир уже стоял, ключ не менялся — в форму не отправляется" in blocks[1]
+    assert "  ключ   aaaa-aaaa-aaaa-aaaa-aaaa" in blocks[0] and msg.KEY_FORM_KEPT in blocks[0]
+    assert "  ключ   bbbb-bbbb-bbbb-bbbb-bbbb" in blocks[1] and msg.KEY_FORM_KEPT in blocks[1]
     assert outcome.report is not None
     assert [item.kind for item in outcome.report.outcomes] == [OutcomeKind.MATCHED, OutcomeKind.MATCHED]
 
@@ -787,3 +789,131 @@ def test_empty_bcast_exits_3(
 ) -> None:
     outcome: RunOutcome = _run(RunMode.DRY_RUN, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert (outcome.exit_code, outcome.problem) == (ExitCode.BCAST_EMPTY, RunProblem.BCAST_EMPTY)
+
+
+# --- задача 5d: сверяется всё, что планер диктует площадке
+
+
+def test_privacy_only_difference_is_fixed_and_key_goes_to_the_form(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Живой прогон 15-09: владелец поставил Private — планер возвращает видимость и шлёт ключ."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[spec])
+    found: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT, stream_key=PLATFORM_KEY,
+        privacy="private",
+    )
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    [pair] = outcome.report.outcomes
+    assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("privacy",), FormState.SENT)
+    assert [call.stream_key for call in form_sender.calls] == [PLATFORM_KEY]
+    assert fake_platform.updated == []                       # тексты совпадали: liveBroadcasts.update не нужен
+    [listed] = fake_platform.list_upcoming(make_config().channels[0])
+    assert (listed.broadcast_id, listed.privacy_status) == (found.broadcast_id, "public")
+    assert outcome.exit_code == ExitCode.OK
+
+
+def test_category_fixed_on_the_video_counts_as_a_fix(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Категорию список эфиров не возвращает: её расхождение видно у ресурса видео — и это тоже исправление."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[spec])
+    fake_platform.seed_broadcast(
+        "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT, category_id="24",
+    )
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    [pair] = outcome.report.outcomes
+    assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("category",), FormState.SENT)
+    assert len(form_sender.calls) == 1
+
+
+def test_auto_start_difference_keeps_decision_but_reaches_owner(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Автостарт через API не исправить: решение MATCH, ключ не шлём, но лог, «внимание:» и расхождение в отчёте."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[spec])
+    fake_platform.seed_broadcast(
+        "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT, auto_start=False,
+    )
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    [pair] = outcome.report.outcomes
+    assert pair.kind is OutcomeKind.MATCHED
+    assert form_sender.calls == []
+    warning: str = "17-03-2027 19:00 uk -> yt_ua: автостарт — хотели: да; на YouTube: нет."
+    assert any(line.startswith(warning) for line in outcome.report.run_warnings)
+    report_text: str = _report_text(outcome)
+    assert "17-03-2027 19:00 uk -> yt_ua: автостарт — хотели: да; на платформе: нет" in report_text
+    console: str = render_console(outcome.report, root=planer_paths.root, report_path=outcome.report_path)
+    assert f"  внимание: {warning}" in console
+    assert outcome.exit_code == ExitCode.OK
+
+
+def test_manual_broadcast_is_adopted_marked_and_its_key_sent(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Ручной эфир без нашей метки: стример этого ключа не видел — метку ставим, ключ шлём."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[spec])
+    manual: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", UK_START, spec["title"], spec["description"], marker="Мой поток", stream_key=PLATFORM_KEY,
+    )
+    first: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert [(call.broadcast_id, call.marker) for call in fake_platform.markers_set] == [(manual.stream_id, UK_SLOT)]
+    assert [call.stream_key for call in form_sender.calls] == [PLATFORM_KEY]
+    assert first.report is not None and first.report.outcomes[0].changed_fields == ("marker",)
+    assert fake_platform.created == [] and fake_platform.updated == []
+    # со следующего запуска видно, что ключ уходил: наша метка, MATCH, ключ повторно не шлём
+    second: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.MATCHED
+    assert len(form_sender.calls) == 1
+
+
+def test_two_unmarked_broadcasts_are_ambiguous_with_links(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Планер не выбирает и не удаляет, но называет дату, время, язык, канал и ссылки на всех кандидатов."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[spec])
+    first: UpcomingBroadcast = fake_platform.seed_broadcast("yt_ua", UK_START, "Ручной 1", "", marker=None)
+    second: UpcomingBroadcast = fake_platform.seed_broadcast("yt_ua", UK_START, "Ручной 2", "", marker="Мой поток")
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    [pair] = outcome.report.outcomes
+    assert pair.kind is OutcomeKind.AMBIGUOUS
+    urls: str = (
+        f"https://www.youtube.com/watch?v={first.broadcast_id}, https://www.youtube.com/watch?v={second.broadcast_id}"
+    )
+    [warning] = [line for line in outcome.report.run_warnings if line.startswith("17-03-2027 19:00 uk -> yt_ua")]
+    assert warning.endswith(urls)
+    assert warning in _report_text(outcome)
+    assert fake_platform.created == [] and fake_platform.markers_set == [] and form_sender.calls == []
+    assert outcome.exit_code == ExitCode.ERRORS
+
+
+def test_created_broadcast_has_no_marker_mismatch(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """14-09: факты не увидели только что привязанный поток — «маркер потока … на платформе: -» было ложным."""
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    real_read_facts = fake_platform.read_facts
+
+    def _facts_without_stream(channel: Any, broadcast_id: str) -> BroadcastFacts:
+        facts: BroadcastFacts = real_read_facts(channel, broadcast_id)
+        return BroadcastFacts(**{**facts.__dict__, "bound_stream_id": None, "stream_marker": None})
+
+    fake_platform.read_facts = _facts_without_stream  # type: ignore[method-assign]
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.CREATED
+    assert not any("маркер потока" in line for line in outcome.report.mismatches)

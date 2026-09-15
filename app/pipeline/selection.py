@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 
-from app.config.loader import ChannelConfig, PlanerConfig
+from app.config.loader import ChannelConfig, PlanerConfig, PlanerSettings
 from app.observability.logging_setup import get_logger
 from app.package.model import Package, Slot, slot_order_key
 from app.pipeline.plan import BroadcastSpec, Decision, PlannedBroadcast
@@ -60,7 +60,7 @@ def build_planned(
             continue
         is_too_late: bool = slot.start - now < lead
         planned.extend(
-            _build_one(slot, slot_sources[slot.slot_id], channel, limits, is_too_late)
+            _build_one(slot, slot_sources[slot.slot_id], channel, config.settings, limits, is_too_late)
             for channel in channels
         )
     planned.sort(key=lambda item: (*slot_order_key(item.slot), item.channel.account_name))
@@ -77,6 +77,7 @@ def _build_one(
     slot: Slot,
     source_package: Package,
     channel: ChannelConfig,
+    settings: PlanerSettings,
     limits: PlatformLimits,
     is_too_late: bool,
 ) -> PlannedBroadcast:
@@ -84,7 +85,7 @@ def _build_one(
         slot=slot,
         source_package=source_package,
         channel=channel,
-        expected=BroadcastSpec.from_slot(slot, limits),
+        expected=BroadcastSpec.from_slot(slot, limits, channel, settings),
         is_too_late=is_too_late,
         decision=Decision.TOO_LATE if is_too_late else Decision.CREATE,
     )

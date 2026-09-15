@@ -25,7 +25,7 @@ STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 # об этом запуске — отправлен сейчас, НЕ отправлен новый ключ, или эфир уже стоял с прежним ключом.
 TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенерировано планером 13-09-2026 12:00.
 # Файл перезаписывается на каждом запуске — не править.
-# Строка «форма»: «отправлен в форму» — ключ у стримера; «эфир уже стоял, ключ не менялся» — ключ прежний; «НЕ отправлен» — передайте ключ стримеру вручную.
+# Строка «форма»: «отправлен в форму» — ключ у стримера; «в этом запуске в форму не отправлялся» — эфир с меткой планера совпал, ключ уходил раньше; «НЕ отправлен» — передайте ключ стримеру вручную.
 
 16-09-2026 19:00  uk  Канал UA
   ключ   xxxx-xxxx-xxxx-xxxx-xxxx
@@ -43,7 +43,7 @@ TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенериров
   ключ   zzzz-zzzz-zzzz-zzzz-zzzz
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=ghi789
-  форма  эфир уже стоял, ключ не менялся — в форму не отправляется
+  форма  в этом запуске в форму не отправлялся: эфир уже стоял с этим ключом
 """
 
 
@@ -122,7 +122,9 @@ def test_form_status_texts_speak_only_about_this_run() -> None:
     new.form_sent_at = datetime(2026, 9, 13, 12, 0)
     assert form_status_text(new) == "отправлен в форму 13-09-2026 12:00"
     kept: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
-    assert form_status_text(kept) == "эфир уже стоял, ключ не менялся — в форму не отправляется"
+    assert form_status_text(kept) == "в этом запуске в форму не отправлялся: эфир уже стоял с этим ключом"
+    kept.require_key_delivery()                       # исправленный эфир: ключ прежний, но должен уйти
+    assert form_status_text(kept).startswith("НЕ отправлен: ")
 
 
 def test_status_row_does_not_look_into_the_journal() -> None:
@@ -133,7 +135,10 @@ def test_status_row_does_not_look_into_the_journal() -> None:
         parts=MarkerParts(date="16-09-2026", time="19:00", language="uk"),
     )
     row = key_row_from_marked(marked)
-    assert (row.form_status_text, row.stream_key) == ("эфир уже стоял, ключ не менялся — в форму не отправляется", "xxxx-xxxx-xxxx-xxxx-xxxx")
+    assert (row.form_status_text, row.stream_key) == (
+        "в этом запуске в форму не отправлялся: эфир уже стоял с этим ключом",
+        "xxxx-xxxx-xxxx-xxxx-xxxx",
+    )
 
 
 def test_empty_file_has_only_comment_lines(planer_paths: PlanerPaths) -> None:

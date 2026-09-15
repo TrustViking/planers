@@ -1,7 +1,8 @@
 """YouTube Data API v3 (ТЗ §7.3, §7.4): чтение и планирование эфиров.
 
 Чтение: describe_channel, list_upcoming, get_stream. Планирование: create_broadcast,
-update_broadcast, attach_stream, apply_video_settings. Любой сбой наружу — только PlatformError.
+update_broadcast, attach_stream, apply_video_settings, set_stream_marker. Любой сбой наружу — только PlatformError.
+Всё, что уходит в эфир, берётся из BroadcastSpec: отправляемое и сравниваемое совпадают по построению.
 """
 from __future__ import annotations
 
@@ -17,11 +18,13 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
 
-from app.config.loader import ChannelConfig, PlanerSettings
+from app.config.loader import ChannelConfig
 from app.google.api_retry import GoogleApiRetryPolicy, execute_with_retry
 from app.google.auth import AuthError, load_credentials, token_file_for
+from app.core.dates import format_datetime_text
 from app.observability.logging_setup import get_logger, mask_stream_key
 from app.pipeline.plan import BroadcastSpec
+from app.pipeline.reconciler import MarkerParts, split_marker
 from app.platforms.base import (
     BroadcastFacts,
     ChannelInfo,
@@ -33,6 +36,7 @@ from app.platforms.base import (
     VideoFixes,
     broadcast_url_for,
 )
+from app.ui import messages_ru as msg
 
 LOGGER = get_logger("youtube")
 
@@ -46,6 +50,7 @@ MAX_RESULTS: Final[int] = 50
 CHANNEL_PARTS: Final[str] = "snippet,brandingSettings"
 BROADCAST_PARTS: Final[str] = "snippet,contentDetails,status"
 STREAM_PARTS: Final[str] = "snippet,cdn"
+STREAM_UPDATE_PARTS: Final[str] = "snippet"   # snippet целиком: частичная часть затёрла бы описание
 BROADCAST_INSERT_PARTS: Final[str] = "snippet,status,contentDetails"
 BROADCAST_UPDATE_PARTS: Final[str] = "snippet"   # без contentDetails: он требует monitorStream
 BIND_PARTS: Final[str] = "id,contentDetails"
@@ -57,6 +62,7 @@ INGESTION_TYPE: Final[str] = "rtmp"
 STREAM_RESOLUTION: Final[str] = "variable"
 STREAM_FRAME_RATE: Final[str] = "variable"
 LATENCY_PREFERENCE: Final[str] = "normal"
+ENABLE_AUTO_STOP: Final[bool] = True
 THUMBNAIL_MIME_TYPE: Final[str] = "image/jpeg"
 
 # Формат ключа потока YouTube (ТЗ §7.4) — единственный источник.
@@ -97,7 +103,7 @@ RETRY_POLICY: Final[GoogleApiRetryPolicy] = GoogleApiRetryPolicy(
 class YouTubePlatform:
     """Клиент строится лениво и кешируется по channel.account_name: один токен — один канал.
 
-    Настройки эфира (auto_start, category_id) — из planer.json, общие для всех каналов (§7.4).
+    Настройки эфира площадка не хранит: всё, что уходит в эфир, приходит готовой спекой (§7.4).
     on_login вызывается ровно перед открытием браузера для входа в канал.
     """
 
@@ -105,12 +111,10 @@ class YouTubePlatform:
         self,
         client_secret_file: Path,
         secrets_dir: Path,
-        settings: PlanerSettings,
         on_login: Callable[[ChannelConfig], None] | None = None,
     ) -> None:
         self._client_secret_file: Path = client_secret_file
         self._secrets_dir: Path = secrets_dir
-        self._settings: PlanerSettings = settings
         self._on_login: Callable[[ChannelConfig], None] | None = on_login
         self._services: dict[str, Any] = {}
         self._channels: dict[str, ChannelInfo] = {}
@@ -120,6 +124,8 @@ class YouTubePlatform:
         return PlatformLimits(
             title_max_chars=YOUTUBE_TITLE_MAX_CHARS,
             description_max_chars=YOUTUBE_DESCRIPTION_MAX_CHARS,
+            auto_stop=ENABLE_AUTO_STOP,
+            latency_preference=LATENCY_PREFERENCE,
         )
 
     def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
@@ -208,7 +214,7 @@ class YouTubePlatform:
             "liveBroadcasts.insert",
             lambda service: service.liveBroadcasts().insert(
                 part=BROADCAST_INSERT_PARTS,
-                body=_broadcast_body(channel, spec, self._settings),
+                body=_broadcast_body(spec),
             ),
         )
         broadcast_id: str = _text(response, "id")
@@ -230,12 +236,12 @@ class YouTubePlatform:
         broadcast_id: str,
         spec: BroadcastSpec,
     ) -> None:
-        """update заменяет часть целиком: время и категорию из planer.json отправляем всегда."""
+        """update заменяет часть целиком: время и категорию из спеки отправляем всегда."""
         snippet: dict[str, Any] = {
             "title": spec.title,
             "description": spec.description,
             "scheduledStartTime": _rfc3339(spec.start_minute),
-            "categoryId": self._settings.category_id,
+            "categoryId": spec.category_id,
         }
         self._execute(
             channel,
@@ -253,11 +259,12 @@ class YouTubePlatform:
         broadcast_id: str,
         language: str,
         category_id: str,
+        privacy: str,
     ) -> VideoFixes:
-        """Одно чтение и не более одной записи: у liveBroadcast этих полей нет (§7.4).
+        """Одно чтение и не более одной записи: язык и аудиторию у liveBroadcast не записать (§7.4).
 
         Части snippet и status отправляются целиком: частичная часть затирает
-        непереданные поля, в том числе privacyStatus.
+        непереданные поля. Видимость — отсюда же: status читается и пишется целиком.
         """
         item: dict[str, Any] = self._video_item(channel, broadcast_id, VIDEO_SETTINGS_PARTS)
         snippet: dict[str, Any] = dict(_mapping(item, "snippet"))
@@ -268,6 +275,7 @@ class YouTubePlatform:
             category_set=snippet.get("categoryId") != category_id,
             audience_cleared=status.get("selfDeclaredMadeForKids") is not False
             or status.get("madeForKids") is True,
+            privacy_set=status.get("privacyStatus") != privacy,
         )
         if not fixes.any_fix:
             return fixes
@@ -275,6 +283,7 @@ class YouTubePlatform:
         snippet["defaultAudioLanguage"] = language
         snippet["categoryId"] = category_id
         status["selfDeclaredMadeForKids"] = False
+        status["privacyStatus"] = privacy
         self._execute(
             channel,
             "videos.update",
@@ -284,14 +293,38 @@ class YouTubePlatform:
             ),
         )
         LOGGER.info(
-            'video_settings_applied channel="%s" broadcast_id=%s language=%s category=%s audience=%s',
+            'video_settings_applied channel="%s" broadcast_id=%s language=%s category=%s audience=%s privacy=%s',
             channel.account_name,
             broadcast_id,
             fixes.language_set,
             fixes.category_set,
             fixes.audience_cleared,
+            fixes.privacy_set,
         )
         return fixes
+
+    def set_stream_marker(self, channel: ChannelConfig, stream_id: str, marker: str) -> None:
+        """liveStreams.update(part=snippet): snippet читается целиком, меняются только название и описание."""
+        response: dict[str, Any] = self._execute(
+            channel,
+            "liveStreams.list",
+            lambda service: service.liveStreams().list(part=STREAM_UPDATE_PARTS, id=stream_id),
+        )
+        items: list[dict[str, Any]] = _items(response)
+        if not items:
+            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"liveStreams.list is empty for {stream_id}")
+        snippet: dict[str, Any] = dict(_mapping(items[0], "snippet"))
+        snippet["title"] = marker
+        snippet["description"] = stream_description(channel, marker, _local_now())
+        self._execute(
+            channel,
+            "liveStreams.update",
+            lambda service: service.liveStreams().update(
+                part=STREAM_UPDATE_PARTS,
+                body={"id": stream_id, "snippet": snippet},
+            ),
+        )
+        LOGGER.info('stream_marker_set channel="%s" stream_id=%s marker=%s', channel.account_name, stream_id, marker)
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         """Что по факту лежит на платформе: язык, аудитория и возраст видны только у videos."""
@@ -327,6 +360,9 @@ class YouTubePlatform:
             stream_marker=stream.title if stream is not None else None,
             live_chat_id=broadcast.live_chat_id if broadcast else None,
             thumbnail_url=_largest_thumbnail(_mapping(snippet, "thumbnails")),
+            auto_start=broadcast.auto_start if broadcast else None,
+            auto_stop=broadcast.auto_stop if broadcast else None,
+            latency_preference=broadcast.latency_preference if broadcast else None,
         )
 
     def _broadcast_of(self, channel: ChannelConfig, broadcast_id: str) -> UpcomingBroadcast | None:
@@ -363,7 +399,7 @@ class YouTubePlatform:
             "liveStreams.insert",
             lambda service: service.liveStreams().insert(
                 part=STREAM_PARTS,
-                body=_stream_body(spec),
+                body=_stream_body(channel, spec),
             ),
         )
         stream_id: str = _text(response, "id")
@@ -506,31 +542,51 @@ def _rfc3339(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime(RFC3339_FORMAT)
 
 
-def _broadcast_body(channel: ChannelConfig, spec: BroadcastSpec, settings: PlanerSettings) -> dict[str, Any]:
-    """Видимость — из канала; автостарт и категория — из planer.json."""
+def _broadcast_body(spec: BroadcastSpec) -> dict[str, Any]:
+    """Все значения — из спеки: там же они сверяются с тем, что лежит на площадке."""
     return {
         "snippet": {
             "title": spec.title,
             "description": spec.description,
             "scheduledStartTime": _rfc3339(spec.start_minute),
-            "categoryId": settings.category_id,
+            "categoryId": spec.category_id,
         },
         "status": {
-            "privacyStatus": channel.privacy.value,
+            "privacyStatus": spec.privacy,
             "selfDeclaredMadeForKids": False,
         },
         "contentDetails": {
-            "enableAutoStart": settings.auto_start,
-            "enableAutoStop": True,
-            "latencyPreference": LATENCY_PREFERENCE,
+            "enableAutoStart": spec.auto_start,
+            "enableAutoStop": spec.auto_stop,
+            "latencyPreference": spec.latency_preference,
         },
     }
 
 
-def _stream_body(spec: BroadcastSpec) -> dict[str, Any]:
-    """Название потока — маркер планера (§7.3), зрителям он не виден."""
+def _local_now() -> datetime:
+    """Момент записи метки — местным временем владельца, как все даты планера."""
+    return datetime.now(timezone.utc).astimezone()
+
+
+def stream_description(channel: ChannelConfig, marker: str, written_at: datetime) -> str:
+    """Описание ключа потока в Студии: чей это ключ и для какого эфира. Зрителям не видно."""
+    parts: MarkerParts | None = split_marker(marker)
+    return msg.STREAM_DESCRIPTION.format(
+        account_name=channel.account_name,
+        date=parts.date if parts else marker,
+        time=parts.time if parts else "",
+        language=parts.language if parts else "",
+        written_at=format_datetime_text(written_at),
+    )
+
+
+def _stream_body(channel: ChannelConfig, spec: BroadcastSpec) -> dict[str, Any]:
+    """Название потока — маркер планера (§7.3), описание — чей это ключ; зрителям не видны."""
     return {
-        "snippet": {"title": spec.marker},
+        "snippet": {
+            "title": spec.marker,
+            "description": stream_description(channel, spec.marker, _local_now()),
+        },
         "cdn": {
             "ingestionType": INGESTION_TYPE,
             "resolution": STREAM_RESOLUTION,
@@ -586,15 +642,18 @@ def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBro
     start_text: Any = snippet.get("scheduledStartTime")
     start_utc: datetime | None = _parse_start(start_text)
     if start_utc is None:
-        # у канала бывает дефолтный эфир без времени старта — это норма, не проблема
-        LOGGER.debug(
-            'broadcast_without_start channel="%s" broadcast_id=%s value=%r',
+        # такой эфир планер не видит вовсе: сверять его не с чем — владелец должен об этом знать
+        LOGGER.warning(
+            'broadcast_without_start channel="%s" broadcast_id=%s title=%r value=%r',
             account_name,
             broadcast_id,
+            snippet.get("title"),
             start_text,
         )
         return None
     category_id: Any = snippet.get("categoryId")
+    status: dict[str, Any] = _mapping(item, "status")
+    details: dict[str, Any] = _mapping(item, "contentDetails")
     return UpcomingBroadcast(
         broadcast_id=broadcast_id,
         start_utc=start_utc,
@@ -603,6 +662,10 @@ def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBro
         stream_id=_bound_stream_id(item),
         live_chat_id=_optional_text(snippet, "liveChatId"),
         category_id=category_id if isinstance(category_id, str) and category_id else None,
+        privacy_status=_optional_text(status, "privacyStatus"),
+        auto_start=_optional_bool(details, "enableAutoStart"),
+        auto_stop=_optional_bool(details, "enableAutoStop"),
+        latency_preference=_optional_text(details, "latencyPreference"),
     )
 
 
