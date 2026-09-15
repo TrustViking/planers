@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import random
-import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Any
 from app.config.loader import PlanerConfig
 from app.output.console import render_console
 from app.output.report import (
+    FieldChange,
     FormState,
     OutcomeKind,
     PackageLineStatus,
@@ -29,47 +29,96 @@ from app.platforms.base import PlatformError
 from app.platforms.fake import FakePlatform
 from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
+from app.version import APP_VERSION
 
 ROOT: Path = Path("D:/planer")
-SAMPLE_CONSOLE_LINES: int = 13   # заголовок, пустая, 6 счётчиков, строка исхода, пустая, 3 пути
-OUTCOME: str = msg.CONSOLE_OUTCOME_INDENT      # строка исхода — в колонке подробностей счётчика
-PACKAGE: str = "plan_17-03-2027_18-03-2027_gen11-09-2026-1658.bcast"
+OSVALD: dict[str, str] = {"account_name": "Osvald.X", "google_account": "trustviorel@gmail.com"}
+OKTAVIAN: dict[str, str] = {"account_name": "Oktavian.X", "google_account": "oktavian.tibery@gmail.com"}
+CHANNEL_ORDER: tuple[str, ...] = ("Osvald.X", "Oktavian.X")      # как в channels.json
+FULL_KEYS: tuple[str, ...] = ("aaaa-bbbb-cccc-dddd-6jty", "aaaa-bbbb-cccc-dddd-3j1j", "aaaa-bbbb-cccc-dddd-9zzz")
+UNDATED_WARNING: str = msg.WARNING_UNDATED_BROADCAST.format(account_name="Osvald.X", title="Брифинг в Конгрессе")
+RESTORED_WARNING: str = (
+    "не можем исправить: 19-03-2027 19:00 uk -> Oktavian.X — автостарт: нужно да, на площадке нет; "
+    "через API это не исправляется"
+)
 
-# Макет задач 4e/4g/5c: один созданный эфир, три пропуска без канала; живой чат — постоянная
-# особенность площадки, в консоль не попадает, поэтому блока «внимание» нет.
-SAMPLE_CONSOLE: str = """Планер — 13-09-2026 13:20
+# Макет задачи 5e: блоки сверху вниз, пустой блок не печатается, каналы — в порядке channels.json.
+SAMPLE_CONSOLE: str = f"""Планер {APP_VERSION} — 15-09-2026 19:56
+Итог: опубликовано 2, исправлено 1, уже стояло 1, не публиковали 2, ошибок 0
 
-  пакеты          1   слотов 4, моих 1
-  создано         1   ключ передан в форму: 1 из 1
-                      17-03-2027 19:00 ru -> Osvald.X
-  исправлено      0
-  совпадает       0
-  пропущено       3   нет канала: en (2), uk (1)
-  ошибок          0
+======================= ВНИМАНИЕ =======================
+  ключ не дошёл до стримера: 18-03-2027 20:00 ru -> Osvald.X — форма недоступна (HTTP 503)
+  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: было private, стало unlisted
+  {RESTORED_WARNING}
+  {UNDATED_WARNING}
+
+=================== ОПУБЛИКОВАЛИ (2) ===================
+  Osvald.X (trustviorel@gmail.com)
+    17-03-2027  19:00  ru  Контроль влажности экономит до 40% энергии
+  Oktavian.X (oktavian.tibery@gmail.com)
+    17-03-2027  19:00  uk  Депортовані діти мають повернутися
+
+==================== ИСПРАВИЛИ (1) =====================
+  Osvald.X (trustviorel@gmail.com)
+    18-03-2027  20:00  ru  Второй эфир — обновлено: описание, видимость
+
+================== КЛЮЧИ СТРИМЕРУ (3) ==================
+  Osvald.X (trustviorel@gmail.com)
+    17-03-2027  19:00  ru  ****-6jty  передан в форму
+    18-03-2027  20:00  ru  ****-9zzz  НЕ передан — форма недоступна (HTTP 503)
+  Oktavian.X (oktavian.tibery@gmail.com)
+    17-03-2027  19:00  uk  ****-3j1j  передан в форму
+  полный ключ — в keystreams\\keys.txt
+
+==================== УЖЕ СТОЯЛО (1) ====================
+  Oktavian.X (oktavian.tibery@gmail.com)
+    19-03-2027  19:00  uk  Третій ефір
+
+================== НЕ ПУБЛИКОВАЛИ (2) ==================
+  нет канала для языка en
+    17-03-2027  19:00  en  Russia's 20-Year Hybrid War
+    18-03-2027  20:00  en  The Invisible Side of Air
 
   ключи   keystreams\\keys.txt
-  отчёт   logs\\13-09-2026_132051_report.md
-  лог     logs\\13-09-2026_132050_planer.log"""
+  отчёт   logs\\15-09-2026_195649_report.md
+  лог     logs\\15-09-2026_195649_planer.log"""
 
 
-def _created(day: int, form: FormState | None, form_error: str | None = None) -> PairOutcome:
-    return PairOutcome(
-        OutcomeKind.CREATED, "Osvald.X", f"{day}-03-2027", "19:00", "ru", form=form, form_error=form_error
-    )
+def _outcomes() -> list[PairOutcome]:
+    """Порядок исходов — как их отдаёт runner (по слоту, потом по имени канала), а не как в channels.json."""
+    return [
+        PairOutcome(
+            OutcomeKind.CREATED, **OKTAVIAN, date="17-03-2027", time="19:00", language="uk",
+            form=FormState.SENT, title="Депортовані діти мають повернутися", stream_key=FULL_KEYS[1],
+        ),
+        PairOutcome(
+            OutcomeKind.CREATED, **OSVALD, date="17-03-2027", time="19:00", language="ru",
+            form=FormState.SENT, title="Контроль влажности экономит до 40% энергии", stream_key=FULL_KEYS[0],
+        ),
+        PairOutcome(
+            OutcomeKind.FIXED, **OSVALD, date="18-03-2027", time="20:00", language="ru",
+            form=FormState.FAILED, form_error="transportFailed: HTTP 503", title="Второй эфир", stream_key=FULL_KEYS[2],
+            changed_fields=("description", "privacy"),
+            field_changes=(FieldChange("description", "-", "-"), FieldChange("privacy", "private", "unlisted")),
+        ),
+        PairOutcome(
+            OutcomeKind.MATCHED, **OKTAVIAN, date="19-03-2027", time="19:00", language="uk",
+            title="Третій ефір", stream_key="aaaa-bbbb-cccc-dddd-1111",
+        ),
+    ]
 
 
 def _sample_report(**overrides: Any) -> RunReport:
     values: dict[str, Any] = dict(
         mode=RunMode.FULL,
-        generated_at_text="13-09-2026 13:20",
-        packages=[ReportPackageLine(PACKAGE, PackageLineStatus.ACCEPTED, slots_total=4, slots_mine=1)],
-        outcomes=[_created(17, FormState.SENT)],
+        generated_at_text="15-09-2026 19:56",
+        packages=[ReportPackageLine("plan.bcast", PackageLineStatus.ACCEPTED, slots_total=6, slots_mine=4)],
+        outcomes=_outcomes(),
         skipped=[
-            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "uk"),
-            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "en"),
-            SkippedLine(SkipKind.NO_CHANNEL, "18-03-2027", "19:00", "en"),
+            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "en", title="Russia's 20-Year Hybrid War"),
+            SkippedLine(SkipKind.NO_CHANNEL, "18-03-2027", "20:00", "en", title="The Invisible Side of Air"),
         ],
-        warnings=[msg.WARNING_LIVE_CHAT],
+        warnings=[RESTORED_WARNING, UNDATED_WARNING, msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY],
         keys_file_path="keystreams\\keys.txt",
     )
     values.update(overrides)
@@ -80,153 +129,156 @@ def _render(report: RunReport) -> str:
     return render_console(
         report,
         root=ROOT,
-        report_path=ROOT / "logs" / "13-09-2026_132051_report.md",
-        log_path=ROOT / "logs" / "13-09-2026_132050_planer.log",
+        report_path=ROOT / "logs" / "15-09-2026_195649_report.md",
+        log_path=ROOT / "logs" / "15-09-2026_195649_planer.log",
+        channel_order=CHANNEL_ORDER,
     )
 
 
+def _block_titles(text: str) -> list[str]:
+    return [line.strip(msg.CONSOLE_RULE_CHAR + " ") for line in text.splitlines() if line.startswith(msg.CONSOLE_RULE_CHAR)]
+
+
 def test_full_run_matches_the_layout() -> None:
+    assert _render(_sample_report()).replace("/", "\\") == SAMPLE_CONSOLE
+
+
+def test_blocks_keep_their_order_and_rules_their_width() -> None:
     text: str = _render(_sample_report())
-    assert text.replace("/", "\\") == SAMPLE_CONSOLE
-    assert len(text.splitlines()) == SAMPLE_CONSOLE_LINES
+    assert _block_titles(text) == [
+        "ВНИМАНИЕ", "ОПУБЛИКОВАЛИ (2)", "ИСПРАВИЛИ (1)", "КЛЮЧИ СТРИМЕРУ (3)", "УЖЕ СТОЯЛО (1)", "НЕ ПУБЛИКОВАЛИ (2)",
+    ]
+    rules: list[str] = [line for line in text.splitlines() if line.startswith(msg.CONSOLE_RULE_CHAR)]
+    assert {len(line) for line in rules} == {msg.CONSOLE_RULE_WIDTH}
 
 
-def test_platform_notes_never_reach_the_console() -> None:
-    """Живой чат и прежний ключ — так устроена площадка: печатаются только в отчёте."""
-    run_warning: str = "18-03-2027 20:00 ru -> Osvald.X: обложка не поставлена — forbidden (канал не подтверждён)"
-    report: RunReport = _sample_report(warnings=[run_warning, msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY])
-    text: str = _render(report)
-    assert f"  внимание: {run_warning}" in text.splitlines()
-    assert "живой чат" not in text and "ключ прежний" not in text
-    assert text.count("внимание:") == 1
+def test_empty_blocks_are_not_printed_at_all() -> None:
+    """Нули видны в «Итоге»; пустого раздела нет."""
+    text: str = _render(_sample_report(outcomes=[], skipped=[], warnings=[]))
+    lines: list[str] = text.splitlines()
+    assert lines[1] == "Итог: опубликовано 0, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0"
+    assert _block_titles(text) == []
+
+
+def test_broadcasts_are_grouped_by_channel_in_channels_json_order() -> None:
+    """Шапка канала с почтой — один раз на группу; внутри канала — по дате и времени."""
+    text: str = _render(_sample_report())
+    keys_block: list[str] = text.split("КЛЮЧИ СТРИМЕРУ (3)")[1].split("\n\n")[0].splitlines()[1:]
+    assert keys_block[0] == "  Osvald.X (trustviorel@gmail.com)"
+    assert keys_block[1].startswith("    17-03-2027  19:00") and keys_block[2].startswith("    18-03-2027  20:00")
+    assert keys_block[3] == "  Oktavian.X (oktavian.tibery@gmail.com)"
+    assert text.count("  Osvald.X (trustviorel@gmail.com)") == 3        # по разу в каждом блоке, где канал есть
+    assert "-> Osvald.X" not in text.split("ОПУБЛИКОВАЛИ (2)")[1]         # в строках эфиров канала нет
+
+
+def test_stream_key_is_masked_and_the_full_key_appears_nowhere() -> None:
+    text: str = _render(_sample_report())
+    assert "****-6jty" in text and "****-9zzz" in text
+    assert all(key not in line for key in FULL_KEYS for line in text.splitlines())
+    assert "  полный ключ — в keystreams\\keys.txt" in text.replace("/", "\\")
 
 
 def test_console_has_no_markdown_and_no_icons() -> None:
-    text: str = _render(_sample_report(outcomes=[_created(17, FormState.FAILED, "notConfirmed: HTTP 200")]))
+    text: str = _render(_sample_report())
     assert "#" not in text and "\n- " not in text
     assert all(icon not in text for icon in ("✅", "❌", "⚠", "→"))
 
 
-def test_zero_counters_are_printed_without_details() -> None:
-    lines: list[str] = _render(_sample_report(outcomes=[], skipped=[], warnings=[])).splitlines()
-    assert "  создано         0" in lines
-    assert "  пропущено       0" in lines
-    assert "  ошибок          0" in lines
-
-
-def test_outcome_indent_is_the_detail_column() -> None:
-    """Отступ строки исхода собран из тех же ширин, что CONSOLE_COUNTER: подробность и исход — одна колонка."""
-    counter: str = msg.CONSOLE_COUNTER.format(label=msg.CONSOLE_LABEL_CREATED, count=1, detail="X")
-    assert counter.index("X") == len(OUTCOME)
-
-
-def test_sent_key_is_not_repeated_in_the_broadcast_line() -> None:
-    """Норму несёт сводка на строке счётчика; строка эфира без отметки формы."""
-    lines: list[str] = _render(_sample_report()).splitlines()
-    created: int = lines.index("  создано         1   ключ передан в форму: 1 из 1")
-    assert lines[created + 1] == f"{OUTCOME}17-03-2027 19:00 ru -> Osvald.X"
-    assert sum("ключ передан в форму" in line for line in lines) == 1
-
-
-def test_several_created_show_every_broadcast_and_form_summary() -> None:
+def test_attention_collects_errors_forms_packages_restored_and_warnings() -> None:
     report: RunReport = _sample_report(
-        outcomes=[_created(17, FormState.SENT), _created(18, FormState.FAILED, "transportFailed: HTTP 503")]
-    )
-    lines: list[str] = _render(report).splitlines()
-    created: int = lines.index("  создано         2   ключ передан в форму: 1 из 2")
-    assert lines[created + 1 : created + 3] == [
-        f"{OUTCOME}17-03-2027 19:00 ru -> Osvald.X",                          # норма — без отметки
-        f"{OUTCOME}18-03-2027 19:00 ru -> Osvald.X, ключ в форму НЕ передан",  # аномалия — с отметкой
-    ]
-    assert lines[created + 3] == "  исправлено      0"
-    text: str = "\n".join(lines)
-    assert (
-        "  форма: 18-03-2027 19:00 ru -> Osvald.X — ключ в форму НЕ передан — форма недоступна (HTTP 503)"
-    ) in text
-
-
-def test_errors_packages_and_warnings_are_printed_in_full() -> None:
-    report: RunReport = _sample_report(
-        packages=[
-            ReportPackageLine(PACKAGE, PackageLineStatus.ACCEPTED, slots_total=4, slots_mine=1),
-            ReportPackageLine("broken.bcast", PackageLineStatus.DAMAGED, detail="не ZIP-архив"),
-        ],
+        packages=[ReportPackageLine("broken.bcast", PackageLineStatus.DAMAGED, detail="не ZIP-архив")],
         outcomes=[
+            *_outcomes(),
             PairOutcome(
-                OutcomeKind.ERROR,
-                "Osvald.X",
-                "18-03-2027",
-                "20:00",
-                "ru",
+                OutcomeKind.ERROR, **OSVALD, date="20-03-2027", time="20:00", language="ru",
                 error=OutcomeError("youtube", "liveStreamingNotEnabled", "на канале не включены трансляции"),
-            )
+            ),
+            PairOutcome(OutcomeKind.AMBIGUOUS, **OSVALD, date="21-03-2027", time="20:00", language="ru"),
         ],
-        warnings=["18-03-2027 20:00 ru -> Osvald.X: обложка не поставлена — forbidden (канал не подтверждён)"],
     )
-    lines: list[str] = _render(report).splitlines()
-    assert "  пакеты          2   слотов 4, моих 1, не прочитано 1" in lines
-    assert "  ошибок          1" in lines
+    text: str = _render(report)
+    attention: list[str] = text.split("\n\n")[1].splitlines()
+    assert msg.CONSOLE_BLOCK_ATTENTION in attention[0]
     assert (
-        "  ошибка: 18-03-2027 20:00 ru -> Osvald.X — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)"
-    ) in lines
-    assert "  пакет: broken.bcast — пакет повреждён: не ZIP-архив; файл не тронут" in lines
-    assert "  внимание: 18-03-2027 20:00 ru -> Osvald.X: обложка не поставлена — forbidden (канал не подтверждён)" in lines
+        "  ошибка: 20-03-2027 20:00 ru -> Osvald.X — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)"
+    ) in attention
+    assert "  пакет: broken.bcast — пакет повреждён: не ZIP-архив; файл не тронут" in attention
+    assert f"  {UNDATED_WARNING}" in attention
+    # AMBIGUOUS приходит предупреждением со ссылками — строкой ошибки не дублируется
+    assert not any("несколько эфиров" in line for line in attention)
+    # постоянные особенности площадки — только в отчёте
+    assert "живой чат" not in text and "повторно не отправляется" not in text
 
 
-def test_skipped_are_grouped_by_reason() -> None:
-    report: RunReport = _sample_report(
-        skipped=[
-            SkippedLine(SkipKind.PAST, "14-03-2027", "19:00", "ru"),
-            SkippedLine(SkipKind.TOO_LATE, "16-03-2027", "12:30", "ru", minutes=60),
-            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "hu"),
-        ]
-    )
-    assert "  пропущено       3   уже прошло: 1; до старта меньше 60 минут: 1; нет канала: hu (1)" in _render(report)
-
-
-def test_no_channel_skips_are_counted_per_language() -> None:
-    """Сумма по языкам сходится со счётчиком: три пропуска — en (2) и uk (1), а не «en, uk»."""
-    lines: list[str] = _render(_sample_report()).splitlines()
-    assert "  пропущено       3   нет канала: en (2), uk (1)" in lines
-
-
-def test_dry_run_has_its_own_title_and_labels() -> None:
+def test_dry_run_speaks_of_intent_and_has_no_keys_block() -> None:
+    fixed: PairOutcome = _outcomes()[2]
     report: RunReport = _sample_report(
         mode=RunMode.DRY_RUN,
         outcomes=[
-            PairOutcome(OutcomeKind.CREATED, "Osvald.X", "17-03-2027", "19:00", "ru"),
-            PairOutcome(OutcomeKind.CREATED, "Oktavian.X", "17-03-2027", "19:00", "uk"),
-            PairOutcome(OutcomeKind.FIXED, "Osvald.X", "18-03-2027", "19:00", "ru", changed_fields=("title",)),
+            PairOutcome(OutcomeKind.CREATED, **OSVALD, date="17-03-2027", time="19:00", language="ru", title="Эфир"),
+            PairOutcome(
+                OutcomeKind.FIXED, **OSVALD, date="18-03-2027", time="20:00", language="ru", title="Второй эфир",
+                changed_fields=fixed.changed_fields, field_changes=fixed.field_changes,
+            ),
         ],
+        warnings=[],
         keys_file_path=None,
     )
-    lines: list[str] = _render(report).splitlines()
-    assert lines[0] == "Планер — 13-09-2026 13:20 — dry-run: ничего не создано и в форму не отправлено"
-    create: int = lines.index("  создать         2")
-    assert lines[create + 1 : create + 5] == [
-        f"{OUTCOME}17-03-2027 19:00 ru -> Osvald.X",
-        f"{OUTCOME}17-03-2027 19:00 uk -> Oktavian.X",
-        "  исправить       1",
-        f"{OUTCOME}18-03-2027 19:00 ru -> Osvald.X, будет обновлено: название",
-    ]
-    assert lines[create + 5] == "  совпадает       0"
-    assert not any(line.lstrip().startswith(msg.CONSOLE_LABEL_KEYS) for line in lines)
+    text: str = _render(report)
+    lines: list[str] = text.splitlines()
+    assert lines[0] == f"Планер {APP_VERSION} — 15-09-2026 19:56 — dry-run: ничего не создано и в форму не отправлено"
+    assert lines[1] == "Итог: опубликуем 1, исправим 1, уже стояло 0, не публиковали 2, ошибок 0"
+    assert _block_titles(text) == ["ВНИМАНИЕ", "ОПУБЛИКУЕМ (1)", "ИСПРАВИМ (1)", "НЕ ПУБЛИКОВАЛИ (2)"]
+    assert "    18-03-2027  20:00  ru  Второй эфир — будет обновлено: описание, видимость" in lines
+    assert "  вернём к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: сейчас private, будет unlisted" in lines
+    assert msg.CONSOLE_BLOCK_KEYS not in text and msg.CONSOLE_LABEL_KEYS + " " not in text
 
 
-def test_status_counts_scheduled_and_errors_only() -> None:
+def test_status_prints_title_total_attention_and_matched_only() -> None:
     report: RunReport = RunReport(
         mode=RunMode.STATUS,
-        generated_at_text="13-09-2026 13:20",
+        generated_at_text="15-09-2026 19:56",
         outcomes=[
-            PairOutcome(OutcomeKind.MATCHED, "Osvald.X", "17-03-2027", "19:00", "ru", broadcast_url="u1"),
+            PairOutcome(
+                OutcomeKind.MATCHED, **OSVALD, date="17-03-2027", time="19:00", language="ru",
+                title="Эфир", stream_key=FULL_KEYS[0], broadcast_url="u1",
+            ),
             PairOutcome(OutcomeKind.ERROR, "Test RU", error=OutcomeError("youtube", "quotaExceeded", "квота исчерпана")),
         ],
         keys_file_path="keystreams\\keys.txt",
     )
-    lines: list[str] = _render(report).splitlines()
-    assert lines[0] == "Планер — 13-09-2026 13:20 — --status: эфиры планера на каналах"
-    assert lines[2:5] == ["  запланировано   1", f"{OUTCOME}17-03-2027 19:00 ru -> Osvald.X", "  ошибок          1"]
+    text: str = _render(report)
+    lines: list[str] = text.splitlines()
+    assert lines[0] == f"Планер {APP_VERSION} — 15-09-2026 19:56 — --status: эфиры планера на каналах"
+    assert lines[1] == "Итог: уже стояло 1, ошибок 1"
+    assert _block_titles(text) == ["ВНИМАНИЕ", "УЖЕ СТОЯЛО (1)"]
     assert "  ошибка: Test RU — YouTube: quotaExceeded (квота исчерпана)" in lines
+    assert "    17-03-2027  19:00  ru  Эфир" in lines
+    assert FULL_KEYS[0] not in text
+
+
+def test_skipped_are_grouped_by_reason_not_by_channel() -> None:
+    report: RunReport = _sample_report(
+        outcomes=[],
+        warnings=[],
+        skipped=[
+            SkippedLine(SkipKind.PAST, "14-03-2027", "19:00", "ru", title="Прошлый"),
+            SkippedLine(SkipKind.TOO_LATE, "16-03-2027", "12:30", "ru", minutes=60, title="Скоро"),
+            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "hu", title="Magyar"),
+            SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "en", title="English"),
+        ],
+    )
+    block: list[str] = _render(report).split("НЕ ПУБЛИКОВАЛИ (4)")[1].split("\n\n")[0].splitlines()[1:]
+    assert block == [
+        "  уже прошло",
+        "    14-03-2027  19:00  ru  Прошлый",
+        "  до старта меньше 60 минут",
+        "    16-03-2027  12:30  ru  Скоро",
+        "  нет канала для языка en",
+        "    17-03-2027  19:00  en  English",
+        "  нет канала для языка hu",
+        "    17-03-2027  19:00  hu  Magyar",
+    ]
 
 
 def test_console_and_report_use_the_same_totals(
@@ -239,7 +291,7 @@ def test_console_and_report_use_the_same_totals(
     now: datetime,
     rng: random.Random,
 ) -> None:
-    """Production-путь: запуск через runner, числа консоли совпадают с «Итогом» записанного отчёта."""
+    """Production-путь: запуск через runner, «Итог» консоли — те же числа, что «Итог» записанного отчёта."""
     make_package(
         planer_paths.bcast_dir,
         slots=[
@@ -258,11 +310,9 @@ def test_console_and_report_use_the_same_totals(
         f"Итог: создано {totals.created}, исправлено {totals.fixed}, совпадает {totals.matched}, "
         f"пропущено {totals.skipped}, ошибок {totals.errors}."
     ) in report_text
-    for label, count in (
-        (msg.CONSOLE_LABEL_CREATED, totals.created),
-        (msg.CONSOLE_LABEL_SKIPPED, totals.skipped),
-        (msg.CONSOLE_LABEL_ERRORS, totals.errors),
-    ):
-        assert re.search(rf"^  {label} +{count}\b", console, re.MULTILINE)
+    assert console.splitlines()[1] == msg.CONSOLE_TOTAL.format(
+        created=totals.created, fixed=totals.fixed, matched=totals.matched, skipped=totals.skipped, errors=totals.errors
+    )
     assert (totals.created, totals.skipped, totals.errors) == (1, 1, 1)
+    assert "    17-03-2027  19:00  uk  Эфир 17-03-2027_1900_uk" in console.splitlines()
     assert f"  отчёт   {Path('logs') / outcome.report_path.name}" in console

@@ -13,7 +13,8 @@ from app import main as main_module
 from app.google.auth import AuthError, AuthErrorReason
 from app.main import ChannelConsole, run_cli
 from app.paths import ROOT_ENV_VAR, PlanerPaths
-from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
+from app.platforms import youtube as youtube_module
+from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
 from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
@@ -134,9 +135,11 @@ def test_run_without_flags_is_the_full_cycle(
     make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
     assert run_cli([]) == 0
     out: str = capsys.readouterr().out
-    assert out.startswith("Планер — ")
-    assert "  создано         1   ключ передан в форму: 1 из 1" in out.splitlines()
-    assert f"{msg.CONSOLE_OUTCOME_INDENT}01-01-2099 19:00 uk -> {UA}" in out.splitlines()   # норма — без отметки
+    lines: list[str] = out.splitlines()
+    assert lines[0].startswith(f"Планер {APP_VERSION} — ")
+    assert lines[1] == "Итог: опубликовано 1, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0"
+    assert f"  {UA} ({UA_GOOGLE})" in lines
+    assert "    01-01-2099  19:00  uk  ****-0000  передан в форму" in lines
     assert "## " not in out                                            # markdown — только в отчёте
     assert re.search(r"^  лог +logs\\\d{2}-\d{2}-\d{4}_\d{6}_planer\.log$", out, re.MULTILINE)
     assert len(fake_platform_in_main.created) == 1
@@ -242,7 +245,7 @@ def test_missing_token_logs_in_at_first_access_and_run_continues(
     positions: list[int] = [out.index(line) for line in login_lines]
     assert positions == sorted(positions)
     assert msg.AUTH_OK.format(account_name=UA, title=f"Fake {UA}", youtube_channel_id=f"UCfake{UA}") in out
-    assert out.index("Google hasn't verified this app") < out.index("Планер — ")
+    assert out.index("Google hasn't verified this app") < out.index(f"Планер {APP_VERSION} — ")
     assert fake_platform_in_main.logins == [UA]
     assert list(_read_bindings(planer_root)) == [UA]
 
@@ -264,7 +267,8 @@ def test_binding_mismatch_fails_only_that_channel(
     assert run_cli([]) == 1
     out: str = capsys.readouterr().out
     assert "UCsomeoneElse" in out
-    assert f"{msg.CONSOLE_OUTCOME_INDENT}01-01-2099 19:00 ru -> {RU}" in out.splitlines()
+    assert f"  {RU} ({RU_GOOGLE})" in out.splitlines()
+    assert "  ошибка: 01-01-2099 19:00 uk -> Канал UA — YouTube: channelBindingMismatch (" in out
     assert [call.channel_id for call in fake_platform_in_main.created] == [RU]
     assert _read_bindings(planer_root)[UA]["youtube_channel_id"] == "UCsomeoneElse"
 
@@ -284,8 +288,10 @@ def test_dry_run_on_valid_package(
     assert run_cli(["--dry-run"]) == 0
     captured = capsys.readouterr()
     assert "dry-run" in captured.out.splitlines()[0]
-    assert re.search(r"^  пакеты +1   слотов 2, моих 2$", captured.out, re.MULTILINE)
-    assert re.search(r"^  создать +2$", captured.out, re.MULTILINE)
+    assert "Итог: опубликуем 2, исправим 0, уже стояло 0, не публиковали 0, ошибок 0" in captured.out
+    assert "ОПУБЛИКУЕМ (2)" in captured.out and "КЛЮЧИ СТРИМЕРУ" not in captured.out
+    # каналы — в порядке channels.json: сначала UA, потом RU
+    assert captured.out.index(f"  {UA} ({UA_GOOGLE})") < captured.out.index(f"  {RU} ({RU_GOOGLE})")
     assert "будет создан" not in captured.out                          # подробности — в отчёте
     assert "run_started" not in captured.err
     [report] = list((planer_root / "logs").glob("*_report.md"))
@@ -323,8 +329,40 @@ def test_status_writes_keys_file(
     lines: list[str] = keys_file.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3 and all(line.startswith("# ") for line in lines)
     out: str = capsys.readouterr().out
-    assert re.search(r"^  запланировано +0$", out, re.MULTILINE)
+    assert out.splitlines()[1] == "Итог: уже стояло 0, ошибок 0"
+    assert "=====" not in out                                         # пустые блоки не печатаются
     assert re.search(r"^  ключи +keystreams", out, re.MULTILINE)
+
+
+def test_undated_broadcast_goes_to_attention_not_to_the_log_console(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Эфир без времени старта: строка лога — только в planer.log, владельцу — строкой во «Внимание»."""
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    listed_by_fake = fake_platform_in_main.list_upcoming
+
+    def _list_with_undated(channel: Any) -> list[UpcomingBroadcast]:
+        undated: dict[str, Any] = {"id": "NOSTART", "snippet": {"title": "Брифинг без времени"}}
+        assert youtube_module._broadcast_from_item(undated, channel.account_name) is None   # боевой разбор
+        return listed_by_fake(channel)
+
+    fake_platform_in_main.list_upcoming = _list_with_undated  # type: ignore[method-assign]
+    assert run_cli(["--dry-run"]) == 0
+    captured = capsys.readouterr()
+    lines: list[str] = captured.out.splitlines()
+    attention: int = next(index for index, line in enumerate(lines) if msg.CONSOLE_BLOCK_ATTENTION in line)
+    assert lines[attention + 1] == (
+        f"  эфир без времени старта: {UA} — «Брифинг без времени»; у эфира нет запланированного времени, "
+        "планер его не видит"
+    )
+    assert "broadcast_without_start" not in captured.err and "broadcast_without_start" not in captured.out
+    [log_file] = list((planer_root / "logs").glob("*_planer.log"))
+    assert "broadcast_without_start" in log_file.read_text(encoding="utf-8")
 
 
 def test_check_reports_every_channel(

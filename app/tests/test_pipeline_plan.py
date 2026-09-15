@@ -176,6 +176,9 @@ def test_diff_ignores_time_and_unreported_values(make_slot_object: SlotFactory, 
         auto_start=None,
     )
     assert other.diff(expected) == ()
+    # но пропажа поля не беззвучна: not_compared называет, по чему сверки не было
+    assert other.not_compared(expected) == (ChangedField.CATEGORY, ChangedField.PRIVACY, ChangedField.AUTO_START)
+    assert expected.not_compared(expected) == ()
 
 
 def test_fields_are_split_once_and_completely() -> None:

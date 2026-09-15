@@ -16,6 +16,7 @@ from typing import Final
 
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import FILE_STAMP_FORMAT
+from app.core.text import normalize_title
 from app.form.base import FORM_CODE_NOT_CONFIRMED
 from app.package.bcast import AcceptedPackage, BcastScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
@@ -122,6 +123,15 @@ class ReportPackageLine:
 
 
 @dataclass(frozen=True)
+class FieldChange:
+    """Исправленное поле эфира: как было на площадке и как стало по пакету (тексты для владельца)."""
+
+    name: str        # значение ChangedField
+    before: str      # MISSING_VALUE — площадка поле не вернула
+    after: str
+
+
+@dataclass(frozen=True)
 class PairOutcome:
     kind: OutcomeKind
     account_name: str
@@ -133,6 +143,10 @@ class PairOutcome:
     form: FormState | None = None          # None — ключ в этом запуске в форму не шёл
     form_error: str | None = None          # причина, по которой ключ не ушёл (§7.5)
     error: OutcomeError | None = None
+    title: str | None = None               # название эфира, уже обрезанное спекой
+    google_account: str | None = None      # почта аккаунта канала — шапка группы в консоли
+    stream_key: str | None = None          # полный ключ; маскирует консоль
+    field_changes: tuple[FieldChange, ...] = ()   # было и стало по исправленным полям
 
 
 @dataclass(frozen=True)
@@ -144,6 +158,7 @@ class SkippedLine:
     time: str
     language: str
     minutes: int = 0     # только для TOO_LATE: min_lead_minutes
+    title: str = ""      # название слота — строка в консоли
 
 
 @dataclass(frozen=True)
@@ -251,6 +266,22 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
         form=None if is_dry_run else _form_state(item),
         form_error=item.last_error if item.should_send_key else None,
         error=item.error,
+        title=item.expected.title,
+        google_account=item.channel.google_account,
+        stream_key=item.stream_key,
+        field_changes=_field_changes(item),
+    )
+
+
+def _field_changes(item: PlannedBroadcast) -> tuple[FieldChange, ...]:
+    """Было — как в спеке с площадки, стало — как в спеке из пакета; значения теми же словами, что в отчёте."""
+    return tuple(
+        FieldChange(
+            name=name.value,
+            before=spec_value_text(item.actual.value(name)) if item.actual is not None else MISSING_VALUE,
+            after=spec_value_text(item.expected.value(name)),
+        )
+        for name in item.changed_fields
     )
 
 
@@ -263,6 +294,9 @@ def outcome_from_marked(marked: MarkedBroadcast) -> PairOutcome:
         time=marked.parts.time,
         language=marked.parts.language,
         broadcast_url=broadcast_url_for(marked.channel, marked.broadcast.broadcast_id),
+        title=normalize_title(marked.broadcast.title),
+        google_account=marked.channel.google_account,
+        stream_key=marked.stream.stream_name,
     )
 
 
@@ -296,6 +330,11 @@ def build_run_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Se
     lines: list[str] = [_warning_text(item, warning) for item in planned for warning in item.warnings]
     lines.extend(msg.WARNING_FORM_DIAGNOSTIC.format(path=path) for path in diagnostics)
     return lines
+
+
+def build_undated_warning_lines(entries: Sequence[tuple[str, str]]) -> list[str]:
+    """Эфиры без времени старта: площадка их отбрасывает, планер их не видит — (имя канала, название)."""
+    return [msg.WARNING_UNDATED_BROADCAST.format(account_name=name, title=title) for name, title in entries]
 
 
 def _warning_text(item: PlannedBroadcast, warning: OutcomeWarning) -> str:
@@ -464,7 +503,12 @@ def build_skipped_lines(scan: BcastScan, selection: Selection, config: PlanerCon
         if slot.language in config.served_languages
     ]
     entries.extend(
-        (item.slot, _skipped_line(SkipKind.TOO_LATE, item.slot, minutes=config.settings.min_lead_minutes))
+        (
+            item.slot,
+            _skipped_line(
+                SkipKind.TOO_LATE, item.slot, minutes=config.settings.min_lead_minutes, title=item.expected.title
+            ),
+        )
         for item in selection.planned
         if item.is_too_late
     )
@@ -563,9 +607,9 @@ def _append_section(lines: list[str], header: str, body: list[str]) -> None:
     lines.append("")
 
 
-def error_texts(report: RunReport) -> list[str]:
-    """Ошибки полным текстом — одинаково для отчёта --status и консоли."""
-    return [_outcome_body(outcome, is_dry_run=False) for outcome in report.outcomes if outcome.kind in ERROR_OUTCOME_KINDS]
+def error_texts(report: RunReport, kinds: frozenset[OutcomeKind] = ERROR_OUTCOME_KINDS) -> list[str]:
+    """Ошибки полным текстом — одинаково для отчёта --status и консоли (консоль сужает виды)."""
+    return [_outcome_body(outcome, is_dry_run=False) for outcome in report.outcomes if outcome.kind in kinds]
 
 
 def package_problem_texts(report: RunReport) -> list[str]:
@@ -706,8 +750,16 @@ def _problem_line(problem: PackageProblem) -> ReportPackageLine:
     return ReportPackageLine(problem.file.name, PackageLineStatus.DAMAGED, detail=reason_text)
 
 
-def _skipped_line(kind: SkipKind, slot: Slot, *, minutes: int = 0) -> SkippedLine:
-    return SkippedLine(kind=kind, date=slot.date, time=slot.time, language=slot.language, minutes=minutes)
+def _skipped_line(kind: SkipKind, slot: Slot, *, minutes: int = 0, title: str | None = None) -> SkippedLine:
+    """Название — из спеки, если объект был; иначе нормализованное название слота."""
+    return SkippedLine(
+        kind=kind,
+        date=slot.date,
+        time=slot.time,
+        language=slot.language,
+        minutes=minutes,
+        title=title if title is not None else normalize_title(slot.title),
+    )
 
 
 def _skipped_from_selection(skipped: SkippedSlot) -> SkippedLine:

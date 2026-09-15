@@ -12,6 +12,7 @@ from dataclasses import replace
 
 from app.config.loader import ChannelConfig, Platform, Privacy
 from app.google import api_retry
+from app.observability.logging_setup import LOG_EXTRA_UNDATED_BROADCAST
 from app.platforms import youtube as youtube_module
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
@@ -246,10 +247,12 @@ def test_broadcast_without_start_is_skipped(
     item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
     item["snippet"].pop("scheduledStartTime")
     _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         assert platform.list_upcoming(CHANNEL) == []
-    # такой эфир планер не видит вовсе: владелец должен узнать, какой именно
-    assert "broadcast_without_start" in caplog.text and "Эфир B1" in caplog.text
+    # в лог — INFO (не вылезает в терминал выше сводки); владельцу — через extra, строкой «Внимание»
+    [record] = [record for record in caplog.records if "broadcast_without_start" in record.getMessage()]
+    assert record.levelname == "INFO" and "Эфир B1" in record.getMessage()
+    assert getattr(record, LOG_EXTRA_UNDATED_BROADCAST) == ("Канал UA", "Эфир B1")
 
 
 def test_list_upcoming_reads_privacy_and_content_details(

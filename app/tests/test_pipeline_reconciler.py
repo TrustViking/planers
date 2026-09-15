@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.config.loader import PlanerConfig
 from app.package.model import Slot
 from app.pipeline.plan import (
@@ -68,6 +70,24 @@ def test_no_broadcast_means_create(
     [item] = _objects(make_config(), slot)
     _reconcile(fake_platform, make_config(), item)
     assert item.decision is Decision.CREATE
+
+
+def test_fields_the_platform_did_not_return_are_logged_once_per_broadcast(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Список эфиров YouTube категорию не отдаёт: сверки по ней нет — это видно в логе, а не пропадает молча."""
+    slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    _seed_like(fake_platform, "yt_ua", slot)
+    [item] = _objects(make_config(), slot)
+    with caplog.at_level("INFO", logger="planer.reconciler"):
+        _reconcile(fake_platform, make_config(), item)
+    lines: list[str] = [message for message in caplog.messages if message.startswith("spec_fields_not_compared")]
+    assert lines == [f'spec_fields_not_compared slot_id={slot.slot_id} channel="yt_ua" fields=category']
+    assert [record.levelname for record in caplog.records if "spec_fields_not_compared" in record.getMessage()] == ["INFO"]
 
 
 def test_marked_broadcast_with_same_texts_matches(

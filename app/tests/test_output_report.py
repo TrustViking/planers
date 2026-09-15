@@ -383,9 +383,9 @@ def test_package_and_skipped_lines_from_scan_and_selection(
     ]
     skipped: list[SkippedLine] = build_skipped_lines(scan, selection, config)
     assert skipped == [
-        SkippedLine(SkipKind.PAST, "15-03-2027", "19:00", "uk"),
-        SkippedLine(SkipKind.TOO_LATE, "16-03-2027", "12:30", "ru", minutes=60),
-        SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "hu"),
+        SkippedLine(SkipKind.PAST, "15-03-2027", "19:00", "uk", title="Эфир 15-03-2027_1900_uk"),
+        SkippedLine(SkipKind.TOO_LATE, "16-03-2027", "12:30", "ru", minutes=60, title="Эфир 16-03-2027_1230_ru"),
+        SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "hu", title="Эфир 17-03-2027_1900_hu"),
     ]
     assert [skip_text(line) for line in skipped] == [
         "15-03-2027 19:00 uk — уже прошло",

@@ -22,7 +22,7 @@ from app.config.loader import ChannelConfig
 from app.google.api_retry import GoogleApiRetryPolicy, execute_with_retry
 from app.google.auth import AuthError, load_credentials, token_file_for
 from app.core.dates import format_datetime_text
-from app.observability.logging_setup import get_logger, mask_stream_key
+from app.observability.logging_setup import LOG_EXTRA_UNDATED_BROADCAST, get_logger, mask_stream_key
 from app.pipeline.plan import BroadcastSpec
 from app.pipeline.reconciler import MarkerParts, split_marker
 from app.platforms.base import (
@@ -642,13 +642,14 @@ def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBro
     start_text: Any = snippet.get("scheduledStartTime")
     start_utc: datetime | None = _parse_start(start_text)
     if start_utc is None:
-        # такой эфир планер не видит вовсе: сверять его не с чем — владелец должен об этом знать
-        LOGGER.warning(
+        # такой эфир планер не видит вовсе: в лог — INFO, владельцу — строкой «Внимание» (extra собирает main)
+        LOGGER.info(
             'broadcast_without_start channel="%s" broadcast_id=%s title=%r value=%r',
             account_name,
             broadcast_id,
             snippet.get("title"),
             start_text,
+            extra={LOG_EXTRA_UNDATED_BROADCAST: (account_name, str(snippet.get("title") or ""))},
         )
         return None
     category_id: Any = snippet.get("categoryId")

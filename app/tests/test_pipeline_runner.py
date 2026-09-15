@@ -175,7 +175,9 @@ def test_too_late_slot_keeps_package_in_bcast(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert path.exists()
     assert outcome.report is not None
-    assert SkippedLine(SkipKind.TOO_LATE, "16-03-2027", "12:30", "uk", minutes=60) in outcome.report.skipped
+    assert SkippedLine(
+        SkipKind.TOO_LATE, "16-03-2027", "12:30", "uk", minutes=60, title="Эфир 16-03-2027_1230_uk"
+    ) in outcome.report.skipped
 
 
 def test_missing_broadcast_is_a_plain_create(
@@ -848,12 +850,12 @@ def test_auto_start_difference_keeps_decision_but_reaches_owner(
     [pair] = outcome.report.outcomes
     assert pair.kind is OutcomeKind.MATCHED
     assert form_sender.calls == []
-    warning: str = "17-03-2027 19:00 uk -> yt_ua: автостарт — хотели: да; на YouTube: нет."
+    warning: str = "не можем исправить: 17-03-2027 19:00 uk -> yt_ua — автостарт: нужно да, на площадке нет;"
     assert any(line.startswith(warning) for line in outcome.report.run_warnings)
     report_text: str = _report_text(outcome)
     assert "17-03-2027 19:00 uk -> yt_ua: автостарт — хотели: да; на платформе: нет" in report_text
     console: str = render_console(outcome.report, root=planer_paths.root, report_path=outcome.report_path)
-    assert f"  внимание: {warning}" in console
+    assert any(line.startswith(f"  {warning}") for line in console.splitlines())
     assert outcome.exit_code == ExitCode.OK
 
 
@@ -894,7 +896,7 @@ def test_two_unmarked_broadcasts_are_ambiguous_with_links(
     urls: str = (
         f"https://www.youtube.com/watch?v={first.broadcast_id}, https://www.youtube.com/watch?v={second.broadcast_id}"
     )
-    [warning] = [line for line in outcome.report.run_warnings if line.startswith("17-03-2027 19:00 uk -> yt_ua")]
+    [warning] = [line for line in outcome.report.run_warnings if "17-03-2027 19:00 uk -> yt_ua" in line]
     assert warning.endswith(urls)
     assert warning in _report_text(outcome)
     assert fake_platform.created == [] and fake_platform.markers_set == [] and form_sender.calls == []

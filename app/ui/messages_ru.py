@@ -175,12 +175,15 @@ MISMATCH_FIELD_AUDIENCE: Final[str] = "аудитория"
 SPEC_VALUE_TRUE: Final[str] = "да"
 SPEC_VALUE_FALSE: Final[str] = "нет"
 WARNING_REPORTED_FIELD: Final[str] = (
-    "{prefix}: {field} — хотели: {wanted}; на YouTube: {actual}. Через API это не исправляется "
+    "не можем исправить: {prefix} — {field}: нужно {wanted}, на площадке {actual}; через API это не исправляется "
     "(нужен monitorStream) — поправьте в Студии; эфир и ключ в силе"
 )
 WARNING_AMBIGUOUS: Final[str] = (
-    "{prefix}: на канале несколько эфиров без метки планера на эту минуту — планер не выбирает и не удаляет; "
-    "оставьте один: {urls}"
+    "не можем выбрать эфир: {prefix} — на канале несколько эфиров без метки планера на эту минуту; "
+    "планер не выбирает и не удаляет — оставьте один: {urls}"
+)
+WARNING_UNDATED_BROADCAST: Final[str] = (
+    "эфир без времени старта: {account_name} — «{title}»; у эфира нет запланированного времени, планер его не видит"
 )
 AMBIGUOUS_URL_JOINER: Final[str] = ", "
 # Описание ключа потока в Студии (Создать -> Управление ключами трансляции); зрителям не видно.
@@ -279,48 +282,52 @@ REPORT_TOTAL: Final[str] = (
 REPORT_STATUS_TOTAL: Final[str] = "Итог: запланировано {scheduled}, ошибок {errors}.{keys_file}"
 REPORT_TOTAL_KEYS_FILE: Final[str] = " Файл ключей: {path}"
 
-# --- консоль (ТЗ §5.6): что произошло и куда смотреть; без markdown и значков
-CONSOLE_TITLE: Final[str] = "Планер — {generated_at}"
-CONSOLE_TITLE_DRY_RUN: Final[str] = "Планер — {generated_at} — dry-run: ничего не создано и в форму не отправлено"
-CONSOLE_TITLE_STATUS: Final[str] = "Планер — {generated_at} — --status: эфиры планера на каналах"
-CONSOLE_INDENT: Final[str] = "  "
-CONSOLE_LABEL_WIDTH: Final[int] = 14
-CONSOLE_COUNT_WIDTH: Final[int] = 3
-CONSOLE_COLUMN_GAP: Final[str] = "   "
-CONSOLE_COUNTER: Final[str] = (
-    CONSOLE_INDENT + "{label:<" + str(CONSOLE_LABEL_WIDTH) + "}{count:>" + str(CONSOLE_COUNT_WIDTH) + "}"
-    + CONSOLE_COLUMN_GAP + "{detail}"
+# --- консоль (ТЗ §5.6): блоки сверху вниз, без markdown и значков
+CONSOLE_TITLE: Final[str] = "Планер {version} — {generated_at}"
+CONSOLE_TITLE_DRY_RUN: Final[str] = (
+    "Планер {version} — {generated_at} — dry-run: ничего не создано и в форму не отправлено"
 )
-# строка исхода под счётчиком — ровно в колонке подробностей CONSOLE_COUNTER
-CONSOLE_OUTCOME_INDENT: Final[str] = " " * (
-    len(CONSOLE_INDENT) + CONSOLE_LABEL_WIDTH + CONSOLE_COUNT_WIDTH + len(CONSOLE_COLUMN_GAP)
+CONSOLE_TITLE_STATUS: Final[str] = "Планер {version} — {generated_at} — --status: эфиры планера на каналах"
+CONSOLE_TOTAL: Final[str] = (
+    "Итог: опубликовано {created}, исправлено {fixed}, уже стояло {matched}, не публиковали {skipped}, ошибок {errors}"
 )
-CONSOLE_OUTCOME: Final[str] = CONSOLE_OUTCOME_INDENT + "{detail}"
-CONSOLE_LABEL_PACKAGES: Final[str] = "пакеты"
-CONSOLE_LABEL_CREATED: Final[str] = "создано"
-CONSOLE_LABEL_FIXED: Final[str] = "исправлено"
-CONSOLE_LABEL_MATCHED: Final[str] = "совпадает"
-CONSOLE_LABEL_CREATE_PLANNED: Final[str] = "создать"
-CONSOLE_LABEL_FIX_PLANNED: Final[str] = "исправить"
-CONSOLE_LABEL_SKIPPED: Final[str] = "пропущено"
-CONSOLE_LABEL_SCHEDULED: Final[str] = "запланировано"
-CONSOLE_LABEL_ERRORS: Final[str] = "ошибок"
-CONSOLE_DETAIL_JOINER: Final[str] = ", "
-CONSOLE_SKIP_JOINER: Final[str] = "; "
-CONSOLE_PACKAGES_DETAIL: Final[str] = "слотов {total}, моих {mine}"
-CONSOLE_PACKAGES_UNREADABLE: Final[str] = "не прочитано {count}"
-CONSOLE_FORMS_SENT: Final[str] = "ключ передан в форму: {sent} из {total}"
-CONSOLE_FORM_NOT_SENT: Final[str] = "ключ в форму НЕ передан"
-CONSOLE_FIXED_DETAIL: Final[str] = "{prefix}, обновлено: {what}"
-CONSOLE_FIX_PLANNED_DETAIL: Final[str] = "{prefix}, будет обновлено: {what}"
-CONSOLE_SKIP_PAST: Final[str] = "уже прошло: {count}"
-CONSOLE_SKIP_TOO_LATE: Final[str] = "до старта меньше {minutes} минут: {count}"
-CONSOLE_SKIP_NO_CHANNEL: Final[str] = "нет канала: {languages}"
-CONSOLE_SKIP_LANGUAGE_COUNT: Final[str] = "{language} ({count})"
-CONSOLE_ERROR: Final[str] = "  ошибка: {text}"
-CONSOLE_FORM_ERROR: Final[str] = "  форма: {prefix} — {mark}"
-CONSOLE_PACKAGE_ERROR: Final[str] = "  пакет: {text}"
-CONSOLE_WARNING: Final[str] = "  внимание: {text}"
+CONSOLE_TOTAL_DRY_RUN: Final[str] = (
+    "Итог: опубликуем {created}, исправим {fixed}, уже стояло {matched}, не публиковали {skipped}, ошибок {errors}"
+)
+CONSOLE_TOTAL_STATUS: Final[str] = "Итог: уже стояло {matched}, ошибок {errors}"
+# Разделитель блока: название посередине строки фиксированной ширины из CONSOLE_RULE_CHAR.
+CONSOLE_RULE_WIDTH: Final[int] = 56
+CONSOLE_RULE_CHAR: Final[str] = "="
+CONSOLE_RULE_TITLE: Final[str] = " {title} "
+CONSOLE_BLOCK_COUNTED: Final[str] = "{title} ({count})"
+CONSOLE_BLOCK_ATTENTION: Final[str] = "ВНИМАНИЕ"
+CONSOLE_BLOCK_CREATED: Final[str] = "ОПУБЛИКОВАЛИ"
+CONSOLE_BLOCK_CREATED_DRY_RUN: Final[str] = "ОПУБЛИКУЕМ"
+CONSOLE_BLOCK_FIXED: Final[str] = "ИСПРАВИЛИ"
+CONSOLE_BLOCK_FIXED_DRY_RUN: Final[str] = "ИСПРАВИМ"
+CONSOLE_BLOCK_KEYS: Final[str] = "КЛЮЧИ СТРИМЕРУ"
+CONSOLE_BLOCK_MATCHED: Final[str] = "УЖЕ СТОЯЛО"
+CONSOLE_BLOCK_SKIPPED: Final[str] = "НЕ ПУБЛИКОВАЛИ"
+CONSOLE_CHANNEL_GROUP: Final[str] = "  {account_name} ({google_account})"
+CONSOLE_CHANNEL_GROUP_NO_ACCOUNT: Final[str] = "  {account_name}"
+CONSOLE_BROADCAST_LINE: Final[str] = "    {date}  {time}  {language}  {title}"
+CONSOLE_FIXED_LINE: Final[str] = "    {date}  {time}  {language}  {title} — обновлено: {what}"
+CONSOLE_FIX_PLANNED_LINE: Final[str] = "    {date}  {time}  {language}  {title} — будет обновлено: {what}"
+CONSOLE_KEY_LINE: Final[str] = "    {date}  {time}  {language}  {key}  {state}"
+CONSOLE_KEY_SENT: Final[str] = "передан в форму"
+CONSOLE_KEY_FAILED: Final[str] = "НЕ передан — {reason}"
+CONSOLE_KEYS_FILE_NOTE: Final[str] = "  полный ключ — в {path}"
+CONSOLE_SKIP_GROUP_PAST: Final[str] = "  уже прошло"
+CONSOLE_SKIP_GROUP_TOO_LATE: Final[str] = "  до старта меньше {minutes} минут"
+CONSOLE_SKIP_GROUP_NO_CHANNEL: Final[str] = "  нет канала для языка {language}"
+CONSOLE_ATTENTION_ERROR: Final[str] = "  ошибка: {text}"
+CONSOLE_ATTENTION_NOT_DELIVERED: Final[str] = "  ключ не дошёл до стримера: {prefix} — {reason}"
+CONSOLE_ATTENTION_PACKAGE: Final[str] = "  пакет: {text}"
+CONSOLE_ATTENTION_TEXT: Final[str] = "  {text}"
+CONSOLE_ATTENTION_RESTORED: Final[str] = "  вернули к пакету: {prefix} — {field}: было {before}, стало {after}"
+CONSOLE_ATTENTION_RESTORED_UNKNOWN: Final[str] = "  вернули к пакету: {prefix} — {field}: стало {after}"
+CONSOLE_ATTENTION_RESTORE_PLANNED: Final[str] = "  вернём к пакету: {prefix} — {field}: сейчас {before}, будет {after}"
+CONSOLE_ATTENTION_RESTORE_PLANNED_UNKNOWN: Final[str] = "  вернём к пакету: {prefix} — {field}: будет {after}"
 CONSOLE_PATH: Final[str] = "  {label:<8}{path}"
 CONSOLE_LABEL_KEYS: Final[str] = "ключи"
 CONSOLE_LABEL_REPORT: Final[str] = "отчёт"

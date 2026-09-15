@@ -197,6 +197,7 @@ class Reconciler:
         item.found_stream = pick.stream
         item.actual = BroadcastSpec.from_platform(pick.broadcast, pick.stream, self._platform.limits)
         changed: tuple[ChangedField, ...] = item.actual.diff(item.expected)
+        self._log_not_compared(item)
         if pick.stream is None:
             # поток будет создан уже с меткой планера: чинить метку нечему
             changed = tuple(name for name in changed if name is not ChangedField.MARKER)
@@ -216,6 +217,21 @@ class Reconciler:
         item.found = pick.broadcast
         item.found_stream = pick.stream
         item.take_found_key()
+
+    @staticmethod
+    def _log_not_compared(item: PlannedBroadcast) -> None:
+        """Диагностика, а не дело владельца: площадка не вернула поле — сверки по нему в этом запуске не было."""
+        if item.actual is None:
+            return
+        skipped: tuple[ChangedField, ...] = item.actual.not_compared(item.expected)
+        if not skipped:
+            return
+        LOGGER.info(
+            'spec_fields_not_compared slot_id=%s channel="%s" fields=%s',
+            item.slot_id,
+            item.channel.account_name,
+            ",".join(name.value for name in skipped),
+        )
 
     def _warn_reported(self, item: PlannedBroadcast) -> None:
         """Расходится, но через API не исправляется: лог и предупреждение объекта, решение не меняется."""

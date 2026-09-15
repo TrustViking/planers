@@ -197,6 +197,14 @@ class BroadcastSpec:
                 changed.append(candidate)
         return tuple(changed)
 
+    def not_compared(self, other: BroadcastSpec) -> tuple[ChangedField, ...]:
+        """Поля, по которым diff промолчал: одна из сторон — None. Пропажа поля не должна быть беззвучной."""
+        return tuple(
+            candidate
+            for candidate in ChangedField
+            if self.value(candidate) is None or other.value(candidate) is None
+        )
+
 
 @dataclass
 class PlannedBroadcast:
