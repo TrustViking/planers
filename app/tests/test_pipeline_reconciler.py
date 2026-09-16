@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
@@ -15,9 +16,9 @@ from app.pipeline.plan import (
     PlannedBroadcast,
 )
 from app.pipeline.reconciler import MarkerParts, OrphanBroadcast, Reconciler, split_marker
-from app.platforms.base import PlatformError, UpcomingBroadcast
+from app.platforms.base import PLACEHOLDER_TOKEN, PlatformError, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
-from app.tests.conftest import RecordingProgress, build_planned
+from app.tests.conftest import RecordingProgress, build_config, build_planned
 
 ConfigFactory = Callable[..., PlanerConfig]
 SlotFactory = Callable[..., Slot]
@@ -86,7 +87,8 @@ def test_fields_the_platform_did_not_return_are_logged_once_per_broadcast(
     with caplog.at_level("INFO", logger="planer.reconciler"):
         _reconcile(fake_platform, make_config(), item)
     lines: list[str] = [message for message in caplog.messages if message.startswith("spec_fields_not_compared")]
-    assert lines == [f'spec_fields_not_compared slot_id={slot.slot_id} channel="yt_ua" fields=category']
+    # картинку эфира площадка не отдала (посеянный эфир без картинки) — обложка тоже не сверялась
+    assert lines == [f'spec_fields_not_compared slot_id={slot.slot_id} channel="yt_ua" fields=category,thumbnail']
     assert [record.levelname for record in caplog.records if "spec_fields_not_compared" in record.getMessage()] == ["INFO"]
 
 
@@ -450,4 +452,124 @@ def test_failed_channel_read_has_start_but_no_done(
         ("channel_read_started", "yt_ua"),
         ("channel_read_started", "yt_ru"),
         ("channel_read_done", "yt_ru", 0),
+    ]
+
+
+# --- задача 5k: обложка — сверяемое поле; «обложки нет» = картинка эфира совпадает с заглушкой канала
+
+PLACEHOLDER: str = "044eb0835668"
+OWN_PICTURE: str = "aaaaaaaaaaaa"
+
+
+def _with_preview(slot: Slot) -> Slot:
+    return replace(slot, previews=(f"previews/{slot.slot_id}_1.jpg",))
+
+
+def _slots_with_previews(make_slot_object: SlotFactory, now: datetime, count: int) -> list[Slot]:
+    return [_with_preview(make_slot_object(now + timedelta(days=1, hours=hour), "uk")) for hour in range(count)]
+
+
+def test_picture_equal_to_stream_token_is_a_missing_thumbnail(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    [slot] = _slots_with_previews(make_slot_object, now, 1)
+    _seed_like(
+        fake_platform, "yt_ua", slot,
+        picture=PLACEHOLDER, stream_description="Ключ планера; " + PLACEHOLDER_TOKEN.format(sha=PLACEHOLDER),
+    )
+    [item] = _objects(make_config(), slot)
+    _reconcile(fake_platform, make_config(), item)
+    assert item.decision is Decision.UPDATE
+    assert item.changed_fields == (ChangedField.THUMBNAIL,)
+
+
+def test_same_picture_on_two_broadcasts_of_a_channel_is_a_placeholder(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """Эфиры Maria Kamenskay, созданные до 5k: токена в описании потока нет, но заглушка у всех одна."""
+    slots: list[Slot] = _slots_with_previews(make_slot_object, now, 2)
+    for slot in slots:
+        _seed_like(fake_platform, "yt_ua", slot, picture=PLACEHOLDER)
+    items: list[PlannedBroadcast] = _objects(make_config(), *slots)
+    _reconcile(fake_platform, make_config(), *items)
+    assert [(item.decision, item.changed_fields) for item in items] == [
+        (Decision.UPDATE, (ChangedField.THUMBNAIL,)),
+        (Decision.UPDATE, (ChangedField.THUMBNAIL,)),
+    ]
+
+
+def test_unique_picture_without_tokens_is_an_own_thumbnail(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    slots: list[Slot] = _slots_with_previews(make_slot_object, now, 2)
+    _seed_like(fake_platform, "yt_ua", slots[0], picture=OWN_PICTURE)
+    _seed_like(fake_platform, "yt_ua", slots[1], picture="bbbbbbbbbbbb")
+    items: list[PlannedBroadcast] = _objects(make_config(), *slots)
+    _reconcile(fake_platform, make_config(), *items)
+    assert [item.decision for item in items] == [Decision.MATCH, Decision.MATCH]
+
+
+def test_picture_that_did_not_download_is_not_compared(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    [slot] = _slots_with_previews(make_slot_object, now, 1)
+    _seed_like(fake_platform, "yt_ua", slot, picture=None)
+    [item] = _objects(make_config(), slot)
+    with caplog.at_level("INFO", logger="planer.reconciler"):
+        _reconcile(fake_platform, make_config(), item)
+    assert item.decision is Decision.MATCH
+    [line] = [message for message in caplog.messages if message.startswith("spec_fields_not_compared")]
+    assert line.endswith("thumbnail")
+
+
+@pytest.mark.parametrize("case", ["set_thumbnail_off", "slot_without_previews"])
+def test_thumbnail_is_not_compared_when_the_planer_does_not_set_it(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+    case: str,
+) -> None:
+    slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    if case == "set_thumbnail_off":
+        slot = _with_preview(slot)
+    _seed_like(
+        fake_platform, "yt_ua", slot,
+        picture=PLACEHOLDER, stream_description=PLACEHOLDER_TOKEN.format(sha=PLACEHOLDER),
+    )
+    config: PlanerConfig = make_config(set_thumbnail=case != "set_thumbnail_off")
+    channel = config.channels[0]
+    item: PlannedBroadcast = build_planned(slot, channel, settings=config.settings)
+    assert item.expected.has_own_thumbnail is None
+    _reconcile(fake_platform, config, item)
+    assert item.decision is Decision.MATCH
+
+
+def test_same_picture_on_different_channels_is_not_a_placeholder(
+    fake_platform: FakePlatform,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    config: PlanerConfig = build_config(channels=(("yt_ua", ["uk"]), ("yt_ua2", ["uk"])))
+    [slot] = _slots_with_previews(make_slot_object, now, 1)
+    _seed_like(fake_platform, "yt_ua", slot, picture=OWN_PICTURE)
+    _seed_like(fake_platform, "yt_ua2", slot, picture=OWN_PICTURE)
+    items: list[PlannedBroadcast] = _objects(config, slot)
+    _reconcile(fake_platform, config, *items)
+    assert [(item.account_name, item.decision) for item in items] == [
+        ("yt_ua", Decision.MATCH),
+        ("yt_ua2", Decision.MATCH),
     ]

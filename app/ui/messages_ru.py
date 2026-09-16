@@ -179,6 +179,9 @@ MISMATCH_FIELD_LANGUAGE: Final[str] = "язык"
 MISMATCH_FIELD_AUDIENCE: Final[str] = "аудитория"
 SPEC_VALUE_TRUE: Final[str] = "да"
 SPEC_VALUE_FALSE: Final[str] = "нет"
+# Обложка в «было / стало»: отпечатки владельцу ничего не говорят.
+THUMBNAIL_BEFORE: Final[str] = "заглушка канала"
+THUMBNAIL_AFTER: Final[str] = "из пакета"
 WARNING_REPORTED_FIELD: Final[str] = (
     "не можем исправить: {prefix} — {field}: нужно {wanted}, на площадке {actual}; через API это не исправляется "
     "(нужен monitorStream) — поправьте в Студии; эфир и ключ в силе"
@@ -195,6 +198,8 @@ AMBIGUOUS_URL_JOINER: Final[str] = ", "
 STREAM_DESCRIPTION: Final[str] = (
     "Ключ планера: канал «{account_name}», эфир {date} {time}, язык {language}; записано планером {written_at}"
 )
+# Хвост описания ключа: отпечаток заглушки обложки канала (PLACEHOLDER_TOKEN) — по нему узнаётся эфир без обложки.
+STREAM_DESCRIPTION_PLACEHOLDER: Final[str] = "; заглушка обложки {token}"
 WARNING_FORM_DIAGNOSTIC: Final[str] = "ответ формы сохранён для разбора: {path}"
 # Постоянные особенности площадки — только в отчёте, разделом «Особенности площадки» (ТЗ §5.6).
 WARNING_KEPT_KEY: Final[str] = (
@@ -298,6 +303,7 @@ CHANGED_FIELD_TEXT: Final[dict[str, str]] = {
     "category": "категория",
     "privacy": "видимость",
     "marker": "маркер потока",
+    "thumbnail": "обложка",
     "auto_start": "автостарт",
     "auto_stop": "автостоп",
     "latency": "задержка трансляции",

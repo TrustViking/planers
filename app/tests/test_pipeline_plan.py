@@ -101,7 +101,12 @@ def test_spec_from_slot_takes_every_dictated_value_from_its_source(make_slot_obj
     spec: BroadcastSpec = BroadcastSpec.from_slot(slot, LIMITS, CHANNEL, settings)
     assert (spec.privacy, spec.category_id, spec.auto_start) == (CHANNEL.privacy.value, "25", False)
     assert (spec.auto_stop, spec.latency_preference) == (LIMITS.auto_stop, LIMITS.latency_preference)
-    assert all(spec.value(name) is not None for name in ChangedField)
+    # слот без превью: обложку планер не ставит — и не сверяет; остальные диктуемые поля заполнены
+    assert spec.has_own_thumbnail is None
+    assert all(spec.value(name) is not None for name in ChangedField if name is not ChangedField.THUMBNAIL)
+    # слот с превью: обложка из пакета должна стоять
+    with_preview: Slot = replace(slot, previews=(f"previews/{slot.slot_id}_1.jpg",))
+    assert BroadcastSpec.from_slot(with_preview, LIMITS, CHANNEL, settings).has_own_thumbnail is True
 
 
 def test_spec_from_platform_applies_the_same_rules(make_slot_object: SlotFactory, now: datetime) -> None:
@@ -177,8 +182,14 @@ def test_diff_ignores_time_and_unreported_values(make_slot_object: SlotFactory, 
     )
     assert other.diff(expected) == ()
     # но пропажа поля не беззвучна: not_compared называет, по чему сверки не было
-    assert other.not_compared(expected) == (ChangedField.CATEGORY, ChangedField.PRIVACY, ChangedField.AUTO_START)
-    assert expected.not_compared(expected) == ()
+    # слот без превью: обложка не сверяется ни у одной стороны
+    assert other.not_compared(expected) == (
+        ChangedField.CATEGORY,
+        ChangedField.PRIVACY,
+        ChangedField.THUMBNAIL,
+        ChangedField.AUTO_START,
+    )
+    assert expected.not_compared(expected) == (ChangedField.THUMBNAIL,)
 
 
 def test_fields_are_split_once_and_completely() -> None:

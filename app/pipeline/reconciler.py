@@ -7,10 +7,13 @@
 Маркер планера — slot_id в названии привязанного потока. Поток с другим названием
 (ручной эфир) считается эфиром без маркера; найденный такой эфир планер усыновляет —
 расхождение по MARKER исправимо, как и прочие поля FIXABLE_FIELDS.
+Обложка сверяется по заглушкам канала (_channel_placeholders): картинка эфира совпала с заглушкой —
+своей обложки нет, это расхождение по THUMBNAIL.
 """
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,12 +34,22 @@ from app.pipeline.plan import (
     PlannedBroadcast,
     to_minute,
 )
-from app.platforms.base import BroadcastPlatform, PlatformError, StreamInfo, UpcomingBroadcast, broadcast_url_for
+from app.platforms.base import (
+    BroadcastPlatform,
+    PlatformError,
+    StreamInfo,
+    UpcomingBroadcast,
+    broadcast_url_for,
+    placeholder_sha_from_description,
+)
 
 LOGGER = get_logger("reconciler")
 # Форма маркера планера — единственный источник.
 PLANER_MARKER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\d{2}-\d{2}-\d{4}_\d{4}_[a-z]+$")
 MARKER_SEPARATOR: Final[str] = "_"  # как в SLOT_ID_TEMPLATE (app/core/dates.py)
+# Картинка, одинаковая у стольких эфиров одного канала, — заглушка канала, а не своя обложка.
+PLACEHOLDER_DUPLICATE_MIN: Final[int] = 2
+LOG_LIST_JOINER: Final[str] = ","
 
 
 @dataclass(frozen=True)
@@ -178,11 +191,12 @@ class Reconciler:
                 item.decision = Decision.ERROR
                 item.error = _platform_error(channel, error)
             return []
+        placeholders: frozenset[str] = self._channel_placeholders(channel, broadcasts)
         for item in items:
             if item.is_too_late:
                 self._read_key_only(item, broadcasts)
             else:
-                self._decide(item, broadcasts)
+                self._decide(item, broadcasts, placeholders)
             LOGGER.info(
                 'pair_decision slot_id=%s channel="%s" decision=%s broadcast_id=%s stream_key=%s fixable=%s reported=%s',
                 item.slot_id,
@@ -195,7 +209,36 @@ class Reconciler:
             )
         return self._orphans(channel, broadcasts, slot_ids)
 
-    def _decide(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> None:
+    def _channel_placeholders(self, channel: ChannelConfig, broadcasts: list[UpcomingBroadcast]) -> frozenset[str]:
+        """Заглушки обложки канала: отпечатки из описаний потоков и картинки, повторённые у нескольких эфиров.
+
+        Потоки читаются тем же кешем, что и опознание и сироты: лишних обращений нет. Одинаковая картинка
+        на разных каналах дублем не считается — счёт идёт внутри канала.
+        """
+        from_streams: set[str] = set()
+        for broadcast in broadcasts:
+            stream: StreamInfo | None = self._stream(channel, broadcast.stream_id)
+            sha: str | None = placeholder_sha_from_description(stream.description) if stream is not None else None
+            if sha is not None:
+                from_streams.add(sha)
+        counts: Counter[str] = Counter(
+            broadcast.thumbnail_sha for broadcast in broadcasts if broadcast.thumbnail_sha is not None
+        )
+        from_duplicates: set[str] = {sha for sha, count in counts.items() if count >= PLACEHOLDER_DUPLICATE_MIN}
+        LOGGER.info(
+            'channel_placeholders channel="%s" from_streams=%s from_duplicates=%s',
+            channel.account_name,
+            LOG_LIST_JOINER.join(sorted(from_streams)) or "-",
+            LOG_LIST_JOINER.join(sorted(from_duplicates)) or "-",
+        )
+        return frozenset(from_streams | from_duplicates)
+
+    def _decide(
+        self,
+        item: PlannedBroadcast,
+        broadcasts: list[UpcomingBroadcast],
+        placeholders: frozenset[str] = frozenset(),
+    ) -> None:
         """Эфира на площадке нет — CREATE: памяти о прошлых запусках у планера нет, действие одно и то же."""
         pick: CandidatePick = self._find(item, broadcasts)
         if pick.is_ambiguous:
@@ -207,7 +250,7 @@ class Reconciler:
             return
         item.found = pick.broadcast
         item.found_stream = pick.stream
-        item.actual = BroadcastSpec.from_platform(pick.broadcast, pick.stream, self._platform.limits)
+        item.actual = BroadcastSpec.from_platform(pick.broadcast, pick.stream, self._platform.limits, placeholders)
         changed: tuple[ChangedField, ...] = item.actual.diff(item.expected)
         self._log_not_compared(item)
         if pick.stream is None:

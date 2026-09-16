@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
 
+import requests
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
@@ -42,7 +43,10 @@ from app.platforms.base import (
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
+    PLACEHOLDER_TOKEN,
     broadcast_url_for,
+    picture_sha,
+    placeholder_sha_from_description,
 )
 from app.ui import messages_ru as msg
 
@@ -74,6 +78,10 @@ STREAM_FRAME_RATE: Final[str] = "variable"
 LATENCY_PREFERENCE: Final[str] = "normal"
 ENABLE_AUTO_STOP: Final[bool] = True
 THUMBNAIL_MIME_TYPE: Final[str] = "image/jpeg"
+# Картинка эфира для сверки обложки: самый маленький размер; скачивание квоту не тратит.
+THUMBNAIL_PICTURE_SIZE: Final[str] = "default"
+PICTURE_TIMEOUT_SEC: Final[int] = 15
+HTTP_OK: Final[int] = 200
 
 # Формат ключа потока YouTube (ТЗ §7.4) — единственный источник.
 YOUTUBE_STREAM_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]{4}(-[a-z0-9]{4}){3,4}$")
@@ -200,6 +208,7 @@ class YouTubePlatform:
         self._on_login: Callable[[ChannelConfig], None] | None = on_login
         self._last_request_at: float | None = None   # time.monotonic() конца предыдущего обращения
         self._refusals: dict[RefusalKey, tuple[PlatformError, ErrorBehavior]] = {}
+        self._session: requests.Session = requests.Session()   # картинки эфиров (i.ytimg.com), без авторизации
         self._services: dict[str, Any] = {}
         self._channels: dict[str, ChannelInfo] = {}
         self._notices: list[PlatformNotice] = []   # замечания за запуск; забирает take_notices
@@ -265,14 +274,42 @@ class YouTubePlatform:
                     pageToken=token,
                 ),
             )
-            page_broadcasts, page_notices = _broadcasts_from_page(_items(response), channel.account_name)
-            broadcasts.extend(page_broadcasts)
+            items: list[dict[str, Any]] = _items(response)
+            page_broadcasts, page_notices = _broadcasts_from_page(items, channel.account_name)
+            broadcasts.extend(self._with_picture(broadcast, items) for broadcast in page_broadcasts)
             self._notices.extend(page_notices)
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
         LOGGER.info('broadcasts_listed channel="%s" count=%d', channel.account_name, len(broadcasts))
         return broadcasts
+
+    def _with_picture(self, broadcast: UpcomingBroadcast, items: list[dict[str, Any]]) -> UpcomingBroadcast:
+        """Отпечаток картинки эфира — по snippet.thumbnails того же ответа списка."""
+        for item in items:
+            if item.get("id") == broadcast.broadcast_id:
+                thumbnails: dict[str, Any] = _mapping(_mapping(item, "snippet"), "thumbnails")
+                return replace(broadcast, thumbnail_sha=self._picture_sha(thumbnails))
+        return broadcast
+
+    def _picture_sha(self, thumbnails: dict[str, Any]) -> str | None:
+        """Картинка размера default → отпечаток. Не скачалась — None: это не отказ площадки и не сбой канала."""
+        size: Any = thumbnails.get(THUMBNAIL_PICTURE_SIZE)
+        url: Any = size.get("url") if isinstance(size, dict) else None
+        if not isinstance(url, str) or not url:
+            return None
+        self._wait_pause()
+        try:
+            response: requests.Response = self._session.get(url, timeout=PICTURE_TIMEOUT_SEC)
+        except requests.RequestException as error:
+            LOGGER.info("thumbnail_picture_unavailable url=%s status=%s error=%s", url, LOG_MISSING, error)
+            return None
+        finally:
+            self._mark_request_done()
+        if response.status_code != HTTP_OK or not response.content:
+            LOGGER.info("thumbnail_picture_unavailable url=%s status=%s", url, response.status_code)
+            return None
+        return picture_sha(response.content)
 
     def take_notices(self) -> tuple[PlatformNotice, ...]:
         """Отдать накопленные замечания и очистить накопитель."""
@@ -296,6 +333,7 @@ class YouTubePlatform:
             title=_text(_mapping(item, "snippet"), "title", allow_empty=True),
             ingestion_address=_text(ingestion, "ingestionAddress", allow_empty=True),
             stream_name=_text(ingestion, "streamName", allow_empty=True),
+            description=_text(_mapping(item, "snippet"), "description", allow_empty=True),
         )
         _warn_on_unexpected_key(channel.account_name, stream)
         return stream
@@ -312,7 +350,15 @@ class YouTubePlatform:
         )
         broadcast_id: str = _text(response, "id")
         LOGGER.info('broadcast_inserted channel="%s" broadcast_id=%s', channel.account_name, broadcast_id)
-        return self._attach_new_stream(channel, broadcast_id, spec)
+        # обложки у нового эфира ещё нет: его картинка — заглушка канала, её отпечаток уходит в описание потока
+        placeholder: str | None = self._picture_sha(_mapping(_mapping(response, "snippet"), "thumbnails"))
+        LOGGER.info(
+            'thumbnail_placeholder_captured channel="%s" broadcast_id=%s sha=%s',
+            channel.account_name,
+            broadcast_id,
+            placeholder or LOG_MISSING,
+        )
+        return self._attach_new_stream(channel, broadcast_id, spec, placeholder)
 
     def attach_stream(
         self,
@@ -320,8 +366,11 @@ class YouTubePlatform:
         broadcast_id: str,
         spec: BroadcastSpec,
     ) -> CreatedBroadcast:
-        """Эфир уже есть, потока нет: тот же путь, начиная с liveStreams.insert."""
-        return self._attach_new_stream(channel, broadcast_id, spec)
+        """Эфир уже есть, потока нет: тот же путь, начиная с liveStreams.insert.
+
+        Отпечаток заглушки не снимается: на картинке существующего эфира может быть обложка.
+        """
+        return self._attach_new_stream(channel, broadcast_id, spec, None)
 
     def update_broadcast(
         self,
@@ -412,8 +461,12 @@ class YouTubePlatform:
         if not items:
             raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"liveStreams.list is empty for {stream_id}")
         snippet: dict[str, Any] = dict(_mapping(items[0], "snippet"))
+        # отпечаток заглушки из прежнего описания сохраняется: по нему следующий запуск узнает эфир без обложки
+        previous: str = _text(snippet, "description", allow_empty=True)
         snippet["title"] = marker
-        snippet["description"] = stream_description(channel, marker, _local_now())
+        snippet["description"] = stream_description(
+            channel, marker, _local_now(), placeholder_sha_from_description(previous)
+        )
         self._execute(
             channel,
             "liveStreams.update",
@@ -493,6 +546,7 @@ class YouTubePlatform:
         channel: ChannelConfig,
         broadcast_id: str,
         spec: BroadcastSpec,
+        placeholder_sha: str | None,
     ) -> CreatedBroadcast:
         """liveStreams.insert → проверка ключа → bind. Один поток на эфир (§7.4)."""
         response: dict[str, Any] = self._execute(
@@ -500,7 +554,7 @@ class YouTubePlatform:
             "liveStreams.insert",
             lambda service: service.liveStreams().insert(
                 part=STREAM_PARTS,
-                body=_stream_body(channel, spec),
+                body=_stream_body(channel, spec, placeholder_sha),
             ),
         )
         stream_id: str = _text(response, "id")
@@ -730,24 +784,32 @@ def _local_now() -> datetime:
     return datetime.now(timezone.utc).astimezone()
 
 
-def stream_description(channel: ChannelConfig, marker: str, written_at: datetime) -> str:
-    """Описание ключа потока в Студии: чей это ключ и для какого эфира. Зрителям не видно."""
+def stream_description(
+    channel: ChannelConfig,
+    marker: str,
+    written_at: datetime,
+    placeholder_sha: str | None = None,
+) -> str:
+    """Описание ключа потока в Студии: чей это ключ и для какого эфира; отпечаток заглушки — если известен."""
     parts: MarkerParts | None = split_marker(marker)
-    return msg.STREAM_DESCRIPTION.format(
+    text: str = msg.STREAM_DESCRIPTION.format(
         account_name=channel.account_name,
         date=parts.date if parts else marker,
         time=parts.time if parts else "",
         language=parts.language if parts else "",
         written_at=format_datetime_text(written_at),
     )
+    if placeholder_sha is None:
+        return text
+    return text + msg.STREAM_DESCRIPTION_PLACEHOLDER.format(token=PLACEHOLDER_TOKEN.format(sha=placeholder_sha))
 
 
-def _stream_body(channel: ChannelConfig, spec: BroadcastSpec) -> dict[str, Any]:
+def _stream_body(channel: ChannelConfig, spec: BroadcastSpec, placeholder_sha: str | None) -> dict[str, Any]:
     """Название потока — маркер планера (§7.3), описание — чей это ключ; зрителям не видны."""
     return {
         "snippet": {
             "title": spec.marker,
-            "description": stream_description(channel, spec.marker, _local_now()),
+            "description": stream_description(channel, spec.marker, _local_now(), placeholder_sha),
         },
         "cdn": {
             "ingestionType": INGESTION_TYPE,

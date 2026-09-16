@@ -5,6 +5,8 @@ Protocol называется BroadcastPlatform: имя Platform занято en
 """
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -19,6 +21,22 @@ if TYPE_CHECKING:   # спека живёт в pipeline; здесь она ну�
 BROADCAST_URL_TEMPLATES: Final[dict[Platform, str]] = {
     Platform.YOUTUBE: "https://www.youtube.com/watch?v={broadcast_id}",
 }
+# Отпечаток картинки эфира: сравнивается с заглушкой канала («обложки нет» = картинка = заглушка).
+PICTURE_SHA_CHARS: Final[int] = 12
+# Отпечаток заглушки в описании потока: планер записывает его при создании эфира, пока обложки ещё нет.
+PLACEHOLDER_TOKEN: Final[str] = "thumb0={sha}"
+PLACEHOLDER_PATTERN: Final[re.Pattern[str]] = re.compile(r"thumb0=([0-9a-f]{12})")
+
+
+def picture_sha(content: bytes) -> str:
+    """Единственная функция отпечатка картинки: sha256, первые PICTURE_SHA_CHARS hex."""
+    return hashlib.sha256(content).hexdigest()[:PICTURE_SHA_CHARS]
+
+
+def placeholder_sha_from_description(description: str) -> str | None:
+    """Отпечаток заглушки из описания потока; токена нет — None."""
+    found: re.Match[str] | None = PLACEHOLDER_PATTERN.search(description)
+    return found.group(1) if found else None
 
 
 @dataclass(frozen=True)
@@ -57,6 +75,7 @@ class UpcomingBroadcast:
     auto_start: bool | None = None          # contentDetails.enableAutoStart
     auto_stop: bool | None = None           # contentDetails.enableAutoStop
     latency_preference: str | None = None   # contentDetails.latencyPreference
+    thumbnail_sha: str | None = None        # отпечаток картинки размера default; None — не скачали
 
 
 class PlatformNoticeKind(str, Enum):
@@ -78,6 +97,7 @@ class StreamInfo:
     title: str               # маркер §7.3: планер пишет сюда slot_id
     ingestion_address: str   # stream_url
     stream_name: str         # ключ потока
+    description: str = ""    # описание ключа в Студии; в нём — отпечаток заглушки обложки (PLACEHOLDER_TOKEN)
 
 
 @dataclass(frozen=True)

@@ -47,6 +47,7 @@ class ChangedField(str, Enum):
     CATEGORY = "category"
     PRIVACY = "privacy"
     MARKER = "marker"
+    THUMBNAIL = "thumbnail"
     AUTO_START = "auto_start"
     AUTO_STOP = "auto_stop"
     LATENCY = "latency"
@@ -54,7 +55,14 @@ class ChangedField(str, Enum):
 
 # Расхождение — решение UPDATE: планер приводит эфир к пакету.
 FIXABLE_FIELDS: Final[frozenset[ChangedField]] = frozenset(
-    {ChangedField.TITLE, ChangedField.DESCRIPTION, ChangedField.CATEGORY, ChangedField.PRIVACY, ChangedField.MARKER}
+    {
+        ChangedField.TITLE,
+        ChangedField.DESCRIPTION,
+        ChangedField.CATEGORY,
+        ChangedField.PRIVACY,
+        ChangedField.MARKER,
+        ChangedField.THUMBNAIL,
+    }
 )
 # Расхождение решения не меняет, но доходит до владельца: лог, «внимание:» в консоли, отчёт.
 # Эти поля живут в contentDetails эфира, а liveBroadcasts.update шлёт только snippet
@@ -70,6 +78,7 @@ SPEC_ATTRIBUTES: Final[dict[ChangedField, str]] = {
     ChangedField.CATEGORY: "category_id",
     ChangedField.PRIVACY: "privacy",
     ChangedField.MARKER: "marker",
+    ChangedField.THUMBNAIL: "has_own_thumbnail",
     ChangedField.AUTO_START: "auto_start",
     ChangedField.AUTO_STOP: "auto_stop",
     ChangedField.LATENCY: "latency_preference",
@@ -126,6 +135,8 @@ class BroadcastSpec:
     auto_start: bool | None = None         # contentDetails.enableAutoStart
     auto_stop: bool | None = None          # contentDetails.enableAutoStop
     latency_preference: str | None = None  # contentDetails.latencyPreference
+    # своя обложка: картинка эфира не совпадает с заглушкой канала; None — не сверяется
+    has_own_thumbnail: bool | None = None
 
     @classmethod
     def from_slot(
@@ -146,6 +157,8 @@ class BroadcastSpec:
             auto_start=settings.auto_start,
             auto_stop=limits.auto_stop,
             latency_preference=limits.latency_preference,
+            # обложку планер ставит, только если так велит planer.json и превью есть в пакете
+            has_own_thumbnail=True if settings.set_thumbnail and slot.previews else None,
         )
 
     @classmethod
@@ -154,7 +167,12 @@ class BroadcastSpec:
         broadcast: UpcomingBroadcast,
         stream: StreamInfo | None,
         limits: PlatformLimits,
+        placeholders: frozenset[str] = frozenset(),
     ) -> BroadcastSpec:
+        """placeholders — отпечатки заглушек канала: картинка эфира из них — обложки нет."""
+        has_own_thumbnail: bool | None = (
+            None if broadcast.thumbnail_sha is None else broadcast.thumbnail_sha not in placeholders
+        )
         return cls(
             start_minute=to_minute(broadcast.start_utc),
             marker=stream.title if stream is not None else EMPTY_MARKER,
@@ -165,11 +183,16 @@ class BroadcastSpec:
             auto_start=broadcast.auto_start,
             auto_stop=broadcast.auto_stop,
             latency_preference=broadcast.latency_preference,
+            has_own_thumbnail=has_own_thumbnail,
         )
 
     @classmethod
     def from_facts(cls, facts: BroadcastFacts, limits: PlatformLimits, start_minute: datetime) -> BroadcastSpec:
-        """Факты после действий в той же форме; start_minute — если площадка времени не вернула."""
+        """Факты после действий в той же форме; start_minute — если площадка времени не вернула.
+
+        Обложка здесь не сверяется: картинка сразу после записи может ещё не смениться — её сверяет
+        список эфиров следующего запуска.
+        """
         return cls(
             start_minute=to_minute(facts.start_utc) if facts.start_utc is not None else start_minute,
             marker=facts.stream_marker or EMPTY_MARKER,

@@ -45,8 +45,10 @@ _TOTALS: Final[dict[RunMode, str]] = {
     RunMode.DRY_RUN: msg.CONSOLE_TOTAL_DRY_RUN,
     RunMode.STATUS: msg.CONSOLE_TOTAL_STATUS,
 }
-# Тексты эфира правятся по пакету штатно; к норме «возвращают» только настройки — они идут во «Внимание».
-_CONTENT_FIELDS: Final[frozenset[str]] = frozenset({ChangedField.TITLE.value, ChangedField.DESCRIPTION.value})
+# Тексты и обложка эфира правятся по пакету штатно; к норме «возвращают» только настройки — они идут во «Внимание».
+_CONTENT_FIELDS: Final[frozenset[str]] = frozenset(
+    {ChangedField.TITLE.value, ChangedField.DESCRIPTION.value, ChangedField.THUMBNAIL.value}
+)
 # AMBIGUOUS во «Внимание» приходит предупреждением со ссылками — строка ошибки его бы продублировала.
 _ATTENTION_ERROR_KINDS: Final[frozenset[OutcomeKind]] = ERROR_OUTCOME_KINDS - {OutcomeKind.AMBIGUOUS}
 

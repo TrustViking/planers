@@ -99,11 +99,7 @@ SPEC_LOG_KEYS: Final[tuple[str, ...]] = (
     "auto_start",
     "auto_stop",
     "latency",
-)
-# Как чинится каждое исправимое поле: эти — liveBroadcasts.update (snippet); видимость и категорию
-# ресурс videos берёт в apply_video_settings; маркер — set_stream_marker.
-BROADCAST_UPDATE_FIELDS: Final[frozenset[ChangedField]] = frozenset(
-    {ChangedField.TITLE, ChangedField.DESCRIPTION, ChangedField.CATEGORY}
+    "has_own_thumbnail",
 )
 
 
@@ -359,6 +355,7 @@ def _describe_spec(spec: BroadcastSpec | None) -> dict[str, object]:
         "auto_start": _log_value(spec.auto_start),
         "auto_stop": _log_value(spec.auto_stop),
         "latency": _log_value(spec.latency_preference),
+        "has_own_thumbnail": _log_value(spec.has_own_thumbnail),
     }
 
 
@@ -443,6 +440,7 @@ class _Executor:
     def __init__(self, context: _RunContext) -> None:
         self._context: _RunContext = context
         self._platform: BroadcastPlatform = context.platform
+        self._resent: set[tuple[str, str]] = set()   # (slot_id, канал): эфир уже переотправлен в этом запуске
 
     def execute(self, item: PlannedBroadcast) -> None:
         try:
@@ -509,15 +507,20 @@ class _Executor:
             self._fix(item)
 
     def _fix(self, item: PlannedBroadcast) -> None:
-        """Привести найденный эфир к пакету: каждое поле — своим вызовом; видимость — в _finish."""
-        self._context.progress.broadcast_step_started(item, BroadcastStep.FIX)
+        """Исправляемый эфир переотправляется целиком: тексты, время и категория, метка, обложка; видимость — в _finish."""
         broadcast_id: str = item.found.broadcast_id if item.found else ""
-        if BROADCAST_UPDATE_FIELDS.intersection(item.changed_fields):
-            self._platform.update_broadcast(item.channel, broadcast_id, item.expected)
-        if ChangedField.MARKER in item.changed_fields and item.found_stream is not None:
+        self._resend(item, broadcast_id, with_marker=True)
+        item.require_key_delivery()
+
+    def _resend(self, item: PlannedBroadcast, broadcast_id: str, *, with_marker: bool) -> None:
+        """Одна переотправка на эфир за запуск: liveBroadcasts.update, метка (если отличалась), обложка из пакета."""
+        self._resent.add((item.slot_id, item.channel.account_name))
+        self._context.progress.broadcast_step_started(item, BroadcastStep.FIX)
+        self._platform.update_broadcast(item.channel, broadcast_id, item.expected)
+        if with_marker and ChangedField.MARKER in item.changed_fields and item.found_stream is not None:
             # ручной эфир усыновлён: со следующего запуска видно, что ключ уходил стримеру
             self._platform.set_stream_marker(item.channel, item.found_stream.stream_id, item.expected.marker)
-        item.require_key_delivery()
+        self._set_thumbnail(item, broadcast_id)
         LOGGER.info(
             'broadcast_updated slot_id=%s channel="%s" broadcast_id=%s fields=%s',
             item.slot_id,
@@ -531,7 +534,13 @@ class _Executor:
         broadcast_id: str | None = self._own_broadcast_id(item)
         if broadcast_id is None:
             return
+        was_match: bool = item.decision is Decision.MATCH
         fixes: VideoFixes | None = self._apply_video_settings(item, broadcast_id)
+        is_resent: bool = (item.slot_id, item.channel.account_name) in self._resent
+        if was_match and item.decision is Decision.UPDATE and not is_resent:
+            # видимость или категория разошлись у ресурса видео: эфир тоже переотправляется целиком,
+            # настройки видео второй раз не проходятся
+            self._resend(item, broadcast_id, with_marker=False)
         self._read_facts(item, broadcast_id, fixes)
 
     @staticmethod

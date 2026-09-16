@@ -8,7 +8,13 @@ import pytest
 
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.package.model import Slot
-from app.platforms.base import PlatformError, StreamInfo, UpcomingBroadcast
+from app.platforms.base import (
+    PlatformError,
+    StreamInfo,
+    UpcomingBroadcast,
+    picture_sha,
+    placeholder_sha_from_description,
+)
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.fake import FakeCall, FakePlatform
 from app.tests.conftest import build_config
@@ -122,3 +128,22 @@ def test_channels_are_isolated(
     fake_platform.seed_broadcast(first.account_name, now, "Первый", "")
     assert fake_platform.list_upcoming(second) == []
     assert fake_platform.list_calls == [second.account_name]
+
+
+def test_new_broadcast_shows_channel_placeholder_until_thumbnail_is_set(
+    fake_platform: FakePlatform,
+    make_config: Callable[..., PlanerConfig],
+    make_slot_object: Callable[..., Slot],
+    now: datetime,
+) -> None:
+    """Как у площадки: картинка нового эфира — заглушка канала, её отпечаток — в описании потока."""
+    channel, _ = _channels(make_config)
+    created = fake_platform.create_broadcast(channel, _spec(fake_platform, make_slot_object(now + timedelta(days=1), "uk")))
+    [listed] = fake_platform.list_upcoming(channel)
+    placeholder: str = FakePlatform.placeholder_of(channel.account_name)
+    assert listed.thumbnail_sha == placeholder
+    stream: StreamInfo | None = fake_platform.get_stream(channel, created.stream_id)
+    assert stream is not None and placeholder_sha_from_description(stream.description) == placeholder
+    fake_platform.set_thumbnail(channel, created.broadcast_id, b"preview")
+    [listed] = fake_platform.list_upcoming(channel)
+    assert listed.thumbnail_sha == picture_sha(b"preview")

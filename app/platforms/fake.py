@@ -25,7 +25,9 @@ from app.platforms.base import (
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
+    PLACEHOLDER_TOKEN,
     broadcast_url_for,
+    picture_sha,
 )
 
 FAKE_STREAM_URL: Final[str] = "rtmp://a.rtmp.youtube.com/live2"
@@ -90,6 +92,7 @@ class FakePlatform:
         self.tokens_missing: set[str] = set()              # account_name без токена: первый вызов — вход
         self.on_login: Callable[[ChannelConfig], None] | None = None
         self.logins: list[str] = []
+        self.pictures: dict[str, str] = {}   # broadcast_id → отпечаток текущей картинки эфира
 
     def seed_broadcast(
         self,
@@ -105,10 +108,14 @@ class FakePlatform:
         auto_stop: bool = FAKE_AUTO_STOP,
         latency_preference: str = FAKE_LATENCY_PREFERENCE,
         category_id: str = SEED_CATEGORY_ID,
+        picture: str | None = None,
+        stream_description: str = "",
     ) -> UpcomingBroadcast:
         """Эфир «уже на канале». marker — название потока (поток создаётся); без marker — эфир без потока.
 
         Категория, как у YouTube, лежит только у ресурса видео: в списке эфиров её нет.
+        picture — отпечаток картинки эфира (None — картинка не скачалась, обложка не сверяется);
+        stream_description — описание потока, в нём может быть отпечаток заглушки.
         """
         number: int = self._next_number()
         stream_id: str | None = None
@@ -119,6 +126,7 @@ class FakePlatform:
                 title=marker,
                 ingestion_address=FAKE_STREAM_URL,
                 stream_name=stream_key or FAKE_STREAM_KEY_TEMPLATE.format(number=number),
+                description=stream_description,
             )
         broadcast: UpcomingBroadcast = UpcomingBroadcast(
             broadcast_id=FAKE_BROADCAST_ID_TEMPLATE.format(number=number),
@@ -133,7 +141,14 @@ class FakePlatform:
         )
         self._broadcasts.setdefault(channel_id, {})[broadcast.broadcast_id] = broadcast
         self.categories[broadcast.broadcast_id] = category_id
+        if picture is not None:
+            self.pictures[broadcast.broadcast_id] = picture
         return broadcast
+
+    @staticmethod
+    def placeholder_of(account_name: str) -> str:
+        """Заглушка обложки канала в фейке: своя у каждого канала, как у YouTube."""
+        return picture_sha(account_name.encode("utf-8"))
 
     def seed_undated_broadcast(self, account_name: str, title: str) -> PlatformNotice:
         """Эфир без времени старта на канале: площадка его не отдаёт, а замечание копит до take_notices."""
@@ -180,7 +195,10 @@ class FakePlatform:
         self._login_if_needed(channel)
         if channel.account_name in self.fail_list:
             raise self.fail_list[channel.account_name]
-        broadcasts: list[UpcomingBroadcast] = list(self._broadcasts.get(channel.account_name, {}).values())
+        broadcasts: list[UpcomingBroadcast] = [
+            replace(broadcast, thumbnail_sha=self.pictures.get(broadcast.broadcast_id))
+            for broadcast in self._broadcasts.get(channel.account_name, {}).values()
+        ]
         return sorted(broadcasts, key=lambda broadcast: (broadcast.start_utc, broadcast.broadcast_id))
 
     def get_stream(self, channel: ChannelConfig, stream_id: str) -> StreamInfo | None:
@@ -191,11 +209,14 @@ class FakePlatform:
         if spec.marker in self.fail_create:
             raise self.fail_create[spec.marker]
         number: int = self._next_number()
+        # как у площадки: обложки ещё нет, картинка — заглушка канала, её отпечаток — в описании потока
+        placeholder: str = self.placeholder_of(channel.account_name)
         stream: StreamInfo = StreamInfo(
             stream_id=FAKE_STREAM_ID_TEMPLATE.format(number=number),
             title=spec.marker,
             ingestion_address=FAKE_STREAM_URL,
             stream_name=FAKE_STREAM_KEY_TEMPLATE.format(number=number),
+            description=PLACEHOLDER_TOKEN.format(sha=placeholder),
         )
         broadcast: UpcomingBroadcast = UpcomingBroadcast(
             broadcast_id=FAKE_BROADCAST_ID_TEMPLATE.format(number=number),
@@ -210,6 +231,7 @@ class FakePlatform:
         )
         self._streams.setdefault(channel.account_name, {})[stream.stream_id] = stream
         self._broadcasts.setdefault(channel.account_name, {})[broadcast.broadcast_id] = broadcast
+        self.pictures[broadcast.broadcast_id] = placeholder
         self.created.append(FakeCall(channel.account_name, broadcast.broadcast_id, spec.marker, None))
         return CreatedBroadcast(
             broadcast_id=broadcast.broadcast_id,
@@ -317,6 +339,7 @@ class FakePlatform:
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
         if broadcast_id in self.fail_thumbnail:
             raise self.fail_thumbnail[broadcast_id]
+        self.pictures[broadcast_id] = picture_sha(preview)
         self.thumbnails.append(FakeCall(channel.account_name, broadcast_id, "", preview))
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:

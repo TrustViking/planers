@@ -288,13 +288,17 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
 
 def _field_changes(item: PlannedBroadcast) -> tuple[FieldChange, ...]:
     """Было — как в спеке с площадки, стало — как в спеке из пакета; значения теми же словами, что в отчёте."""
-    return tuple(
-        FieldChange(
-            name=name.value,
-            before=spec_value_text(item.actual.value(name)) if item.actual is not None else MISSING_VALUE,
-            after=spec_value_text(item.expected.value(name)),
-        )
-        for name in item.changed_fields
+    return tuple(_field_change(item, name) for name in item.changed_fields)
+
+
+def _field_change(item: PlannedBroadcast, name: ChangedField) -> FieldChange:
+    if name is ChangedField.THUMBNAIL:
+        # у обложки «да/нет» владельцу ничего не скажет: была заглушка канала, стала картинка из пакета
+        return FieldChange(name=name.value, before=msg.THUMBNAIL_BEFORE, after=msg.THUMBNAIL_AFTER)
+    return FieldChange(
+        name=name.value,
+        before=spec_value_text(item.actual.value(name)) if item.actual is not None else MISSING_VALUE,
+        after=spec_value_text(item.expected.value(name)),
     )
 
 

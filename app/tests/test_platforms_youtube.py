@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 from googleapiclient.errors import HttpError
 
 from dataclasses import replace
@@ -23,6 +24,8 @@ from app.platforms.base import (
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
+    picture_sha,
+    placeholder_sha_from_description,
 )
 from app.platforms.youtube import (
     ERROR_AUTH,
@@ -1179,3 +1182,168 @@ def test_broadcast_list_reads_live_chat_id(
     _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
     [broadcast] = platform.list_upcoming(CHANNEL)
     assert broadcast.live_chat_id == "CHAT1"
+
+
+# --- задача 5k: картинка эфира и отпечаток заглушки
+
+PICTURE: bytes = b"placeholder-jpeg"
+PICTURE_URL: str = "https://i.ytimg.com/vi/B1/default_live.jpg"
+
+
+class _PictureResponse:
+    def __init__(self, status_code: int, content: bytes) -> None:
+        self.status_code: int = status_code
+        self.content: bytes = content
+
+
+class _FakeSession:
+    """requests.Session для картинок: ответ по адресу, момент каждого скачивания — по часам теста."""
+
+    def __init__(self, pictures: dict[str, Any], clock: _FakeClock | None = None) -> None:
+        self._pictures: dict[str, Any] = pictures
+        self._clock: _FakeClock | None = clock
+        self.calls: list[tuple[str, float | None]] = []
+
+    def get(self, url: str, timeout: int) -> _PictureResponse:
+        self.calls.append((url, self._clock.now if self._clock is not None else None))
+        answer: Any = self._pictures.get(url, _PictureResponse(404, b""))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def _thumbnails(url: str = PICTURE_URL) -> dict[str, Any]:
+    return {"default": {"url": url, "width": 120}, "high": {"url": url.replace("default", "hq"), "width": 480}}
+
+
+def _install_pictures(platform: YouTubePlatform, session: _FakeSession) -> _FakeSession:
+    platform._session = session   # type: ignore[assignment]
+    return session
+
+
+def _insert_response(thumbnails: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"id": "B1", "snippet": {"thumbnails": thumbnails or {}}}
+
+
+def test_create_writes_placeholder_token_into_stream_description(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveBroadcasts=[_insert_response(_thumbnails()), {"id": "B1"}], liveStreams=[_stream_response()]),
+    )
+    _install_pictures(platform, _FakeSession({PICTURE_URL: _PictureResponse(200, PICTURE)}))
+    platform.create_broadcast(CHANNEL, _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
+    description: str = service.calls[1]["body"]["snippet"]["description"]
+    assert description.endswith("; заглушка обложки thumb0=" + picture_sha(PICTURE))
+    assert placeholder_sha_from_description(description) == picture_sha(PICTURE)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [_PictureResponse(404, b""), _PictureResponse(200, b""), requests.ConnectionError("нет сети")],
+    ids=["not_found", "empty_body", "network"],
+)
+def test_create_without_picture_writes_no_token_and_does_not_fail(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: Any,
+) -> None:
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveBroadcasts=[_insert_response(_thumbnails()), {"id": "B1"}], liveStreams=[_stream_response()]),
+    )
+    _install_pictures(platform, _FakeSession({PICTURE_URL: answer}))
+    created: CreatedBroadcast = platform.create_broadcast(CHANNEL, _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
+    assert created.stream_key == GOOD_KEY
+    assert placeholder_sha_from_description(service.calls[1]["body"]["snippet"]["description"]) is None
+
+
+def test_attach_stream_does_not_take_a_placeholder(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    """На картинке существующего эфира может быть обложка: отпечаток не снимается и не скачивается."""
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(liveStreams=[_stream_response()], liveBroadcasts=[{"id": "B1"}])
+    )
+    session: _FakeSession = _install_pictures(platform, _FakeSession({}))
+    platform.attach_stream(CHANNEL, "B1", _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
+    assert session.calls == []
+    assert placeholder_sha_from_description(service.calls[0]["body"]["snippet"]["description"]) is None
+
+
+def test_set_stream_marker_keeps_the_placeholder_token(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    old: str = "Ключ планера: старый; заглушка обложки thumb0=044eb0835668"
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveStreams=[{"items": [{"id": "S1", "snippet": {"title": "x", "description": old}}]}, {"id": "S1"}]),
+    )
+    platform.set_stream_marker(CHANNEL, "S1", "17-03-2027_1900_uk")
+    description: str = service.calls[1]["body"]["snippet"]["description"]
+    assert description.startswith("Ключ планера: канал «Канал UA», эфир 17-03-2027 19:00")
+    assert placeholder_sha_from_description(description) == "044eb0835668"
+
+
+def test_get_stream_returns_description(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    item: dict[str, Any] = {
+        "id": "S1",
+        "snippet": {"title": "m", "description": "Ключ планера; заглушка обложки thumb0=044eb0835668"},
+        "cdn": {"ingestionInfo": {"ingestionAddress": "rtmp://a", "streamName": GOOD_KEY}},
+    }
+    _install(platform, monkeypatch, _FakeService(liveStreams=[{"items": [item]}]))
+    stream: StreamInfo | None = platform.get_stream(CHANNEL, "S1")
+    assert stream is not None and placeholder_sha_from_description(stream.description) == "044eb0835668"
+
+
+def test_list_upcoming_takes_picture_sha_and_survives_a_failed_download(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    good: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    good["snippet"]["thumbnails"] = _thumbnails()
+    broken: dict[str, Any] = _broadcast_item("B2", "2027-03-18T17:00:00Z", stream_id="S2")
+    broken["snippet"]["thumbnails"] = _thumbnails("https://i.ytimg.com/vi/B2/default_live.jpg")
+    bare: dict[str, Any] = _broadcast_item("B3", "2027-03-19T17:00:00Z", stream_id="S3")   # картинок в ответе нет
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [good, broken, bare]}]))
+    session: _FakeSession = _install_pictures(
+        platform,
+        _FakeSession({PICTURE_URL: _PictureResponse(200, PICTURE), broken["snippet"]["thumbnails"]["default"]["url"]:
+                      requests.Timeout("долго")}),
+    )
+    broadcasts: list[UpcomingBroadcast] = platform.list_upcoming(CHANNEL)
+    assert [broadcast.thumbnail_sha for broadcast in broadcasts] == [picture_sha(PICTURE), None, None]
+    assert [url for url, _ in session.calls] == [PICTURE_URL, broken["snippet"]["thumbnails"]["default"]["url"]]
+
+
+def test_facts_do_not_download_pictures(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z", stream_id=None)
+    item["snippet"]["thumbnails"] = _thumbnails()
+    video: dict[str, Any] = {"id": "B1", "snippet": {"title": "t", "description": "d", "thumbnails": _thumbnails()}}
+    _install(platform, monkeypatch, _FakeService(videos=[{"items": [video]}], liveBroadcasts=[{"items": [item]}]))
+    session: _FakeSession = _install_pictures(platform, _FakeSession({}))
+    platform.read_facts(CHANNEL, "B1")
+    assert session.calls == []
+
+
+def test_pause_also_separates_picture_downloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    platform: YouTubePlatform = _platform_with_pause(tmp_path, 2)
+    items: list[dict[str, Any]] = []
+    pictures: dict[str, Any] = {}
+    for number in (1, 2):
+        item: dict[str, Any] = _broadcast_item(f"B{number}", f"2027-03-1{number}T17:00:00Z")
+        url: str = f"https://i.ytimg.com/vi/B{number}/default_live.jpg"
+        item["snippet"]["thumbnails"] = _thumbnails(url)
+        pictures[url] = _PictureResponse(200, PICTURE + bytes([number]))
+        items.append(item)
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(clock, liveBroadcasts=[{"items": items}]))
+    session: _FakeSession = _install_pictures(platform, _FakeSession(pictures, clock))
+    platform.list_upcoming(CHANNEL)
+    moments: list[float] = [service.calls[0]["at"]] + [moment for _, moment in session.calls if moment is not None]
+    assert len(moments) == 3
+    assert all(later - earlier >= 2 for earlier, later in zip(moments, moments[1:]))
