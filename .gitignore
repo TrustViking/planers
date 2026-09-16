@@ -6,17 +6,16 @@
 .env.*
 
 ########################################
-# Secrets folder - nothing from it is tracked
+# Secrets folder - the owner's files: channels, tokens, client secret.
+# Only secrets/planer.json is tracked: the single source for dev and for the build
 ########################################
-secrets/
+/secrets/*
+!/secrets/planer.json
 
 ########################################
 # Planer runtime data (folders are created by app/paths.py)
-# config/planer.json is tracked: the single source for dev and for the build
 ########################################
-/config/channels.json
 /bcast/
-/app/state/bindings.json
 
 ########################################
 # Google OAuth / API
@@ -84,7 +83,7 @@ ENV/
 logs/
 tmp/
 temp/
-# anchored to the repo root: app/output/ and app/state/ are source packages
+# anchored to the repo root: app/output/ is a source package
 /out/
 /keystreams/
 /output/

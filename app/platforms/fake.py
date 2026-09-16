@@ -33,7 +33,7 @@ FAKE_BROADCAST_ID_TEMPLATE: Final[str] = "fakebc{number:05d}"
 FAKE_STREAM_ID_TEMPLATE: Final[str] = "fakestream{number:04d}"
 FAKE_STREAM_KEY_TEMPLATE: Final[str] = "fake-{number:04d}-0000-0000-0000"
 FAKE_CHANNEL_ID_TEMPLATE: Final[str] = "UCfake{account_name}"
-FAKE_CHANNEL_TITLE_TEMPLATE: Final[str] = "Fake {account_name}"
+FAKE_CHANNEL_TITLE_TEMPLATE: Final[str] = "{account_name}"  # название = account_name: проверка канала проходит
 NOT_FOUND_CODE: Final[str] = "broadcastNotFound"
 # Те же лимиты, что у YouTube: тесты должны ловить реальное поведение обрезки.
 FAKE_TITLE_MAX_CHARS: Final[int] = 100

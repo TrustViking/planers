@@ -17,6 +17,7 @@ from app.pipeline.plan import PlannedBroadcast
 from app.pipeline.reconciler import MarkedBroadcast, MarkerParts
 from app.platforms.base import CreatedBroadcast, StreamInfo, UpcomingBroadcast
 from app.tests.conftest import build_planned, build_slot
+from app.ui import messages_ru as msg
 
 KYIV: timezone = timezone(timedelta(hours=2))
 STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
@@ -25,7 +26,10 @@ STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 # об этом запуске — отправлен сейчас, НЕ отправлен новый ключ, или эфир уже стоял с прежним ключом.
 TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенерировано планером 13-09-2026 12:00.
 # Файл перезаписывается на каждом запуске — не править.
-# Строка «форма»: «отправлен в форму» — ключ у стримера; «в этом запуске в форму не отправлялся» — эфир с меткой планера совпал, ключ уходил раньше; «НЕ отправлен» — передайте ключ стримеру вручную.
+# Строка «форма»:
+#   «отправлен в форму» — ключ у стримера;
+#   «в этом запуске в форму не отправлялся» — эфир уже стоял, ключ уходил раньше;
+#   «НЕ отправлен» — передайте ключ стримеру вручную.
 
 16-09-2026 19:00  uk  Канал UA
   ключ   xxxx-xxxx-xxxx-xxxx-xxxx
@@ -145,14 +149,33 @@ def test_empty_file_has_only_comment_lines(planer_paths: PlanerPaths) -> None:
     path: Path = write_keys_file(planer_paths, render_keys_file([], "16-03-2027 12:00"))
     assert path == planer_paths.keys_file
     lines: list[str] = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 3 and all(line.startswith("# ") for line in lines)
+    assert len(lines) == len(msg.KEYS_FILE_HEADER) and all(line.startswith("# ") for line in lines)
 
 
 def test_key_is_the_first_line_of_each_block() -> None:
     """Ключ — ради него файл и открывают — стоит первым в блоке, а не в конце длинной строки."""
     item: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
     lines: list[str] = render_keys_file([key_row_from_planned(item)], "13-09-2026 12:00").splitlines()
-    assert lines[3] == ""
-    assert lines[4] == "16-09-2026 19:00  uk  Канал UA"
-    assert lines[5] == "  ключ   xxxx-xxxx-xxxx-xxxx-xxxx"
-    assert all(len(line) <= 80 for line in lines[4:])
+    header: int = len(msg.KEYS_FILE_HEADER)
+    assert lines[header] == ""
+    assert lines[header + 1] == "16-09-2026 19:00  uk  Канал UA"
+    assert lines[header + 2] == "  ключ   xxxx-xxxx-xxxx-xxxx-xxxx"
+    assert all(len(line) <= 80 for line in lines[header + 1 :])
+
+
+def test_header_quotes_the_real_form_lines() -> None:
+    """Тексты в кавычках шапки — ровно начала строк «форма», которые пишет файл, во всех трёх состояниях."""
+    sent: PlannedBroadcast = _new_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
+    sent.is_form_sent = True
+    sent.form_sent_at = datetime(2026, 9, 13, 12, 0)
+    failed: PlannedBroadcast = _new_key(16, 21, "ru", RU, "def456", "yyyy-yyyy-yyyy-yyyy-yyyy")
+    failed.last_error = "transportFailed: HTTP 503"
+    kept: PlannedBroadcast = _found_key(17, 19, "uk", UA, "ghi789", "zzzz-zzzz-zzzz-zzzz-zzzz")
+    text: str = render_keys_file([key_row_from_planned(item) for item in (sent, kept, failed)], "13-09-2026 12:00")
+    lines: list[str] = text.splitlines()
+    quoted: list[str] = [line.split("«")[1].split("»")[0] for line in lines[: len(msg.KEYS_FILE_HEADER)][3:]]
+    form_values: list[str] = [line.removeprefix("  форма  ") for line in lines if line.startswith("  форма  ")]
+    assert len(quoted) == len(form_values) == 3
+    # блоки идут по дате, шапка — по состояниям: каждой цитате ровно одна строка и наоборот
+    assert sorted(lead for lead in quoted for value in form_values if value.startswith(lead)) == sorted(quoted)
+    assert all(any(value.startswith(lead) for lead in quoted) for value in form_values)

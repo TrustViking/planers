@@ -114,6 +114,11 @@ _SKIP_TEMPLATES: Final[dict[SkipKind, str]] = {
     SkipKind.TOO_LATE: msg.SKIP_TOO_LATE,
     SkipKind.NO_CHANNEL: msg.SKIP_NO_CHANNEL,
 }
+_REPORT_TOTALS: Final[dict[RunMode, str]] = {
+    RunMode.FULL: msg.REPORT_TOTAL,
+    RunMode.DRY_RUN: msg.REPORT_TOTAL_DRY_RUN,
+    RunMode.STATUS: msg.REPORT_STATUS_TOTAL,
+}
 _FORM_MARKS: Final[dict[FormState, str]] = {
     FormState.SENT: msg.FORM_MARK_SENT,
     FormState.FAILED: msg.FORM_MARK_FAILED,
@@ -587,19 +592,15 @@ def not_delivered_texts(report: RunReport) -> list[str]:
 
 
 def _total_lines(report: RunReport, totals: RunTotals) -> list[str]:
-    if report.mode is RunMode.STATUS:
-        total: str = msg.REPORT_STATUS_TOTAL.format(
-            scheduled=totals.matched, errors=totals.errors, keys_file=_keys_file_part(report)
-        )
-    else:
-        total = msg.REPORT_TOTAL.format(
-            created=totals.created,
-            fixed=totals.fixed,
-            matched=totals.matched,
-            skipped=totals.skipped,
-            errors=totals.errors,
-            keys_file=_keys_file_part(report),
-        )
+    """Слова — как в строке «Итог» консоли (для каждого режима свой шаблон), плюс файл ключей."""
+    total: str = _REPORT_TOTALS[report.mode].format(
+        created=totals.created,
+        fixed=totals.fixed,
+        matched=totals.matched,
+        skipped=totals.skipped,
+        errors=totals.errors,
+        keys_file=_keys_file_part(report),
+    )
     return [total, ""]
 
 

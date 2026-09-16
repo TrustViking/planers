@@ -83,7 +83,7 @@ def build_config(
     set_thumbnail: bool = True,
     category_id: str = "22",
 ) -> PlanerConfig:
-    """Каналы — пары (account_name, языки); настройки — как в config\\planer.json."""
+    """Каналы — пары (account_name, языки); настройки — как в secrets\\planer.json."""
     return PlanerConfig(
         settings=PlanerSettings(
             min_lead_minutes=min_lead_minutes,
@@ -255,8 +255,8 @@ def make_slot_object() -> Callable[..., Slot]:
 
 @pytest.fixture
 def repo_planer_config() -> Path:
-    """config\\planer.json репо — единственный источник и для dev, и для сборки."""
-    return REPO_ROOT / "config" / "planer.json"
+    """secrets\\planer.json репо — единственный источник и для dev, и для сборки."""
+    return REPO_ROOT / "secrets" / "planer.json"
 
 
 @pytest.fixture

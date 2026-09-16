@@ -337,13 +337,12 @@ def test_console_and_report_use_the_same_totals(
     totals: RunTotals = build_totals(outcome.report)
     console: str = render_console(outcome.report, root=planer_paths.root, report_path=outcome.report_path)
     report_text: str = outcome.report_path.read_text(encoding="utf-8")
-    assert (
-        f"Итог: создано {totals.created}, исправлено {totals.fixed}, совпадает {totals.matched}, "
-        f"пропущено {totals.skipped}, ошибок {totals.errors}."
-    ) in report_text
-    assert console.splitlines()[0] == msg.CONSOLE_TOTAL.format(
+    console_total: str = msg.CONSOLE_TOTAL.format(
         created=totals.created, fixed=totals.fixed, matched=totals.matched, skipped=totals.skipped, errors=totals.errors
     )
+    assert console.splitlines()[0] == console_total
+    # в отчёте — те же слова и числа, плюс файл ключей
+    assert f"{console_total}. Файл ключей: " in report_text
     assert (totals.created, totals.skipped, totals.errors) == (1, 1, 1)
     assert "    17-03-2027  19:00  uk  Эфир 17-03-2027_1900_uk" in console.splitlines()
     assert f"  отчёт   {Path('logs') / outcome.report_path.name}" in console

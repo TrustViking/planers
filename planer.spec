@@ -7,9 +7,9 @@ PyInstaller spec планера (ТЗ §9, этап 5). Лежит в корне
 Точка входа — app/main.py. Консольное приложение: сводку печатает в консоль, запускается из planer.bat.
 Номер версии — только из app/version.py. Иконка exe — planers.ico из корня репо (как icon= в broadcaster.spec).
 
-В datas нет ни конфигов, ни app/examples: config\\planer.json кладёт рядом с exe build_release.bat.
-Frozen-корень планера — папка exe (app/paths.py::resolve_root): config\\, secrets\\, bcast\\, keystreams\\,
-logs\\ и app\\state\\ создаются рядом с planer.exe, а не в _internal\\.
+В datas нет ни конфигов, ни app/examples: secrets\\planer.json кладёт рядом с exe build_release.bat.
+Frozen-корень планера — папка exe (app/paths.py::resolve_root): secrets\\, bcast\\, keystreams\\
+и logs\\ создаются рядом с planer.exe, а не в _internal\\.
 
 googleapiclient: build(..., cache_discovery=False) берёт встроенный документ описания API
 из googleapiclient/discovery_cache/documents/. Из ~600 документов (~100 МБ) в сборку идёт только

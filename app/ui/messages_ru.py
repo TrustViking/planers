@@ -67,7 +67,6 @@ CLIENT_SECRET_MISSING: Final[str] = (
     "Нет файла {path} — без него планер не может обратиться к YouTube. "
     "Возьмите его у оператора и положите рядом с программой, в папку secrets."
 )
-CHANNELS_STATE_UNREADABLE: Final[str] = "Файл привязок каналов {path} не читается: {error}. Ничего не делалось."
 AUTH_UNKNOWN_CHANNEL: Final[str] = "В {path} нет канала «{account_name}». Каналы в файле: {known}."
 AUTH_STARTING: Final[str] = "Канал «{account_name}»: нужен вход в Google — сейчас откроется браузер."
 AUTH_UNVERIFIED_APP_WARNING: Final[str] = (
@@ -81,17 +80,10 @@ AUTH_CHOOSE_RIGHT_CHANNEL: Final[str] = (
     "Если в этом аккаунте несколько каналов, выберите тот, что в channels.json записан как «{account_name}»."
 )
 AUTH_OK: Final[str] = "Канал «{account_name}»: вход выполнен — {title} (id {youtube_channel_id})."
-AUTH_BINDING_SAVED: Final[str] = "Привязка канала «{account_name}» записана в {path}."
-AUTH_BINDING_MISMATCH: Final[str] = (
-    "канал «{account_name}» уже привязан к YouTube-каналу {expected_title} (id {expected_id}), "
-    "а токен ведёт на {actual_title} (id {actual_id}); ничего не переписано. "
-    "Войдите заново и выберите правильный канал: planer.bat --auth \"{account_name}\""
-)
-AUTH_BINDING_TAKEN: Final[str] = (
-    "токен канала «{account_name}» ведёт на YouTube-канал {actual_title} (id {actual_id}), "
-    "а он уже записан под именем «{other_account_name}»; ничего не переписано. "
-    "Один YouTube-канал — одно имя в channels.json: войдите заново и выберите правильный канал "
-    "или исправьте account_name"
+AUTH_CHANNEL_NAME_MISMATCH: Final[str] = (
+    "канал «{account_name}»: вошли в YouTube-канал «{youtube_title}», а в channels.json записан «{account_name}»; "
+    "этот канал не трогаю. Выбран не тот канал — planer.bat --auth \"{account_name}\"; "
+    "канал переименован на YouTube — исправьте account_name в {channels_file}"
 )
 AUTH_FAILED: Final[str] = "Канал «{account_name}»: вход не удался — {reason}."
 AUTH_SCOPE_HINT: Final[str] = (
@@ -275,12 +267,6 @@ REPORT_SECTION_ERRORS: Final[str] = "## Ошибки"
 REPORT_SECTION_NOT_DELIVERED: Final[str] = "## Ключ не дошёл до стримера"
 REPORT_SECTION_NOTES: Final[str] = "## Особенности площадки — так устроена площадка, это не про этот запуск"
 NOT_DELIVERED_LINE: Final[str] = "{prefix} — {reason}; эфир на канале стоит — передайте ключ стримеру из keys.txt вручную"
-REPORT_TOTAL: Final[str] = (
-    "Итог: создано {created}, исправлено {fixed}, совпадает {matched}, пропущено {skipped}, "
-    "ошибок {errors}.{keys_file}"
-)
-REPORT_STATUS_TOTAL: Final[str] = "Итог: запланировано {scheduled}, ошибок {errors}.{keys_file}"
-REPORT_TOTAL_KEYS_FILE: Final[str] = " Файл ключей: {path}"
 
 # --- консоль (ТЗ §5.6): блоки сверху вниз, без markdown и значков
 CONSOLE_TITLE: Final[str] = "Planer {version} — {generated_at}"
@@ -295,6 +281,12 @@ CONSOLE_TOTAL_DRY_RUN: Final[str] = (
     "Итог: опубликуем {created}, исправим {fixed}, уже стояло {matched}, не публиковали {skipped}, ошибок {errors}"
 )
 CONSOLE_TOTAL_STATUS: Final[str] = "Итог: уже стояло {matched}, ошибок {errors}"
+# Итог отчёта — те же слова, что в консоли, плюс файл ключей.
+REPORT_TOTAL_END: Final[str] = ".{keys_file}"
+REPORT_TOTAL: Final[str] = CONSOLE_TOTAL + REPORT_TOTAL_END
+REPORT_TOTAL_DRY_RUN: Final[str] = CONSOLE_TOTAL_DRY_RUN + REPORT_TOTAL_END
+REPORT_STATUS_TOTAL: Final[str] = CONSOLE_TOTAL_STATUS + REPORT_TOTAL_END
+REPORT_TOTAL_KEYS_FILE: Final[str] = " Файл ключей: {path}"
 # Разделитель блока: название посередине строки фиксированной ширины из CONSOLE_RULE_CHAR.
 CONSOLE_RULE_WIDTH: Final[int] = 56
 CONSOLE_RULE_CHAR: Final[str] = "="
@@ -343,17 +335,23 @@ PROGRESS_KEY_SEND: Final[str] = "канал «{account_name}»: отправля
 PROGRESS_REPORT: Final[str] = "пишу отчёт"
 
 # --- файл ключей (ТЗ §5.5): блок на стрим, ключ — первой строкой блока
+# Начала строк «форма» — одни и те же в шапке файла и в самих строках.
+KEY_FORM_SENT_LEAD: Final[str] = "отправлен в форму"
+KEY_FORM_KEPT_LEAD: Final[str] = "в этом запуске в форму не отправлялся"
+KEY_FORM_FAILED_LEAD: Final[str] = "НЕ отправлен"
 KEYS_FILE_HEADER: Final[tuple[str, ...]] = (
     "# Ключи трансляций. Сгенерировано планером {generated_at}.",
     "# Файл перезаписывается на каждом запуске — не править.",
-    "# Строка «форма»: «отправлен в форму» — ключ у стримера; «в этом запуске в форму не отправлялся» — "
-    "эфир с меткой планера совпал, ключ уходил раньше; «НЕ отправлен» — передайте ключ стримеру вручную.",
+    "# Строка «форма»:",
+    "#   «" + KEY_FORM_SENT_LEAD + "» — ключ у стримера;",
+    "#   «" + KEY_FORM_KEPT_LEAD + "» — эфир уже стоял, ключ уходил раньше;",
+    "#   «" + KEY_FORM_FAILED_LEAD + "» — передайте ключ стримеру вручную.",
 )
 KEYS_BLOCK_TITLE: Final[str] = "{date} {time}  {language}  {account_name}"
 KEYS_BLOCK_KEY: Final[str] = "  ключ   {value}"
 KEYS_BLOCK_STREAM: Final[str] = "  поток  {value}"
 KEYS_BLOCK_BROADCAST: Final[str] = "  эфир   {value}"
 KEYS_BLOCK_FORM: Final[str] = "  форма  {value}"
-KEY_FORM_SENT: Final[str] = "отправлен в форму {sent_at}"
-KEY_FORM_KEPT: Final[str] = "в этом запуске в форму не отправлялся: эфир уже стоял с этим ключом"
-KEY_FORM_FAILED: Final[str] = "НЕ отправлен: {reason} — передайте стримеру вручную"
+KEY_FORM_SENT: Final[str] = KEY_FORM_SENT_LEAD + " {sent_at}"
+KEY_FORM_KEPT: Final[str] = KEY_FORM_KEPT_LEAD + ": эфир уже стоял с этим ключом"
+KEY_FORM_FAILED: Final[str] = KEY_FORM_FAILED_LEAD + ": {reason} — передайте стримеру вручную"

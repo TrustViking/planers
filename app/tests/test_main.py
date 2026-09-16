@@ -39,7 +39,7 @@ CredentialsLoader = Callable[..., object]
 def fake_platform_in_main(monkeypatch: pytest.MonkeyPatch) -> FakePlatform:
     """Площадка и отправитель формы в main подменяются фейками: сеть в тестах запрещена.
 
-    Обёртка с проверкой привязки (VerifiedPlatform) и печать входа остаются боевыми.
+    Обёртка с проверкой названия канала (VerifiedPlatform) и печать входа остаются боевыми.
     """
     platform: FakePlatform = FakePlatform()
 
@@ -56,16 +56,15 @@ def fake_platform_in_main(monkeypatch: pytest.MonkeyPatch) -> FakePlatform:
 def planer_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_planer_config: Path) -> Path:
     """Корень как после установки: planer.json поставлен, channels.json владелец ещё не создал."""
     root: Path = tmp_path / "root"
-    (root / "config").mkdir(parents=True)
-    shutil.copyfile(repo_planer_config, root / "config" / "planer.json")
     (root / "secrets").mkdir(parents=True)
+    shutil.copyfile(repo_planer_config, root / "secrets" / "planer.json")
     (root / "secrets" / "client_secret.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv(ROOT_ENV_VAR, str(root))
     return root
 
 
 def _write_config(root: Path) -> None:
-    (root / "config" / "channels.json").write_text(json.dumps(CHANNELS_JSON, ensure_ascii=False), encoding="utf-8")
+    (root / "secrets" / "channels.json").write_text(json.dumps(CHANNELS_JSON, ensure_ascii=False), encoding="utf-8")
 
 
 def _write_tokens(root: Path, *account_names: str) -> None:
@@ -74,34 +73,9 @@ def _write_tokens(root: Path, *account_names: str) -> None:
         (root / "secrets" / f"{name}.token.json").write_text("{}", encoding="utf-8")
 
 
-def _bindings_file(root: Path) -> Path:
-    return root / "app" / "state" / "bindings.json"
-
-
-def _write_bindings(root: Path, bindings: dict[str, str] | None = None) -> None:
-    """По умолчанию — привязки, совпадающие с ответом FakePlatform."""
-    known: dict[str, str] = bindings or {
-        name: FakePlatform.default_channel_info(name).youtube_channel_id for name in CHANNEL_NAMES
-    }
-    payload: dict[str, Any] = {
-        "schema_version": 1,
-        "channels": {
-            name: {"youtube_channel_id": youtube_id, "title": f"Fake {name}", "authorized_at": "16-03-2027 12:00"}
-            for name, youtube_id in known.items()
-        },
-    }
-    _bindings_file(root).parent.mkdir(parents=True, exist_ok=True)
-    _bindings_file(root).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-
-def _read_bindings(root: Path) -> dict[str, Any]:
-    return json.loads(_bindings_file(root).read_text(encoding="utf-8"))["channels"]
-
-
 def _ready(root: Path) -> None:
     _write_config(root)
     _write_tokens(root)
-    _write_bindings(root)
 
 
 def _fake_login(calls: list[Path] | None = None) -> CredentialsLoader:
@@ -143,7 +117,7 @@ def test_run_without_flags_is_the_full_cycle(
     assert "## " not in out                                            # markdown — только в отчёте
     assert re.search(r"^  лог +logs\\\d{2}-\d{2}-\d{4}_\d{6}_planer\.log$", out, re.MULTILINE)
     assert len(fake_platform_in_main.created) == 1
-    assert not (planer_root / "state").exists()                       # технические данные — только в app\state
+    assert sorted(path.name for path in planer_root.iterdir()) == ["bcast", "keystreams", "logs", "secrets"]
     keys_text: str = (planer_root / "keystreams" / "keys.txt").read_text(encoding="utf-8")
     assert "fake-0001" in keys_text and "форма  отправлен в форму " in keys_text
 
@@ -245,26 +219,26 @@ def test_missing_channels_json_prints_template_and_creates_nothing(
 ) -> None:
     assert run_cli(["--dry-run"]) == 2
     out: str = capsys.readouterr().out
-    channels_file: Path = planer_root / "config" / "channels.json"
+    channels_file: Path = planer_root / "secrets" / "channels.json"
     assert msg.CONFIG_CHANNELS_HINT.format(path=channels_file) in out
     assert msg.CONFIG_CHANNELS_TEMPLATE in out
-    assert sorted(path.name for path in (planer_root / "config").iterdir()) == ["planer.json"]
+    assert sorted(path.name for path in (planer_root / "secrets").iterdir()) == ["client_secret.json", "planer.json"]
 
 
 def test_missing_planer_json_prints_its_template(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write_config(planer_root)
-    (planer_root / "config" / "planer.json").unlink()
+    (planer_root / "secrets" / "planer.json").unlink()
     assert run_cli(["--dry-run"]) == 2
     out: str = capsys.readouterr().out
-    assert msg.CONFIG_PLANER_HINT.format(path=planer_root / "config" / "planer.json") in out
+    assert msg.CONFIG_PLANER_HINT.format(path=planer_root / "secrets" / "planer.json") in out
     assert msg.CONFIG_PLANER_TEMPLATE in out
-    assert sorted(path.name for path in (planer_root / "config").iterdir()) == ["channels.json"]
+    assert sorted(path.name for path in (planer_root / "secrets").iterdir()) == ["channels.json", "client_secret.json"]
 
 
 def test_missing_field_prints_template(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config: dict[str, Any] = json.loads(json.dumps(CHANNELS_JSON))
     config["channels"][1].pop("privacy")
-    (planer_root / "config" / "channels.json").write_text(json.dumps(config), encoding="utf-8")
+    (planer_root / "secrets" / "channels.json").write_text(json.dumps(config), encoding="utf-8")
     assert run_cli(["--dry-run"]) == 2
     out: str = capsys.readouterr().out
     assert "channels[1].privacy — обязательное поле отсутствует" in out
@@ -272,7 +246,7 @@ def test_missing_field_prints_template(planer_root: Path, capsys: pytest.Capture
 
 
 def test_bad_config_exits_2_without_template(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    (planer_root / "config" / "channels.json").write_text('{"channels": []}', encoding="utf-8")
+    (planer_root / "secrets" / "channels.json").write_text('{"channels": []}', encoding="utf-8")
     assert run_cli(["--dry-run"]) == 2
     out: str = capsys.readouterr().out
     assert "Ошибка в конфиге" in out
@@ -308,15 +282,15 @@ def test_missing_token_logs_in_at_first_access_and_run_continues(
     ]
     positions: list[int] = [out.index(line) for line in login_lines]
     assert positions == sorted(positions)
-    assert msg.AUTH_OK.format(account_name=UA, title=f"Fake {UA}", youtube_channel_id=f"UCfake{UA}") in out
+    assert msg.AUTH_OK.format(account_name=UA, title=UA, youtube_channel_id=f"UCfake{UA}") in out
     # шапка — до входа, итог — после
     assert out.index(f"Planer {APP_VERSION} — ") < out.index(msg.AUTH_STARTING.format(account_name=UA))
     assert out.index("Google hasn't verified this app") < out.index("Итог: ")
     assert fake_platform_in_main.logins == [UA]
-    assert list(_read_bindings(planer_root)) == [UA]
+    assert fake_platform_in_main.describe_calls == [UA]
 
 
-def test_binding_mismatch_fails_only_that_channel(
+def test_channel_title_mismatch_fails_only_that_channel(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     make_package: PackageFactory,
@@ -325,18 +299,20 @@ def test_binding_mismatch_fails_only_that_channel(
 ) -> None:
     _write_config(planer_root)
     _write_tokens(planer_root)
-    _write_bindings(planer_root, {UA: "UCsomeoneElse", RU: f"UCfake{RU}"})
+    fake_platform_in_main.channel_info[UA] = ChannelInfo(
+        youtube_channel_id="UCsomeoneElse", title="Чужой канал", default_language=None
+    )
     make_package(
         planer_root / "bcast",
         slots=[make_slot("01-01-2099", "19:00", "uk"), make_slot("01-01-2099", "19:00", "ru")],
     )
     assert run_cli([]) == 1
     out: str = capsys.readouterr().out
-    assert "UCsomeoneElse" in out
+    assert "«Чужой канал»" in out
     assert f"  {RU} ({RU_GOOGLE})" in out.splitlines()
-    assert "  ошибка: 01-01-2099 19:00 uk -> Канал UA — YouTube: channelBindingMismatch (" in out
+    assert "  ошибка: 01-01-2099 19:00 uk -> Канал UA — YouTube: channelNameMismatch (" in out
     assert [call.channel_id for call in fake_platform_in_main.created] == [RU]
-    assert _read_bindings(planer_root)[UA]["youtube_channel_id"] == "UCsomeoneElse"
+    assert not (planer_root / "app").exists()                          # файлов привязок больше нет
 
 
 def test_dry_run_on_valid_package(
@@ -393,7 +369,7 @@ def test_status_writes_keys_file(
     assert run_cli(["--status"]) == 0
     keys_file: Path = planer_root / "keystreams" / "keys.txt"
     lines: list[str] = keys_file.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 3 and all(line.startswith("# ") for line in lines)
+    assert len(lines) == len(msg.KEYS_FILE_HEADER) and all(line.startswith("# ") for line in lines)
     out: str = capsys.readouterr().out
     assert out.splitlines()[0].endswith(" — --status: эфиры планера на каналах")
     assert "Итог: уже стояло 0, ошибок 0" in out.splitlines()
@@ -431,12 +407,12 @@ def test_check_reports_every_channel(
     _ready(planer_root)
     fake_platform_in_main.channel_info[UA] = ChannelInfo(
         youtube_channel_id=f"UCfake{UA}",
-        title="Тестовый канал",
+        title=UA,
         default_language="uk",
     )
     assert run_cli(["--check"]) == 0
     out: str = capsys.readouterr().out
-    assert f"- {UA}: Тестовый канал (id UCfake{UA}), язык канала на YouTube: uk" in out
+    assert f"- {UA}: {UA} (id UCfake{UA}), язык канала на YouTube: uk" in out
     assert msg.CHECK_CHANNEL_LANGUAGE_UNSET in out       # у второго канала язык не задан
     assert "языки стримов из channels.json: ru, en" in out
     assert "запланированных эфиров: 0" in out
@@ -456,38 +432,43 @@ def test_check_reports_disabled_streaming_and_exits_1(
     assert msg.CHECK_HAS_PROBLEMS in out
 
 
-def test_check_logs_in_channel_without_token_and_binds_it(
+def test_check_logs_in_channel_without_token(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
     _write_tokens(planer_root, UA)
-    _write_bindings(planer_root, {UA: f"UCfake{UA}"})
     fake_platform_in_main.tokens_missing = {RU}
     assert run_cli(["--check"]) == 0
     out: str = capsys.readouterr().out
     assert msg.AUTH_STARTING.format(account_name=RU) in out
     assert msg.AUTH_STARTING.format(account_name=UA) not in out
     assert msg.CHECK_ALL_OK in out
-    assert sorted(_read_bindings(planer_root)) == sorted(CHANNEL_NAMES)
 
 
-def test_check_refuses_youtube_channel_bound_under_another_name(
+def test_check_refuses_channel_renamed_on_youtube(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
     _write_tokens(planer_root)
-    _write_bindings(planer_root, {"Старое имя": f"UCfake{UA}", RU: f"UCfake{RU}"})
+    fake_platform_in_main.channel_info[UA] = ChannelInfo(
+        youtube_channel_id=f"UCfake{UA}", title="Новое имя", default_language=None
+    )
     assert run_cli(["--check"]) == 1
     out: str = capsys.readouterr().out
-    assert "«Старое имя»" in out
-    assert UA not in _read_bindings(planer_root)
+    refusal: str = msg.AUTH_CHANNEL_NAME_MISMATCH.format(
+        account_name=UA, youtube_title="Новое имя", channels_file=planer_root / "secrets" / "channels.json"
+    )
+    assert msg.CHECK_CHANNEL_REFUSED.format(message=refusal) in out.splitlines()
+    assert f"- {RU}: {RU} (id UCfake{RU})" in out
+    assert fake_platform_in_main.list_calls == [RU]
+    assert msg.CHECK_HAS_PROBLEMS in out
 
 
-def test_auth_all_writes_bindings_under_account_names(
+def test_auth_all_logs_in_every_channel(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     monkeypatch: pytest.MonkeyPatch,
@@ -499,26 +480,26 @@ def test_auth_all_writes_bindings_under_account_names(
     assert run_cli(["--auth", "all"]) == 0
     out: str = capsys.readouterr().out
     assert "Google hasn't verified this app" in out
-    assert msg.AUTH_OK.format(account_name=RU, title=f"Fake {RU}", youtube_channel_id=f"UCfake{RU}") in out
+    assert msg.AUTH_OK.format(account_name=RU, title=RU, youtube_channel_id=f"UCfake{RU}") in out
     assert [path.name for path in calls] == [f"{UA}.token.json", f"{RU}.token.json"]
-    bindings: dict[str, Any] = _read_bindings(planer_root)
-    assert sorted(bindings) == sorted(CHANNEL_NAMES)
-    assert bindings[UA]["youtube_channel_id"] == f"UCfake{UA}"
+    assert [path.parent for path in calls] == [planer_root / "secrets"] * 2
 
 
-def test_auth_refuses_to_rebind_another_channel(
+def test_auth_refuses_channel_with_other_title(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
-    _write_bindings(planer_root, {UA: "UCtheRightOne"})
+    fake_platform_in_main.channel_info[UA] = ChannelInfo(
+        youtube_channel_id="UCwrong", title="Другой канал аккаунта", default_language=None
+    )
     monkeypatch.setattr(main_module, "load_credentials", _fake_login())
     assert run_cli(["--auth", UA]) == 1
     out: str = capsys.readouterr().out
-    assert "UCtheRightOne" in out and f"UCfake{UA}" in out
-    assert _read_bindings(planer_root)[UA]["youtube_channel_id"] == "UCtheRightOne"
+    assert "«Другой канал аккаунта»" in out and f'planer.bat --auth "{UA}"' in out
+    assert msg.AUTH_OK.format(account_name=UA, title="Другой канал аккаунта", youtube_channel_id="UCwrong") not in out
 
 
 def test_auth_unknown_channel_lists_account_names(

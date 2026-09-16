@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(description=PROGRAM_DESCRIPTION)
-    parser.add_argument("--channel", required=True, help="имя канала как в config\\channels.json")
+    parser.add_argument("--channel", required=True, help="имя канала как в secrets\\channels.json")
     parser.add_argument("--remove", default="", help="идентификатор эфира без времени старта, который надо удалить")
     return parser.parse_args(argv)
 

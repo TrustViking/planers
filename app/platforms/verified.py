@@ -1,15 +1,14 @@
-"""Площадка с проверкой привязки канала при первом обращении (ТЗ §5.3).
+"""Площадка с проверкой канала при первом обращении (ТЗ §5.3).
 
 Обёртка над любой BroadcastPlatform. Первое обращение к каналу за запуск — describe_channel:
-у YouTube это же и вход (токена нет — браузер), затем сверка с app\\state\\bindings.json.
-Новый канал — привязка записывается. Токен ведёт не на тот канал или этот YouTube-канал
-уже записан под другим именем — ChannelBindingError: это PlatformError, и сверка изолирует
-его как любой сбой канала (все объекты канала — ошибка, остальные каналы работают).
+у YouTube это же и вход (токена нет — браузер), затем сверка названия канала на YouTube
+с account_name из channels.json (то же имя уходит в форму как «Название канала»).
+Не совпало — ChannelBindingError: это PlatformError, и сверка изолирует его как любой сбой
+канала (все объекты канала — ошибка, остальные каналы работают). Файлов планер тут не пишет.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import datetime
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -27,7 +26,6 @@ from app.platforms.base import (
     UpcomingBroadcast,
     VideoFixes,
 )
-from app.state.channels import BindingVerdict, ChannelBinding, ChannelBindings
 from app.ui import messages_ru as msg
 
 if TYPE_CHECKING:   # спека живёт в pipeline; здесь она нужна только для аннотаций
@@ -35,9 +33,8 @@ if TYPE_CHECKING:   # спека живёт в pipeline; здесь она ну�
 
 LOGGER = get_logger("binding")
 
-ERROR_BINDING_MISMATCH: Final[str] = "channelBindingMismatch"
-ERROR_CHANNEL_TAKEN: Final[str] = "channelTaken"
-ERROR_BINDINGS_WRITE: Final[str] = "bindingsWriteFailed"
+ERROR_CHANNEL_NAME_MISMATCH: Final[str] = "channelNameMismatch"
+CHANNEL_TITLE_FORM: Final[str] = "NFC"   # так же приводится account_name в config/loader.py
 
 
 class ChannelBindingError(PlatformError):
@@ -45,13 +42,13 @@ class ChannelBindingError(PlatformError):
 
 
 class ChannelListener(Protocol):
-    def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo, *, is_new_binding: bool) -> None:
-        """Канал проверен и привязан; is_new_binding — привязка только что записана."""
+    def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo) -> None:
+        """Канал проверен: название на YouTube совпало с account_name."""
         ...
 
 
-def _local_now() -> datetime:
-    return datetime.now().astimezone().replace(tzinfo=None)
+def normalize_channel_title(title: str) -> str:
+    return unicodedata.normalize(CHANNEL_TITLE_FORM, title).strip()
 
 
 class VerifiedPlatform:
@@ -60,16 +57,12 @@ class VerifiedPlatform:
     def __init__(
         self,
         platform: BroadcastPlatform,
-        bindings: ChannelBindings,
-        bindings_file: Path,
+        channels_file: Path,
         listener: ChannelListener | None = None,
-        clock: Callable[[], datetime] = _local_now,
     ) -> None:
         self._platform: BroadcastPlatform = platform
-        self._bindings: ChannelBindings = bindings
-        self._bindings_file: Path = bindings_file
+        self._channels_file: Path = channels_file   # только для подсказки владельцу
         self._listener: ChannelListener | None = listener
-        self._clock: Callable[[], datetime] = clock
         self._verified: dict[str, ChannelInfo] = {}
         self._refused: dict[str, ChannelBindingError] = {}
 
@@ -78,23 +71,20 @@ class VerifiedPlatform:
         return self._platform.limits
 
     def verify(self, channel: ChannelConfig) -> ChannelInfo:
-        """Вход и привязка; сбой площадки не запоминается, отказ привязки — до конца запуска."""
+        """Вход и сверка названия; сбой площадки не запоминается, отказ — до конца запуска."""
         name: str = channel.account_name
         if name in self._verified:
             return self._verified[name]
         if name in self._refused:
             raise self._refused[name]
         info: ChannelInfo = self._platform.describe_channel(channel)
-        verdict: BindingVerdict = self._bindings.verdict(name, info.youtube_channel_id)
-        if verdict in (BindingVerdict.MISMATCH, BindingVerdict.TAKEN):
-            error: ChannelBindingError = self._refusal(channel, info, verdict)
+        if normalize_channel_title(info.title) != name:
+            error: ChannelBindingError = self._refusal(channel, info)
             self._refused[name] = error
             raise error
-        if verdict is BindingVerdict.NEW:
-            self._remember(channel, info)
         self._verified[name] = info
         if self._listener is not None:
-            self._listener.on_channel_ready(channel, info, is_new_binding=verdict is BindingVerdict.NEW)
+            self._listener.on_channel_ready(channel, info)
         return info
 
     def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
@@ -140,68 +130,25 @@ class VerifiedPlatform:
         self._platform.set_thumbnail(channel, broadcast_id, preview)
 
     def take_notices(self) -> tuple[PlatformNotice, ...]:
-        """Замечания копит обёрнутая площадка; привязка канала тут не нужна."""
+        """Замечания копит обёрнутая площадка; проверка канала тут не нужна."""
         return self._platform.take_notices()
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         self.verify(channel)
         return self._platform.read_facts(channel, broadcast_id)
 
-    def _refusal(self, channel: ChannelConfig, info: ChannelInfo, verdict: BindingVerdict) -> ChannelBindingError:
-        name: str = channel.account_name
+    def _refusal(self, channel: ChannelConfig, info: ChannelInfo) -> ChannelBindingError:
         LOGGER.error(
-            'binding_refused channel="%s" verdict=%s youtube_channel_id=%s',
-            name,
-            verdict.value,
-            info.youtube_channel_id,
-        )
-        if verdict is BindingVerdict.MISMATCH:
-            known: ChannelBinding | None = self._bindings.get(name)
-            return ChannelBindingError(
-                ERROR_BINDING_MISMATCH,
-                msg.AUTH_BINDING_MISMATCH.format(
-                    account_name=name,
-                    expected_title=known.title if known else "",
-                    expected_id=known.youtube_channel_id if known else "",
-                    actual_title=info.title,
-                    actual_id=info.youtube_channel_id,
-                ),
-            )
-        other: ChannelBinding | None = self._bindings.find_by_youtube_channel_id(info.youtube_channel_id)
-        return ChannelBindingError(
-            ERROR_CHANNEL_TAKEN,
-            msg.AUTH_BINDING_TAKEN.format(
-                account_name=name,
-                actual_title=info.title,
-                actual_id=info.youtube_channel_id,
-                other_account_name=other.account_name if other else "",
-            ),
-        )
-
-    def _remember(self, channel: ChannelConfig, info: ChannelInfo) -> None:
-        """Сначала файл, потом память: незаписанная привязка не должна считаться записанной."""
-        binding: ChannelBinding = ChannelBinding(
-            account_name=channel.account_name,
-            youtube_channel_id=info.youtube_channel_id,
-            title=info.title,
-            authorized_at=self._clock(),
-        )
-        candidate: ChannelBindings = ChannelBindings(self._bindings.bindings)
-        candidate.upsert(binding)
-        try:
-            candidate.save(self._bindings_file)
-        except OSError as error:
-            LOGGER.error(
-                'bindings_write_failed channel="%s" path=%s reason=%s',
-                channel.account_name,
-                self._bindings_file,
-                error,
-            )
-            raise PlatformError(ERROR_BINDINGS_WRITE, f"{self._bindings_file}: {error}") from error
-        self._bindings.upsert(binding)
-        LOGGER.info(
-            'binding_saved channel="%s" youtube_channel_id=%s path=%s',
+            'channel_name_mismatch channel="%s" youtube_title="%s" youtube_channel_id=%s',
             channel.account_name,
+            info.title,
             info.youtube_channel_id,
-            self._bindings_file,
+        )
+        return ChannelBindingError(
+            ERROR_CHANNEL_NAME_MISMATCH,
+            msg.AUTH_CHANNEL_NAME_MISMATCH.format(
+                account_name=channel.account_name,
+                youtube_title=info.title,
+                channels_file=self._channels_file,
+            ),
         )

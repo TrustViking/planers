@@ -188,7 +188,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     )
     packages: list[ReportPackageLine] = build_package_lines(scan, context.config)
     _progress_packages(context, packages)
-    # к площадке обращаемся только по каналам, у которых есть объекты: вход и привязка — при первом обращении
+    # к площадке обращаемся только по каналам, у которых есть объекты: вход и проверка канала — при первом обращении
     orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
         selection.planned,
         frozenset(scan.slot_map),

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import random
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -15,57 +15,54 @@ from app.paths import PlanerPaths
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, run
 from app.platforms.base import ChannelInfo, PlatformError
 from app.platforms.fake import FakePlatform
-from app.platforms.verified import (
-    ERROR_BINDING_MISMATCH,
-    ERROR_CHANNEL_TAKEN,
-    ChannelBindingError,
-    VerifiedPlatform,
-)
-from app.state.channels import ChannelBinding, ChannelBindings
+from app.platforms.verified import ERROR_CHANNEL_NAME_MISMATCH, ChannelBindingError, VerifiedPlatform
 from app.tests.conftest import FakeFormSender
+from app.ui import messages_ru as msg
 
-AUTHORIZED_AT: datetime = datetime(2027, 3, 16, 12, 0)
 ConfigFactory = Callable[..., PlanerConfig]
 
 
 class _Listener:
     def __init__(self) -> None:
-        self.ready: list[tuple[str, bool]] = []
+        self.ready: list[str] = []
 
-    def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo, *, is_new_binding: bool) -> None:
-        self.ready.append((channel.account_name, is_new_binding))
-
-
-def _bindings(**youtube_ids: str) -> ChannelBindings:
-    bindings: ChannelBindings = ChannelBindings()
-    for account_name, youtube_channel_id in youtube_ids.items():
-        bindings.upsert(ChannelBinding(account_name, youtube_channel_id, f"Fake {account_name}", AUTHORIZED_AT))
-    return bindings
+    def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo) -> None:
+        self.ready.append(channel.account_name)
 
 
-def _verified(
-    platform: FakePlatform,
-    paths: PlanerPaths,
-    bindings: ChannelBindings,
-    listener: _Listener | None = None,
-) -> VerifiedPlatform:
-    return VerifiedPlatform(platform, bindings, paths.bindings_file, listener=listener, clock=lambda: AUTHORIZED_AT)
+def _verified(platform: FakePlatform, paths: PlanerPaths, listener: _Listener | None = None) -> VerifiedPlatform:
+    return VerifiedPlatform(platform, paths.channels_file, listener=listener)
 
 
-def test_new_channel_is_described_once_and_bound(
+def _titled(platform: FakePlatform, account_name: str, title: str) -> None:
+    platform.channel_info[account_name] = ChannelInfo(
+        youtube_channel_id=f"UCfake{account_name}", title=title, default_language=None
+    )
+
+
+def test_matching_channel_is_described_once(
     planer_paths: PlanerPaths,
     make_config: ConfigFactory,
     fake_platform: FakePlatform,
 ) -> None:
     listener: _Listener = _Listener()
-    platform: VerifiedPlatform = _verified(fake_platform, planer_paths, ChannelBindings(), listener)
+    platform: VerifiedPlatform = _verified(fake_platform, planer_paths, listener)
     channel: ChannelConfig = make_config().channels[0]
     platform.list_upcoming(channel)
     platform.list_upcoming(channel)
     assert fake_platform.describe_calls == ["yt_ua"]
-    assert listener.ready == [("yt_ua", True)]
-    payload: dict[str, Any] = json.loads(planer_paths.bindings_file.read_text(encoding="utf-8"))
-    assert payload["channels"]["yt_ua"]["youtube_channel_id"] == "UCfakeyt_ua"
+    assert fake_platform.list_calls == ["yt_ua", "yt_ua"]
+    assert listener.ready == ["yt_ua"]
+
+
+def test_verification_writes_no_files(
+    planer_paths: PlanerPaths,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+) -> None:
+    before: list[Path] = sorted(planer_paths.root.rglob("*"))
+    _verified(fake_platform, planer_paths).list_upcoming(make_config().channels[0])
+    assert sorted(planer_paths.root.rglob("*")) == before
 
 
 def test_login_happens_at_first_access(
@@ -76,40 +73,52 @@ def test_login_happens_at_first_access(
     fake_platform.tokens_missing = {"yt_ua"}
     logins: list[str] = []
     fake_platform.on_login = lambda channel: logins.append(channel.account_name)
-    platform: VerifiedPlatform = _verified(fake_platform, planer_paths, ChannelBindings())
+    platform: VerifiedPlatform = _verified(fake_platform, planer_paths)
     assert logins == []
     platform.list_upcoming(make_config().channels[0])
     assert logins == ["yt_ua"]
 
 
 @pytest.mark.parametrize(
-    ("known", "code"),
-    [
-        ({"yt_ua": "UCsomeoneElse"}, ERROR_BINDING_MISMATCH),
-        ({"Другое имя": "UCfakeyt_ua"}, ERROR_CHANNEL_TAKEN),
-    ],
-    ids=["token_leads_elsewhere", "youtube_channel_under_other_name"],
+    "title",
+    ["Другой канал", "YT_UA", "yt_ua2"],
+    ids=["other_channel", "case_differs", "longer_name"],
 )
-def test_wrong_channel_is_refused_and_nothing_is_rewritten(
+def test_title_mismatch_is_refused_until_end_of_run(
     planer_paths: PlanerPaths,
     make_config: ConfigFactory,
     fake_platform: FakePlatform,
-    known: dict[str, str],
-    code: str,
+    title: str,
 ) -> None:
-    bindings: ChannelBindings = _bindings(**known)
-    bindings.save(planer_paths.bindings_file)
-    before: str = planer_paths.bindings_file.read_text(encoding="utf-8")
-    platform: VerifiedPlatform = _verified(fake_platform, planer_paths, bindings)
+    _titled(fake_platform, "yt_ua", title)
+    listener: _Listener = _Listener()
+    platform: VerifiedPlatform = _verified(fake_platform, planer_paths, listener)
     channel: ChannelConfig = make_config().channels[0]
     with pytest.raises(ChannelBindingError) as raised:
         platform.list_upcoming(channel)
-    assert raised.value.code == code
-    assert "yt_ua" in raised.value.message
+    assert raised.value.code == ERROR_CHANNEL_NAME_MISMATCH
+    assert raised.value.message == msg.AUTH_CHANNEL_NAME_MISMATCH.format(
+        account_name="yt_ua", youtube_title=title, channels_file=planer_paths.channels_file
+    )
     with pytest.raises(ChannelBindingError):
         platform.create_broadcast(channel, None)  # type: ignore[arg-type]   # до площадки не доходит
-    assert fake_platform.list_calls == [] and fake_platform.describe_calls == ["yt_ua"]
-    assert planer_paths.bindings_file.read_text(encoding="utf-8") == before
+    assert fake_platform.describe_calls == ["yt_ua"]      # второй вызов на площадку не пошёл
+    assert fake_platform.list_calls == [] and fake_platform.created == []
+    assert listener.ready == []
+
+
+def test_title_is_compared_in_nfc_without_edge_spaces(
+    planer_paths: PlanerPaths,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+) -> None:
+    """«й» из «и» и знака на YouTube — то же имя, что «й» одним символом в channels.json."""
+    name: str = unicodedata.normalize("NFC", "Канал Лейла")
+    decomposed: str = unicodedata.normalize("NFD", name)
+    assert decomposed != name
+    _titled(fake_platform, name, f"  {decomposed} ")
+    channel: ChannelConfig = make_config(channels=((name, ["uk"]),)).channels[0]
+    assert _verified(fake_platform, planer_paths).describe_channel(channel).title == f"  {decomposed} "
 
 
 def test_platform_failure_is_not_remembered(
@@ -119,7 +128,7 @@ def test_platform_failure_is_not_remembered(
 ) -> None:
     """Временный сбой площадки — не отказ: следующее обращение спрашивает канал снова."""
     fake_platform.fail_describe["yt_ua"] = PlatformError("backendError", "503")
-    platform: VerifiedPlatform = _verified(fake_platform, planer_paths, ChannelBindings())
+    platform: VerifiedPlatform = _verified(fake_platform, planer_paths)
     channel: ChannelConfig = make_config().channels[0]
     with pytest.raises(PlatformError):
         platform.describe_channel(channel)
@@ -136,19 +145,19 @@ def test_refused_channel_fails_only_its_own_objects(
     now: datetime,
     rng: random.Random,
 ) -> None:
-    """Инвариант 9: канал за чужим токеном — ошибка его объектов в отчёте, второй канал работает."""
+    """Инвариант 9: канал с чужим названием — ошибка его объектов в отчёте, второй канал работает."""
     make_package(
         planer_paths.bcast_dir,
         slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("17-03-2027", "19:00", "ru")],
     )
-    bindings: ChannelBindings = _bindings(yt_ua="UCsomeoneElse")
-    platform: VerifiedPlatform = _verified(fake_platform, planer_paths, bindings)
+    _titled(fake_platform, "yt_ua", "Чужой канал")
+    platform: VerifiedPlatform = _verified(fake_platform, planer_paths)
     outcome: RunOutcome = run(RunMode.FULL, make_config(), planer_paths, platform, FakeFormSender(), now, rng)
     assert outcome.exit_code == ExitCode.ERRORS
     assert outcome.report is not None
     errors = [item for item in outcome.report.outcomes if item.kind is OutcomeKind.ERROR]
     assert [item.account_name for item in errors] == ["yt_ua"]
-    assert errors[0].error is not None and errors[0].error.code == ERROR_BINDING_MISMATCH
+    assert errors[0].error is not None and errors[0].error.code == ERROR_CHANNEL_NAME_MISMATCH
     assert [call.channel_id for call in fake_platform.created] == ["yt_ru"]
 
 
@@ -161,9 +170,9 @@ def test_channels_without_objects_are_not_touched(
     now: datetime,
     rng: random.Random,
 ) -> None:
-    """Слоты только на uk — канал ru не спрашивается и не привязывается."""
+    """Слоты только на uk — канал ru не спрашивается."""
     make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
-    platform: VerifiedPlatform = _verified(fake_platform, planer_paths, ChannelBindings())
+    platform: VerifiedPlatform = _verified(fake_platform, planer_paths)
     run(RunMode.DRY_RUN, make_config(), planer_paths, platform, FakeFormSender(), now, rng)
     assert fake_platform.describe_calls == ["yt_ua"]
     assert fake_platform.list_calls == ["yt_ua"]

@@ -45,7 +45,7 @@ STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 # Пример из ТЗ §5.6: итог и ошибки сверху, справка ниже, пустых разделов нет.
 TZ_SAMPLE_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 13-09-2026 12:00
 
-Итог: создано 2, исправлено 1, совпадает 1, пропущено 3, ошибок 1. Файл ключей: keystreams\\keys.txt
+Итог: опубликовано 2, исправлено 1, уже стояло 1, не публиковали 3, ошибок 1. Файл ключей: keystreams\\keys.txt
 
 ## Ключ не дошёл до стримера
 - 18-09-2026 19:00 uk -> Канал UA — форма не подтвердила запись ответа (notConfirmed); эфир на канале стоит — передайте ключ стримеру из keys.txt вручную
@@ -75,13 +75,13 @@ TZ_SAMPLE_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 13-09-2026 12:
 
 EMPTY_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00
 
-Итог: создано 0, исправлено 0, совпадает 0, пропущено 0, ошибок 0.
+Итог: опубликовано 0, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0.
 """
 
 DRY_RUN_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00 (dry-run)
 Внимание: Площадка — заглушка
 
-Итог: создано 1, исправлено 0, совпадает 0, пропущено 0, ошибок 0.
+Итог: опубликуем 1, исправим 0, уже стояло 0, не публиковали 0, ошибок 0.
 
 ## Создано (1)
 - 17-03-2027 19:00 uk -> Test UA — эфира нет, будет создан — не выполнено (dry-run)
@@ -89,7 +89,7 @@ DRY_RUN_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00
 
 STATUS_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00
 
-Итог: запланировано 1, ошибок 1. Файл ключей: keystreams\\keys.txt
+Итог: уже стояло 1, ошибок 1. Файл ключей: keystreams\\keys.txt
 
 ## Ошибки
 - Test RU — YouTube: quotaExceeded (квота исчерпана)
@@ -217,7 +217,7 @@ def test_matched_fixed_ambiguous_and_planer_error_texts() -> None:
     assert "несколько эфиров на эту минуту без маркера планера" in text
     assert "у найденного эфира нет привязанного потока" in text
     assert "журнал" not in text and "повторная отправка" not in text and "создан заново" not in text
-    assert text.splitlines()[2] == "Итог: создано 1, исправлено 1, совпадает 1, пропущено 0, ошибок 2."
+    assert text.splitlines()[2] == "Итог: опубликовано 1, исправлено 1, уже стояло 1, не публиковали 0, ошибок 2."
     assert "✅" not in text and "❌" not in text
 
 
@@ -267,7 +267,7 @@ def test_not_delivered_section_only_when_form_failed() -> None:
         ],
     )
     lines: list[str] = render_report(failed).splitlines()
-    assert lines[2] == "Итог: создано 2, исправлено 0, совпадает 0, пропущено 0, ошибок 0."
+    assert lines[2] == "Итог: опубликовано 2, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0."
     assert lines[4] == "## Ключ не дошёл до стримера"
     assert lines[5].startswith("- 18-03-2027 19:00 uk -> Test UA — в форме нет нужного варианта ответа (18.03.2027)")
     assert "## Создано (2)" in lines

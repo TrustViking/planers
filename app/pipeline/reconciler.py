@@ -156,7 +156,7 @@ class Reconciler:
         return MarkedScan(broadcasts=tuple(broadcasts), failures=tuple(failures))
 
     def _list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
-        """Вход и привязка — внутри первого обращения, поэтому строка «запрашиваю» печатается до него."""
+        """Вход и проверка канала — внутри первого обращения, поэтому строка «запрашиваю» печатается до него."""
         self._progress.channel_read_started(channel.account_name)
         broadcasts: list[UpcomingBroadcast] = self._platform.list_upcoming(channel)
         self._progress.channel_read_done(channel.account_name, len(broadcasts))

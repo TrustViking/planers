@@ -4,7 +4,7 @@
 Вывод в консоль — только отсюда и только текстами из messages_ru: шапка сразу после настройки логов
 (до конфигов и сети), строки прогресса по ходу работы (ConsoleProgress), пустая строка, итоговые блоки.
 Порядок запуска: конфиги → пакеты из bcast\\ → объекты → каналы, у которых есть объекты:
-вход и проверка привязки — при первом обращении к каналу (app/platforms/verified.py).
+вход и проверка названия канала — при первом обращении к каналу (app/platforms/verified.py).
 """
 
 from __future__ import annotations
@@ -41,7 +41,6 @@ from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
 from app.platforms.verified import ChannelBindingError, VerifiedPlatform
 from app.platforms.youtube import YouTubePlatform
-from app.state.channels import ChannelBindings, ChannelsStateError
 from app.ui import messages_ru as msg
 from app.version import APP_VERSION
 
@@ -57,10 +56,9 @@ TITLES: Final[dict[RunMode, str]] = {
 
 
 class ChannelConsole:
-    """Вход и привязка глазами владельца: площадка зовёт это в момент первого обращения к каналу."""
+    """Вход и проверка канала глазами владельца: площадка зовёт это в момент первого обращения к каналу."""
 
-    def __init__(self, paths: PlanerPaths) -> None:
-        self._paths: PlanerPaths = paths
+    def __init__(self) -> None:
         self._logged_in: set[str] = set()
 
     def on_login(self, channel: ChannelConfig) -> None:
@@ -74,7 +72,7 @@ class ChannelConsole:
         _say(msg.AUTH_CHOOSE_RIGHT_CHANNEL.format(account_name=channel.account_name))
         _say(msg.AUTH_UNVERIFIED_APP_WARNING)
 
-    def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo, *, is_new_binding: bool) -> None:
+    def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo) -> None:
         if channel.account_name in self._logged_in:
             self._logged_in.discard(channel.account_name)
             _say(
@@ -84,8 +82,6 @@ class ChannelConsole:
                     youtube_channel_id=info.youtube_channel_id,
                 )
             )
-        if is_new_binding:
-            _say(msg.AUTH_BINDING_SAVED.format(account_name=channel.account_name, path=self._paths.bindings_file))
 
 
 @dataclass(frozen=True)
@@ -186,7 +182,7 @@ def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path, now_utc: 
 
 
 def _build_dependencies(paths: PlanerPaths) -> _Dependencies | None:
-    """Конфиги, паспорт программы и привязки; к каналам здесь никто не обращается. None — код 2."""
+    """Конфиги и паспорт программы; к каналам здесь никто не обращается. None — код 2."""
     config: PlanerConfig | None = _load_config(paths)
     if config is None:
         return None
@@ -194,24 +190,13 @@ def _build_dependencies(paths: PlanerPaths) -> _Dependencies | None:
         LOGGER.error("client_secret_missing path=%s", paths.client_secret_file)
         _say(msg.CLIENT_SECRET_MISSING.format(path=paths.client_secret_file))
         return None
-    try:
-        bindings: ChannelBindings = ChannelBindings.load(paths.bindings_file)
-    except ChannelsStateError as error:
-        LOGGER.error("bindings_unreadable path=%s reason=%s", paths.bindings_file, error)
-        _say(msg.CHANNELS_STATE_UNREADABLE.format(path=paths.bindings_file, error=error))
-        return None
-    console: ChannelConsole = ChannelConsole(paths)
-    platform: VerifiedPlatform = VerifiedPlatform(
-        build_platform(paths, console),
-        bindings,
-        paths.bindings_file,
-        listener=console,
-    )
+    console: ChannelConsole = ChannelConsole()
+    platform: VerifiedPlatform = VerifiedPlatform(build_platform(paths, console), paths.channels_file, listener=console)
     return _Dependencies(config=config, platform=platform, console=console)
 
 
 def _load_config(paths: PlanerPaths) -> PlanerConfig | None:
-    """Нет файла или поля — ошибка и точный шаблон файла; в config\\ планер ничего не пишет."""
+    """Нет файла или поля — ошибка и точный шаблон файла; конфиги в secrets\\ планер не пишет."""
     try:
         return load_planer_config(paths.config_file, paths.channels_file)
     except ConfigError as error:
@@ -238,7 +223,7 @@ def _say_template(config_path: Path, paths: PlanerPaths) -> None:
 
 
 def _run_auth(target: str, paths: PlanerPaths, dependencies: _Dependencies) -> int:
-    """Принудительный вход: токен пересоздаётся, привязка сверяется тем же путём, что и в запуске."""
+    """Принудительный вход: токен пересоздаётся, название канала сверяется тем же путём, что и в запуске."""
     channels: tuple[ChannelConfig, ...] | None = _auth_targets(target, paths, dependencies.config)
     if channels is None:
         return int(ExitCode.ERRORS)
@@ -293,7 +278,7 @@ def _say_auth_error(account_name: str, reason: str) -> None:
 
 
 def _verify_channel(channel: ChannelConfig, dependencies: _Dependencies) -> ChannelInfo | None:
-    """Вход (если нужен) и привязка; сбой — строка для владельца и None."""
+    """Вход (если нужен) и проверка названия канала; сбой — строка для владельца и None."""
     try:
         return dependencies.platform.verify(channel)
     except ChannelBindingError as error:
@@ -309,7 +294,7 @@ def _say_channel_failed(channel: ChannelConfig, error: PlatformError) -> None:
 
 
 def _run_check(paths: PlanerPaths, dependencies: _Dependencies) -> int:
-    """Все каналы конфига — тем же путём, что и запуск: вход при первом обращении, затем привязка."""
+    """Все каналы конфига — тем же путём, что и запуск: вход при первом обращении, затем проверка названия."""
     _say(msg.CHECK_HEADER.format(path=paths.channels_file))
     failed: int = 0
     for channel in dependencies.config.channels:

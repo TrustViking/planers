@@ -330,7 +330,7 @@ def test_too_late_slot_without_broadcast_has_no_key_row(
     assert outcome.exit_code == ExitCode.OK
     assert fake_platform.created == [] and form_sender.calls == []
     lines: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 3 and all(line.startswith("# ") for line in lines)
+    assert len(lines) == len(msg.KEYS_FILE_HEADER) and all(line.startswith("# ") for line in lines)
 
 
 def test_thumbnail_failure_is_a_warning_not_an_error(
@@ -780,7 +780,7 @@ def test_status_lists_marked_broadcasts_into_keys_file(
     assert outcome.exit_code == ExitCode.OK
     lines: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").splitlines()
     blocks: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").split("\n\n")[1:]
-    assert len(lines) == 3 + 2 * 6                   # шапка и два блока: пустая строка, заголовок, 4 поля
+    assert len(lines) == len(msg.KEYS_FILE_HEADER) + 2 * 6   # шапка и два блока: пустая строка, заголовок, 4 поля
     assert "  ключ   aaaa-aaaa-aaaa-aaaa-aaaa" in blocks[0] and msg.KEY_FORM_KEPT in blocks[0]
     assert "  ключ   bbbb-bbbb-bbbb-bbbb-bbbb" in blocks[1] and msg.KEY_FORM_KEPT in blocks[1]
     assert outcome.report is not None

@@ -2,9 +2,9 @@
 chcp 65001 >nul
 rem Planer: release build - exe + installer WITHOUT secrets (TZ 9, stage 5).
 rem build_local.bat calls this script with PLANER_INCLUDE_SECRETS=1; that is the only difference:
-rem the local build also carries the developer data - the whole secrets\ folder (client_secret.json and
-rem the channel tokens), config\channels.json and app\state\bindings.json - so the built program runs
-rem without OAuth and without hand-copying. Never publish a local installer.
+rem the local build also carries the developer data - the whole secrets\ folder (client_secret.json,
+rem channels.json and the channel tokens) - so the built program runs without OAuth and without
+rem hand-copying. Never publish a local installer.
 rem The only environment is .venv_planers: the app and pyinstaller live there.
 rem Exit codes: 0 - exe and installer built; 1 - build failed; 3 - exe built, Inno Setup not found.
 setlocal EnableExtensions
@@ -22,7 +22,7 @@ set "APP_ICON=%ROOT%\planers.ico"
 set "DISCOVERY_DOC=%DIST_APP%\_internal\googleapiclient\discovery_cache\documents\youtube.v3.json"
 
 if "%PLANER_INCLUDE_SECRETS%"=="1" (
-  echo [WARN] LOCAL build: secrets\, config\channels.json and bindings.json go into the build - do NOT publish it.
+  echo [WARN] LOCAL build: the whole secrets\ folder goes into the build - do NOT publish it.
 ) else (
   echo [INFO] RELEASE build: installer contains no secrets.
 )
@@ -69,8 +69,8 @@ if "%PLANER_INCLUDE_SECRETS%"=="1" if not exist "%ROOT%\secrets\client_secret.js
   call :finish 1
   exit /b 1
 )
-if "%PLANER_INCLUDE_SECRETS%"=="1" if not exist "%ROOT%\config\channels.json" (
-  echo [ERROR] config\channels.json not found - local build needs it.
+if "%PLANER_INCLUDE_SECRETS%"=="1" if not exist "%ROOT%\secrets\channels.json" (
+  echo [ERROR] secrets\channels.json not found - local build needs it.
   call :finish 1
   exit /b 1
 )
@@ -90,14 +90,14 @@ if not exist "%DISCOVERY_DOC%" (
   exit /b 1
 )
 
-rem Next to the exe: launcher, icon for shortcuts and config\planer.json (technical settings, shipped filled in).
-rem config\channels.json is NOT shipped: the owner creates it, the program prints its template.
-mkdir "%DIST_APP%\config" >nul 2>&1
+rem Next to the exe: launcher, icon for shortcuts and secrets\planer.json (technical settings, shipped filled in).
+rem A release does NOT ship secrets\channels.json: the owner creates it, the program prints its template.
+mkdir "%DIST_APP%\secrets" >nul 2>&1
 copy /Y "%ROOT%\planer.bat" "%DIST_APP%\planer.bat" >nul
 copy /Y "%APP_ICON%" "%DIST_APP%\planers.ico" >nul
-copy /Y "%ROOT%\config\planer.json" "%DIST_APP%\config\planer.json" >nul
-if not exist "%DIST_APP%\config\planer.json" (
-  echo [ERROR] config\planer.json was not copied to "%DIST_APP%\config".
+copy /Y "%ROOT%\secrets\planer.json" "%DIST_APP%\secrets\planer.json" >nul
+if not exist "%DIST_APP%\secrets\planer.json" (
+  echo [ERROR] secrets\planer.json was not copied to "%DIST_APP%\secrets".
   call :finish 1
   exit /b 1
 )
@@ -139,23 +139,19 @@ exit /b 0
 
 :copy_local_data
 rem LOCAL build only: developer data next to the exe, from there Inno Setup takes it into the installer.
-rem secrets\* is client_secret.json plus <account_name>.token.json of every channel already authorized.
+rem secrets\* is client_secret.json, channels.json, planer.json and <account_name>.token.json
+rem of every channel already authorized.
 mkdir "%DIST_APP%\secrets" >nul 2>&1
 copy /Y "%ROOT%\secrets\*" "%DIST_APP%\secrets\" >nul
 if not exist "%DIST_APP%\secrets\client_secret.json" (
   echo [ERROR] secrets\ was not copied to "%DIST_APP%\secrets".
   exit /b 1
 )
-copy /Y "%ROOT%\config\channels.json" "%DIST_APP%\config\channels.json" >nul
-if not exist "%DIST_APP%\config\channels.json" (
-  echo [ERROR] config\channels.json was not copied to "%DIST_APP%\config".
+if not exist "%DIST_APP%\secrets\channels.json" (
+  echo [ERROR] secrets\channels.json was not copied to "%DIST_APP%\secrets".
   exit /b 1
 )
-if exist "%ROOT%\app\state\bindings.json" (
-  mkdir "%DIST_APP%\app\state" >nul 2>&1
-  copy /Y "%ROOT%\app\state\bindings.json" "%DIST_APP%\app\state\bindings.json" >nul
-)
-echo [OK] LOCAL data: secrets\, config\channels.json, app\state\bindings.json
+echo [OK] LOCAL data: secrets\
 exit /b 0
 
 :finish

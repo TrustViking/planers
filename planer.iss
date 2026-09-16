@@ -49,7 +49,7 @@ RestartIfNeededByRun=no
 
 [Dirs]
 ; Пустая папка для пакетов: владелец кладёт туда пакет ещё до первого запуска. При удалении не трогается.
-; config\, secrets\, bcast\, keystreams\, logs\ и app\state\ — данные владельца: удаление их не трогает.
+; secrets\, bcast\, keystreams\ и logs\ — данные владельца: удаление их не трогает.
 Name: "{app}\bcast"; Flags: uninsneveruninstall
 
 [Files]
@@ -57,18 +57,17 @@ Source: "{#SourceDir}\planer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\planer.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\planers.ico"; DestDir: "{app}"; Flags: ignoreversion
-; Технические настройки planer.json: ставятся, только если файла ещё нет, — правки владельца
-; переустановка не трогает, удаление тоже. channels.json владелец создаёт сам по шаблону из консоли.
-Source: "{#SourceDir}\config\planer.json"; DestDir: "{app}\config"; Flags: onlyifdoesntexist uninsneveruninstall
 #if IncludeSecrets
-; build_local.bat: данные разработчика — вся папка secrets\ (паспорт программы Google и токены каналов),
-; config\channels.json и привязки app\state\bindings.json: установленная программа должна делать прогон
-; сразу, без OAuth и ручного копирования. Источник — dist\planer\, куда их положил build_release.bat.
-; В build_release.bat этого нет: владелец получает client_secret.json отдельно
-; (messages_ru.CLIENT_SECRET_MISSING), а channels.json создаёт сам по шаблону из консоли.
+; build_local.bat: данные разработчика — вся папка secrets\ (паспорт программы Google, channels.json,
+; planer.json и токены каналов): установленная программа должна делать прогон сразу, без OAuth и ручного
+; копирования. Источник — dist\planer\secrets\, куда их положил build_release.bat. planer.json входит
+; в secrets\*, отдельной записи для него нет.
 Source: "{#SourceDir}\secrets\*"; DestDir: "{app}\secrets"; Flags: ignoreversion uninsneveruninstall
-Source: "{#SourceDir}\config\channels.json"; DestDir: "{app}\config"; Flags: ignoreversion uninsneveruninstall
-Source: "{#SourceDir}\app\state\bindings.json"; DestDir: "{app}\app\state"; Flags: ignoreversion uninsneveruninstall skipifsourcedoesntexist
+#else
+; Release: из secrets\ — только технические настройки planer.json; ставятся, только если файла ещё нет, —
+; правки владельца переустановка не трогает, удаление тоже. client_secret.json владелец получает отдельно
+; (messages_ru.CLIENT_SECRET_MISSING), channels.json создаёт сам по шаблону из консоли.
+Source: "{#SourceDir}\secrets\planer.json"; DestDir: "{app}\secrets"; Flags: onlyifdoesntexist uninsneveruninstall
 #endif
 
 [Icons]
