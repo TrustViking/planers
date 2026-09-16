@@ -74,9 +74,22 @@ def test_scope_is_youtube_only() -> None:
     assert YOUTUBE_SCOPE == "https://www.googleapis.com/auth/youtube"
 
 
-def test_token_file_name_is_the_account_name(tmp_path: Path) -> None:
-    assert token_file_for(tmp_path, "Osvald.X") == tmp_path / "Osvald.X.token.json"
-    assert token_file_for(tmp_path, "Канал UA") == tmp_path / "Канал UA.token.json"
+@pytest.mark.parametrize(
+    ("account_name", "file_name"),
+    [
+        ("Osvald.X", "Osvald.X.token.json"),
+        ("Oktavian.X", "Oktavian.X.token.json"),
+        ("Maria Kamenskay", "Maria Kamenskay.token.json"),
+        ("Канал UA", "Канал UA.token.json"),
+        ("Новини: Україна", "Новини_ Україна.token.json"),
+        ("News | UA", "News _ UA.token.json"),
+        ("Канал.", "Канал_.token.json"),
+        ("CON", "CON_.token.json"),
+    ],
+)
+def test_token_file_name_comes_from_the_account_name(tmp_path: Path, account_name: str, file_name: str) -> None:
+    """Существующие токены («Osvald.X» и др.) остаются под прежними именами."""
+    assert token_file_for(tmp_path, account_name) == tmp_path / file_name
 
 
 def test_on_login_is_called_right_before_the_browser(

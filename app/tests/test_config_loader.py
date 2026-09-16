@@ -93,13 +93,11 @@ INVALID_CHANNELS: list[tuple[str, Callable[[dict[str, Any]], object], str]] = [
     ("platform_facebook", lambda c: _channel(0)(c).update(platform="facebook"), "channels[0].platform"),
     ("platform_unknown", lambda c: _channel(0)(c).update(platform="rumble"), "channels[0].platform"),
     ("account_name_blank", lambda c: _channel(0)(c).update(account_name="  "), "channels[0].account_name"),
-    ("account_name_slash", lambda c: _channel(0)(c).update(account_name="UA/RU"), "channels[0].account_name"),
-    ("account_name_colon", lambda c: _channel(0)(c).update(account_name="UA: live"), "channels[0].account_name"),
-    ("account_name_quote", lambda c: _channel(0)(c).update(account_name='Канал "UA"'), "channels[0].account_name"),
-    ("account_name_trailing_dot", lambda c: _channel(0)(c).update(account_name="Osvald."), "channels[0].account_name"),
     ("account_name_leading_space", lambda c: _channel(0)(c).update(account_name=" Osvald"), "channels[0].account_name"),
+    ("account_name_trailing_space", lambda c: _channel(0)(c).update(account_name="Osvald "), "channels[0].account_name"),
     ("account_name_newline", lambda c: _channel(0)(c).update(account_name="Osv\nald"), "channels[0].account_name"),
-    ("account_name_reserved", lambda c: _channel(0)(c).update(account_name="con"), "channels[0].account_name"),
+    ("account_name_tab", lambda c: _channel(0)(c).update(account_name="Osv\tald"), "channels[0].account_name"),
+    ("account_name_token_collision", lambda c: (_channel(0)(c).update(account_name="A:B"), _channel(1)(c).update(account_name="A|B")), "channels[1].account_name"),
     ("account_name_duplicate", lambda c: _channel(1)(c).update(account_name="Канал UA"), "channels[1].account_name"),
     ("account_name_duplicate_case", lambda c: _channel(1)(c).update(account_name="канал ua"), "channels[1].account_name"),
     ("account_name_too_long", lambda c: _channel(0)(c).update(account_name="К" * 101), "channels[0].account_name"),
@@ -155,7 +153,7 @@ def test_console_templates_are_valid_configs(tmp_path: Path, repo_planer_config:
     assert config.settings == load_settings(repo_planer_config)
     [channel] = config.channels
     assert (channel.account_name, channel.google_account, channel.languages, channel.privacy) == (
-        "Osvald.X",
+        "Название канала на YouTube",
         "you@gmail.com",
         ("ru",),
         Privacy.UNLISTED,
@@ -202,7 +200,7 @@ def test_too_long_account_name_names_the_limit_and_length(tmp_path: Path) -> Non
 
 
 def test_account_name_is_normalized_to_nfc(tmp_path: Path) -> None:
-    """«й», собранная из «и» и знака, — то же имя, что «й» одним символом: один токен, одна привязка."""
+    """«й», собранная из «и» и знака, — то же имя, что «й» одним символом: один токен."""
     channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
     channels["channels"][0]["account_name"] = DECOMPOSED
     config: PlanerConfig = load_planer_config(
@@ -300,12 +298,45 @@ def test_google_account_is_loaded_as_written(tmp_path: Path) -> None:
     assert (first.google_account, second.google_account) == ("ua@gmail.com", "ru@gmail.com")
 
 
-def test_account_name_problem_names_the_character(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "name",
+    ["Новини: Україна", "News | UA", "Канал.", "CON", 'Канал "UA"', "UA/RU?"],
+    ids=["colon", "pipe", "trailing_dot", "reserved_windows_name", "quotes", "slash_question"],
+)
+def test_youtube_title_with_file_name_characters_is_accepted(tmp_path: Path, name: str) -> None:
+    """Название — как на YouTube; символы, недопустимые в имени файла, заменяются только в имени токена."""
     channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
-    channels["channels"][0]["account_name"] = "UA?"
+    channels["channels"][0]["account_name"] = name
+    assert load_channels(_write_channels(tmp_path, channels))[0].account_name == name
+
+
+def test_space_at_edge_names_the_title(tmp_path: Path) -> None:
+    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
+    channels["channels"][0]["account_name"] = "Osvald "
     with pytest.raises(ConfigError) as raised:
         load_channels(_write_channels(tmp_path, channels))
-    assert "«?»" in raised.value.problem
+    assert raised.value.problem == msg.CONFIG_PROBLEM_ACCOUNT_NAME_SPACE_EDGE.format(value="Osvald ")
+
+
+@pytest.mark.parametrize(("first", "second"), [("A:B", "A|B"), ("A:B", "a|b")], ids=["same_case", "other_case"])
+def test_titles_giving_one_token_file_are_a_collision(tmp_path: Path, first: str, second: str) -> None:
+    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
+    channels["channels"][0]["account_name"] = first
+    channels["channels"][1]["account_name"] = second
+    with pytest.raises(ConfigError) as raised:
+        load_channels(_write_channels(tmp_path, channels))
+    assert raised.value.key_path == "channels[1].account_name"
+    assert raised.value.problem == msg.CONFIG_PROBLEM_TOKEN_FILE_COLLISION.format(
+        first=first, second=second, file_name=f"{second[0]}_{second[2]}.token.json"
+    )
+
+
+def test_same_title_in_other_case_is_a_duplicate_not_a_collision(tmp_path: Path) -> None:
+    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
+    channels["channels"][1]["account_name"] = "канал ua"
+    with pytest.raises(ConfigError) as raised:
+        load_channels(_write_channels(tmp_path, channels))
+    assert raised.value.problem == msg.CONFIG_PROBLEM_ACCOUNT_NAME_DUPLICATE.format(value="канал ua")
 
 
 def test_facebook_error_names_stage_6(tmp_path: Path) -> None:

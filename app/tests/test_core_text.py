@@ -2,7 +2,32 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.text import normalize_description, normalize_title, safe_trim
+from app.core.text import normalize_description, normalize_title, safe_trim, token_file_stem
+
+
+TOKEN_FILE_STEMS: list[tuple[str, str]] = [
+    ("Новини: Україна", "Новини_ Україна"),
+    ("News | UA", "News _ UA"),
+    ("Канал.", "Канал_"),
+    ("CON", "CON_"),
+    ("lpt9", "lpt9_"),
+    (' a\\b*c?"d"<e>/f. ', '_a_b_c__d__e__f__'),
+    ("Osv\tald", "Osv_ald"),
+    ("Osvald.X", "Osvald.X"),
+    ("Oktavian.X", "Oktavian.X"),
+    ("Maria Kamenskay", "Maria Kamenskay"),
+    ("CONSOLE", "CONSOLE"),
+]
+
+
+@pytest.mark.parametrize(("name", "stem"), TOKEN_FILE_STEMS, ids=[pair[0] for pair in TOKEN_FILE_STEMS])
+def test_token_file_stem(name: str, stem: str) -> None:
+    assert token_file_stem(name) == stem
+
+
+def test_token_file_stem_keeps_length_at_edges() -> None:
+    assert token_file_stem("..Канал..") == "__Канал__"
+    assert token_file_stem(" . ") == "___"
 
 
 def test_normalize_title_trims_edges_only() -> None:

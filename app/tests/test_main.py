@@ -222,6 +222,17 @@ def test_missing_channels_json_prints_template_and_creates_nothing(
     channels_file: Path = planer_root / "secrets" / "channels.json"
     assert msg.CONFIG_CHANNELS_HINT.format(path=channels_file) in out
     assert msg.CONFIG_CHANNELS_TEMPLATE in out
+    lines: list[str] = out.splitlines()
+    fields: list[str] = [
+        "  languages — языки стримов этого канала: " + msg.CONFIG_LANGUAGES_RULE + ";",
+        "  privacy — видимость эфиров: public, unlisted;",
+        "  platform — youtube.",
+    ]
+    assert all(line in lines for line in fields)
+    hint: int = lines.index(msg.CONFIG_CHANNELS_HINT.format(path=channels_file))
+    assert lines[hint + 1].startswith("  account_name — название канала точно как на YouTube")
+    assert lines[hint + len(msg.CONFIG_CHANNELS_FIELDS) + 1] == msg.CONFIG_CHANNELS_TEMPLATE.splitlines()[0]
+    assert "Osvald.X" not in out
     assert sorted(path.name for path in (planer_root / "secrets").iterdir()) == ["client_secret.json", "planer.json"]
 
 

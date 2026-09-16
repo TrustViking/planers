@@ -25,7 +25,10 @@ from app.config.loader import (
     AUTH_ALL,
     ChannelConfig,
     ConfigError,
+    Platform,
     PlanerConfig,
+    Privacy,
+    allowed_values,
     load_planer_config,
 )
 from app.core.dates import format_datetime_text
@@ -216,10 +219,23 @@ def _load_config(paths: PlanerPaths) -> PlanerConfig | None:
 def _say_template(config_path: Path, paths: PlanerPaths) -> None:
     if config_path == paths.channels_file:
         _say(msg.CONFIG_CHANNELS_HINT.format(path=config_path))
+        _say_channels_fields()
         _say(msg.CONFIG_CHANNELS_TEMPLATE)
         return
     _say(msg.CONFIG_PLANER_HINT.format(path=config_path))
     _say(msg.CONFIG_PLANER_TEMPLATE)
+
+
+def _say_channels_fields() -> None:
+    """Что вписать в поля channels.json; допустимые значения — те же, что проверяет loader."""
+    for line in msg.CONFIG_CHANNELS_FIELDS:
+        _say(
+            line.format(
+                languages=msg.CONFIG_LANGUAGES_RULE,
+                privacy=allowed_values(Privacy),
+                platform=allowed_values(Platform),
+            )
+        )
 
 
 def _run_auth(target: str, paths: PlanerPaths, dependencies: _Dependencies) -> int:

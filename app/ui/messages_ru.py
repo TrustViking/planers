@@ -17,11 +17,22 @@ VERSION_TEXT: Final[str] = "Planer {version}"
 CONFIG_ERROR: Final[str] = "Ошибка в конфиге {path}: {key} — {problem}"
 CONFIG_ROOT_KEY: Final[str] = "(корень файла)"
 CONFIG_CHANNELS_HINT: Final[str] = "Создайте файл {path} с таким содержимым и впишите свои значения:"
+# Что вписать в каждое поле: печатается между CONFIG_CHANNELS_HINT и шаблоном.
+# {languages} — CONFIG_LANGUAGES_RULE, {privacy} и {platform} — допустимые значения из config/loader.py.
+CONFIG_CHANNELS_FIELDS: Final[tuple[str, ...]] = (
+    "  account_name — название канала точно как на YouTube, буква в букву: оно сверяется при входе "
+    "и уходит в форму как «Название канала»;",
+    "  google_account — почта аккаунта Google, в котором этот канал;",
+    "  languages — языки стримов этого канала: {languages};",
+    "  privacy — видимость эфиров: {privacy};",
+    "  platform — {platform}.",
+)
+CONFIG_LANGUAGES_RULE: Final[str] = 'непустой список кодов строчными буквами без повторов, например ["uk"] или ["uk", "ru"]'
 CONFIG_PLANER_HINT: Final[str] = "Восстановите файл {path} с таким содержимым и впишите свои значения:"
 # Точные шаблоны файлов для консоли: печатаются, когда файла или поля нет. В код как умолчания не идут.
 CONFIG_CHANNELS_TEMPLATE: Final[str] = """{
   "channels": [
-    {"platform": "youtube", "account_name": "Osvald.X", "google_account": "you@gmail.com",
+    {"platform": "youtube", "account_name": "Название канала на YouTube", "google_account": "you@gmail.com",
      "languages": ["ru"], "privacy": "unlisted"}
   ]
 }"""
@@ -37,16 +48,13 @@ CONFIG_PROBLEM_NON_EMPTY_STRING: Final[str] = "нужна непустая ст�
 CONFIG_PROBLEM_INT_MIN: Final[str] = "нужно целое число не меньше {minimum}"
 CONFIG_PROBLEM_BOOL: Final[str] = "нужно true или false"
 CONFIG_PROBLEM_CHANNELS_EMPTY: Final[str] = "нужен непустой список каналов"
-CONFIG_PROBLEM_ACCOUNT_NAME_CHAR: Final[str] = (
-    "символ «{char}» в имени канала недопустим: имя канала — это имя файла токена, "
-    r'в нём нельзя \ / : * ? " < > |'
-)
 CONFIG_PROBLEM_ACCOUNT_NAME_TOO_LONG: Final[str] = (
-    "имя канала длиннее {maximum} символов (сейчас {length}): оно становится именем файла токена"
+    "название канала длиннее {maximum} символов (сейчас {length}): из него строится имя файла токена"
 )
-CONFIG_PROBLEM_ACCOUNT_NAME_CONTROL: Final[str] = "в имени канала есть управляющий символ (перевод строки, табуляция)"
-CONFIG_PROBLEM_ACCOUNT_NAME_EDGE: Final[str] = "имя канала начинается или заканчивается пробелом или точкой: «{value}»"
-CONFIG_PROBLEM_ACCOUNT_NAME_RESERVED: Final[str] = "«{value}» — зарезервированное имя Windows, файлом его назвать нельзя"
+CONFIG_PROBLEM_ACCOUNT_NAME_CONTROL: Final[str] = "в названии канала есть управляющий символ (перевод строки, табуляция)"
+CONFIG_PROBLEM_ACCOUNT_NAME_SPACE_EDGE: Final[str] = (
+    "название канала начинается или заканчивается пробелом: «{value}»; на YouTube таких названий нет — уберите пробел"
+)
 CONFIG_PROBLEM_ACCOUNT_NAME_AUTH_ALL: Final[str] = (
     "имя «{value}» занято режимом --auth {auth_all} (вход во все каналы сразу); назовите канал иначе"
 )
@@ -56,9 +64,12 @@ CONFIG_PROBLEM_GOOGLE_ACCOUNT: Final[str] = (
 CONFIG_PROBLEM_ACCOUNT_NAME_DUPLICATE: Final[str] = (
     "имя «{value}» уже есть у другого канала (большие и маленькие буквы не различаются: это имя файла)"
 )
+CONFIG_PROBLEM_TOKEN_FILE_COLLISION: Final[str] = (
+    "каналы «{first}» и «{second}» дают один файл токена {file_name}: переименуйте один из них в channels.json"
+)
 CONFIG_PROBLEM_PLATFORM_FACEBOOK: Final[str] = "Facebook появится на этапе 6; сейчас поддерживается только youtube"
 CONFIG_PROBLEM_PLATFORM_UNKNOWN: Final[str] = "неизвестная площадка «{value}»; допустимо: {allowed}"
-CONFIG_PROBLEM_LANGUAGES: Final[str] = "нужен непустой список кодов языков строчными буквами, например [\"uk\"]"
+CONFIG_PROBLEM_LANGUAGES: Final[str] = "нужен " + CONFIG_LANGUAGES_RULE
 CONFIG_PROBLEM_LANGUAGE_DUPLICATE: Final[str] = "язык «{value}» указан дважды"
 CONFIG_PROBLEM_CHOICE: Final[str] = "допустимо: {allowed}"
 

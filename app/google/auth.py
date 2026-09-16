@@ -16,6 +16,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+from app.core.text import token_file_stem
 from app.observability.logging_setup import get_logger
 
 LOGGER = get_logger("auth")
@@ -47,8 +48,8 @@ class AuthError(Exception):
 
 
 def token_file_for(secrets_dir: Path, account_name: str) -> Path:
-    """secrets\\<account_name>.token.json — единственный источник имени файла токена."""
-    return secrets_dir / TOKEN_FILE_TEMPLATE.format(account_name=account_name)
+    """secrets\\<имя>.token.json — единственный источник пути к токену; имя — core.text.token_file_stem."""
+    return secrets_dir / TOKEN_FILE_TEMPLATE.format(account_name=token_file_stem(account_name))
 
 
 def load_credentials(

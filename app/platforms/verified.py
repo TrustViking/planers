@@ -31,7 +31,7 @@ from app.ui import messages_ru as msg
 if TYPE_CHECKING:   # спека живёт в pipeline; здесь она нужна только для аннотаций
     from app.pipeline.plan import BroadcastSpec
 
-LOGGER = get_logger("binding")
+LOGGER = get_logger("channel")
 
 ERROR_CHANNEL_NAME_MISMATCH: Final[str] = "channelNameMismatch"
 CHANNEL_TITLE_FORM: Final[str] = "NFC"   # так же приводится account_name в config/loader.py

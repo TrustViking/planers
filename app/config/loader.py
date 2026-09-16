@@ -1,4 +1,4 @@
-"""config\\planer.json + config\\channels.json → PlanerConfig (ТЗ §5.2).
+"""secrets\\planer.json + secrets\\channels.json → PlanerConfig (ТЗ §5.2).
 
 Два файла, оба JSON, все поля обязательные, умолчаний в коде нет. channels.json заполняет
 владелец: только пять полей канала. planer.json — технический, поставляется со сборкой
@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -17,6 +16,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Final
 
+from app.core.text import CONTROL_CHAR_LIMIT, token_file_stem
+from app.google.auth import token_file_for
 from app.ui import messages_ru as msg
 
 
@@ -46,14 +47,12 @@ SETTINGS_KEYS: Final[tuple[str, ...]] = ("min_lead_minutes", "keep_days", "auto_
 CHANNELS_TOP_LEVEL_KEYS: Final[tuple[str, ...]] = (CHANNELS_KEY,)
 CHANNEL_KEYS: Final[tuple[str, ...]] = ("platform", "account_name", "google_account", "languages", "privacy")
 AUTH_ALL: Final[str] = "all"  # --auth all: все каналы из channels.json; каналом с таким именем быть не может
-# account_name — имя файла токена secrets\<account_name>.token.json: правила имени файла Windows.
-ACCOUNT_NAME_FORBIDDEN_CHARS: Final[str] = '\\/:*?"<>|'
-ACCOUNT_NAME_EDGE_CHARS: Final[str] = " ."
-ACCOUNT_NAME_RESERVED: Final[re.Pattern[str]] = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE)
-CONTROL_CHAR_LIMIT: Final[int] = 32
+# account_name — название канала буква в букву как на YouTube; имя файла токена из него строит
+# core.text.token_file_stem, поэтому ограничений имени файла у названия нет.
+ACCOUNT_NAME_EDGE_CHAR: Final[str] = " "   # YouTube не отдаёт названия с пробелом по краю: такое не совпадёт
 # google_account — подсказка аккаунта при входе, а не проверка почты: ровно один «@», части непустые, без пробелов.
 GOOGLE_ACCOUNT_SEPARATOR: Final[str] = "@"
-# Лимит длины: имя + ".token.json" + путь к secrets\ должны уложиться в 260 символов пути Windows.
+# Лимит длины: имя файла токена + путь к secrets\ должны уложиться в 260 символов пути Windows.
 ACCOUNT_NAME_MAX_CHARS: Final[int] = 100
 ACCOUNT_NAME_UNICODE_FORM: Final[str] = "NFC"
 
@@ -83,7 +82,8 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class ChannelConfig:
-    """Ровно пять полей channels.json. account_name — имя канала везде: токен, привязка, логи, отчёт.
+    """Ровно пять полей channels.json. account_name — название канала как на YouTube: проверка канала,
+    форма, логи, отчёт; имя файла токена строится из него (core.text.token_file_stem).
 
     google_account — почта аккаунта Google канала: подсказка браузеру при входе.
     """
@@ -126,12 +126,12 @@ class PlanerConfig:
 
 
 def load_settings(path: Path) -> PlanerSettings:
-    """config\\planer.json → настройки планера."""
+    """secrets\\planer.json → настройки планера."""
     return _ConfigParser(path).parse_settings(_read_json(path))
 
 
 def load_channels(path: Path) -> tuple[ChannelConfig, ...]:
-    """config\\channels.json → каналы владельца."""
+    """secrets\\channels.json → каналы владельца."""
     return _ConfigParser(path).parse_channels(_read_json(path))
 
 
@@ -171,7 +171,8 @@ class _UniquePairs(dict[str, Any]):
             self[key] = value
 
 
-def _choices(enum_type: type[Enum]) -> str:
+def allowed_values(enum_type: type[Enum]) -> str:
+    """Допустимые значения поля — и для ошибки, и для подсказки к шаблону channels.json."""
     return ", ".join(str(member.value) for member in enum_type)
 
 
@@ -180,23 +181,21 @@ def _is_language_code(value: Any) -> bool:
 
 
 def normalize_account_name(value: str) -> str:
-    """Одна форма Unicode (NFC): «й» одним символом и «и» + знак — одно имя, один токен, одна привязка."""
+    """Одна форма Unicode (NFC): «й» одним символом и «и» + знак — одно имя и один токен."""
     return unicodedata.normalize(ACCOUNT_NAME_UNICODE_FORM, value)
 
 
 def _account_name_problem(value: str) -> str | None:
-    """None — имя годится в имя файла; иначе что именно не так. value — уже в NFC."""
+    """None — название годится; иначе что именно не так. value — уже в NFC; непустоту проверил _text.
+
+    Символы, недопустимые в имени файла, — законная часть названия: их заменяет token_file_stem.
+    """
     if len(value) > ACCOUNT_NAME_MAX_CHARS:
         return msg.CONFIG_PROBLEM_ACCOUNT_NAME_TOO_LONG.format(maximum=ACCOUNT_NAME_MAX_CHARS, length=len(value))
-    for char in value:
-        if char in ACCOUNT_NAME_FORBIDDEN_CHARS:
-            return msg.CONFIG_PROBLEM_ACCOUNT_NAME_CHAR.format(char=char)
-        if ord(char) < CONTROL_CHAR_LIMIT:
-            return msg.CONFIG_PROBLEM_ACCOUNT_NAME_CONTROL
-    if value[0] in ACCOUNT_NAME_EDGE_CHARS or value[-1] in ACCOUNT_NAME_EDGE_CHARS:
-        return msg.CONFIG_PROBLEM_ACCOUNT_NAME_EDGE.format(value=value)
-    if ACCOUNT_NAME_RESERVED.fullmatch(value):
-        return msg.CONFIG_PROBLEM_ACCOUNT_NAME_RESERVED.format(value=value)
+    if any(ord(char) < CONTROL_CHAR_LIMIT for char in value):
+        return msg.CONFIG_PROBLEM_ACCOUNT_NAME_CONTROL
+    if value.startswith(ACCOUNT_NAME_EDGE_CHAR) or value.endswith(ACCOUNT_NAME_EDGE_CHAR):
+        return msg.CONFIG_PROBLEM_ACCOUNT_NAME_SPACE_EDGE.format(value=value)
     if value.casefold() == AUTH_ALL.casefold():
         return msg.CONFIG_PROBLEM_ACCOUNT_NAME_AUTH_ALL.format(value=value, auth_all=AUTH_ALL)
     return None
@@ -283,19 +282,28 @@ class _ConfigParser:
         if not isinstance(raw, list) or not raw:
             raise self._error(CHANNELS_KEY, msg.CONFIG_PROBLEM_CHANNELS_EMPTY)
         channels: list[ChannelConfig] = []
-        seen_names: set[str] = set()
         for index, raw_channel in enumerate(raw):
             prefix: str = f"{CHANNELS_KEY}[{index}]."
             channel: ChannelConfig = self._channel(raw_channel, prefix=prefix)
-            folded: str = channel.account_name.casefold()     # имя файла: регистр Windows не различает
-            if folded in seen_names:
-                raise self._error(
-                    f"{prefix}account_name",
-                    msg.CONFIG_PROBLEM_ACCOUNT_NAME_DUPLICATE.format(value=channel.account_name),
-                )
-            seen_names.add(folded)
+            self._check_unique(channel.account_name, channels, prefix=prefix)
             channels.append(channel)
         return tuple(channels)
+
+    def _check_unique(self, name: str, earlier: list[ChannelConfig], *, prefix: str) -> None:
+        """Один файл токена — один канал: Windows не различает регистр в имени файла."""
+        stem: str = token_file_stem(name).casefold()
+        for other in earlier:
+            if other.account_name.casefold() == name.casefold():
+                raise self._error(
+                    f"{prefix}account_name", msg.CONFIG_PROBLEM_ACCOUNT_NAME_DUPLICATE.format(value=name)
+                )
+            if token_file_stem(other.account_name).casefold() == stem:
+                raise self._error(
+                    f"{prefix}account_name",
+                    msg.CONFIG_PROBLEM_TOKEN_FILE_COLLISION.format(
+                        first=other.account_name, second=name, file_name=token_file_for(Path(), name).name
+                    ),
+                )
 
     def _channel(self, raw: Any, *, prefix: str) -> ChannelConfig:
         mapping: dict[str, Any] = self._mapping(
@@ -313,7 +321,7 @@ class _ConfigParser:
         )
 
     def _account_name(self, mapping: dict[str, Any], *, prefix: str) -> str:
-        """Имя приводится к NFC до проверок: дальше везде — токен, привязка, отчёт — только эта форма."""
+        """Название приводится к NFC до проверок: дальше везде — проверка канала, токен, отчёт — только эта форма."""
         value: str = normalize_account_name(self._text(mapping, "account_name", prefix=prefix))
         problem: str | None = _account_name_problem(value)
         if problem is not None:
@@ -335,7 +343,7 @@ class _ConfigParser:
         except ValueError:
             raise self._error(
                 f"{prefix}platform",
-                msg.CONFIG_PROBLEM_PLATFORM_UNKNOWN.format(value=value, allowed=_choices(Platform)),
+                msg.CONFIG_PROBLEM_PLATFORM_UNKNOWN.format(value=value, allowed=allowed_values(Platform)),
             ) from None
 
     def _languages(self, mapping: dict[str, Any], *, prefix: str) -> tuple[str, ...]:
@@ -356,5 +364,5 @@ class _ConfigParser:
         except ValueError:
             raise self._error(
                 f"{prefix}privacy",
-                msg.CONFIG_PROBLEM_CHOICE.format(allowed=_choices(Privacy)),
+                msg.CONFIG_PROBLEM_CHOICE.format(allowed=allowed_values(Privacy)),
             ) from None
