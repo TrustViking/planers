@@ -32,6 +32,7 @@ BASE_SETTINGS: dict[str, Any] = {
     "auto_start": True,
     "set_thumbnail": True,
     "category_id": "22",
+    "youtube_pause_seconds": 2,
 }
 BASE_CHANNELS: dict[str, Any] = {
     "channels": [
@@ -79,6 +80,9 @@ INVALID_SETTINGS: list[tuple[str, Callable[[dict[str, Any]], object], str]] = [
     ("set_thumbnail_not_bool", lambda c: c.update(set_thumbnail=1), "set_thumbnail"),
     ("category_not_string", lambda c: c.update(category_id=22), "category_id"),
     ("category_blank", lambda c: c.update(category_id=" "), "category_id"),
+    ("youtube_pause_negative", lambda c: c.update(youtube_pause_seconds=-1), "youtube_pause_seconds"),
+    ("youtube_pause_text", lambda c: c.update(youtube_pause_seconds="2"), "youtube_pause_seconds"),
+    ("youtube_pause_bool", lambda c: c.update(youtube_pause_seconds=True), "youtube_pause_seconds"),
     ("channels_in_settings", lambda c: c.update(channels=[]), "channels"),
 ]
 
@@ -137,6 +141,7 @@ def test_repo_planer_json_and_channels_example_load_together(
         auto_start=True,
         set_thumbnail=True,
         category_id="22",
+        youtube_pause_seconds=2,
     )
     assert [channel.account_name for channel in config.channels] == ["Канал UA", "Канал RU"]
     assert config.channels[1].languages == ("ru", "en")
@@ -241,6 +246,21 @@ def test_invalid_settings_are_rejected_with_key_path(
     assert raised.value.key_path == key_path
     assert raised.value.kind is ConfigProblem.INVALID
     assert str(path) in str(raised.value)
+
+
+def test_zero_youtube_pause_is_accepted(tmp_path: Path) -> None:
+    settings: dict[str, Any] = copy.deepcopy(BASE_SETTINGS)
+    settings["youtube_pause_seconds"] = 0
+    assert load_settings(_write_settings(tmp_path, settings)).youtube_pause_seconds == 0
+
+
+def test_missing_youtube_pause_names_the_field(tmp_path: Path) -> None:
+    """Умолчания нет: планер, собранный до поля, не должен молча обращаться к YouTube без паузы."""
+    settings: dict[str, Any] = copy.deepcopy(BASE_SETTINGS)
+    settings.pop("youtube_pause_seconds")
+    with pytest.raises(ConfigError, match="youtube_pause_seconds") as raised:
+        load_settings(_write_settings(tmp_path, settings))
+    assert raised.value.kind is ConfigProblem.FIELD_MISSING
 
 
 @pytest.mark.parametrize("field", MISSING_SETTINGS)

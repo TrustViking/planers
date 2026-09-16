@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,13 +25,14 @@ from app.output.report import (
     build_totals,
     build_undated_warning_lines,
     build_warning_lines,
+    error_texts,
     render_report,
     skip_text,
     write_report,
 )
 from app.package.bcast import BcastScan, scan_bcast
 from app.paths import PlanerPaths
-from app.pipeline.plan import Decision, OutcomeError, PlannedBroadcast
+from app.pipeline.plan import WARNING_STEP_THUMBNAIL, Decision, OutcomeError, OutcomeWarning, PlannedBroadcast
 from app.pipeline.selection import Selection, build_planned
 from app.platforms.base import CreatedBroadcast, PlatformNotice, PlatformNoticeKind, StreamInfo, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
@@ -51,7 +52,7 @@ TZ_SAMPLE_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 13-09-2026 12:
 - 18-09-2026 19:00 uk -> Канал UA — форма не подтвердила запись ответа (notConfirmed); эфир на канале стоит — передайте ключ стримеру из keys.txt вручную
 
 ## Ошибки
-- 19-09-2026 19:00 uk -> Канал UA — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)
+- 19-09-2026 19:00 uk -> Канал UA — YouTube: {msg.YOUTUBE_REASON_TEXT['liveStreamingNotEnabled']} (liveStreamingNotEnabled)
 
 ## Создано (2)
 - 16-09-2026 19:00 uk -> Канал UA — эфир создан, ключ передан в форму
@@ -92,7 +93,7 @@ STATUS_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00
 Итог: уже стояло 1, ошибок 1. Файл ключей: keystreams\\keys.txt
 
 ## Ошибки
-- Test RU — YouTube: quotaExceeded (квота исчерпана)
+- Test RU — YouTube: {msg.YOUTUBE_REASON_TEXT['quotaExceeded']} (quotaExceeded)
 
 ## Запланировано на каналах (1)
 - 17-03-2027 19:00 uk -> Test UA — https://www.youtube.com/watch?v=abc
@@ -411,3 +412,46 @@ def test_write_report_uses_stamped_name(planer_paths: PlanerPaths) -> None:
     path: Path = write_report(planer_paths, "текст\n", datetime(2027, 3, 16, 12, 0, 5))
     assert path == planer_paths.logs_dir / "16-03-2027_120005_report.md"
     assert path.read_text(encoding="utf-8") == "текст\n"
+
+
+def _thumbnail_item(code: str, message: str) -> PlannedBroadcast:
+    item: PlannedBroadcast = build_planned_object(
+        build_slot(datetime(2027, 3, 17, 19, 0, tzinfo=timezone(timedelta(hours=2))), "uk"),
+        build_config().channels[0],
+    )
+    item.warn(OutcomeWarning(WARNING_STEP_THUMBNAIL, code, message))
+    return item
+
+
+def test_thumbnail_upload_limit_is_explained_without_verified_channel_hint() -> None:
+    [line] = build_run_warning_lines([_thumbnail_item("uploadRateLimitExceeded", "HTTP 429: limit")])
+    assert line == (
+        "17-03-2027 19:00 uk -> yt_ua: " + msg.WARNING_STEP_TEXT["thumbnail"] + " — "
+        + msg.THUMBNAIL_REASON_TEXT["uploadRateLimitExceeded"]
+    )
+    assert "подтверждённ" not in line and "подтвердите" not in line
+
+
+def test_unknown_thumbnail_reason_keeps_code_and_google_message() -> None:
+    [line] = build_run_warning_lines([_thumbnail_item("somethingNew", "HTTP 400: странное")])
+    assert line.endswith(msg.WARNING_STEP_TEXT["thumbnail"] + " — somethingNew (HTTP 400: странное)")
+
+
+def test_youtube_error_with_known_reason_is_explained_with_code() -> None:
+    outcome: PairOutcome = PairOutcome(
+        OutcomeKind.ERROR, "Канал UA", "17-03-2027", "19:00", "uk",
+        error=OutcomeError("youtube", "quotaExceeded", "HTTP 403: quota"),
+    )
+    [line] = error_texts(RunReport(mode=RunMode.FULL, generated_at_text="x", outcomes=[outcome]))
+    assert line == (
+        "17-03-2027 19:00 uk -> Канал UA — YouTube: " + msg.YOUTUBE_REASON_TEXT["quotaExceeded"] + " (quotaExceeded)"
+    )
+
+
+def test_youtube_error_with_unknown_reason_keeps_old_format() -> None:
+    outcome: PairOutcome = PairOutcome(
+        OutcomeKind.ERROR, "Канал UA", "17-03-2027", "19:00", "uk",
+        error=OutcomeError("youtube", "somethingNew", "HTTP 400: странное"),
+    )
+    [line] = error_texts(RunReport(mode=RunMode.FULL, generated_at_text="x", outcomes=[outcome]))
+    assert line == "17-03-2027 19:00 uk -> Канал UA — YouTube: somethingNew (HTTP 400: странное)"

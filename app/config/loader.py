@@ -41,9 +41,17 @@ class ConfigProblem(str, Enum):
 CONFIG_ENCODING: Final[str] = "utf-8"
 FACEBOOK_PLATFORM: Final[str] = "facebook"
 MIN_LEAD_MINUTES_MINIMUM: Final[int] = 0
+YOUTUBE_PAUSE_SECONDS_MINIMUM: Final[int] = 0
 KEEP_DAYS_MINIMUM: Final[int] = 1
 CHANNELS_KEY: Final[str] = "channels"
-SETTINGS_KEYS: Final[tuple[str, ...]] = ("min_lead_minutes", "keep_days", "auto_start", "set_thumbnail", "category_id")
+SETTINGS_KEYS: Final[tuple[str, ...]] = (
+    "min_lead_minutes",
+    "keep_days",
+    "auto_start",
+    "set_thumbnail",
+    "category_id",
+    "youtube_pause_seconds",
+)
 CHANNELS_TOP_LEVEL_KEYS: Final[tuple[str, ...]] = (CHANNELS_KEY,)
 CHANNEL_KEYS: Final[tuple[str, ...]] = ("platform", "account_name", "google_account", "languages", "privacy")
 AUTH_ALL: Final[str] = "all"  # --auth all: все каналы из channels.json; каналом с таким именем быть не может
@@ -97,13 +105,14 @@ class ChannelConfig:
 
 @dataclass(frozen=True)
 class PlanerSettings:
-    """Пять полей planer.json: действуют на все каналы."""
+    """Шесть полей planer.json: действуют на все каналы."""
 
     min_lead_minutes: int
     keep_days: int
     auto_start: bool
     set_thumbnail: bool
     category_id: str      # категория эфира на площадке; по справочнику YouTube не проверяется
+    youtube_pause_seconds: int   # наименьший промежуток между любыми двумя обращениями к YouTube
 
 
 @dataclass(frozen=True)
@@ -223,6 +232,9 @@ class _ConfigParser:
             auto_start=self._bool(root, "auto_start", prefix=""),
             set_thumbnail=self._bool(root, "set_thumbnail", prefix=""),
             category_id=self._text(root, "category_id", prefix=""),
+            youtube_pause_seconds=self._int(
+                root, "youtube_pause_seconds", prefix="", minimum=YOUTUBE_PAUSE_SECONDS_MINIMUM
+            ),
         )
 
     def parse_channels(self, raw: Any) -> tuple[ChannelConfig, ...]:

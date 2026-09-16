@@ -37,7 +37,8 @@ CONFIG_CHANNELS_TEMPLATE: Final[str] = """{
   ]
 }"""
 CONFIG_PLANER_TEMPLATE: Final[str] = """{"min_lead_minutes": 60, "keep_days": 30,
- "auto_start": true, "set_thumbnail": true, "category_id": "22"}"""
+ "auto_start": true, "set_thumbnail": true, "category_id": "22",
+ "youtube_pause_seconds": 2}"""
 CONFIG_PROBLEM_FILE_MISSING: Final[str] = "файла нет"
 CONFIG_PROBLEM_JSON: Final[str] = "файл не читается как JSON: {error}"
 CONFIG_PROBLEM_NOT_MAPPING: Final[str] = "нужен объект JSON в фигурных скобках"
@@ -169,6 +170,7 @@ OUTCOME_STREAM_ATTACHED: Final[str] = (
     "{prefix} — эфир был без потока, поток привязан, {form}"
 )
 WARNING_LINE: Final[str] = "{prefix}: {step} — {code} ({message})"
+WARNING_REASON_LINE: Final[str] = "{prefix}: {step} — {reason}"   # причина отказа известна: текст вместо кода
 # ключи — WARNING_STEP_* (app/pipeline/plan.py)
 MISMATCH_LINE: Final[str] = "{prefix}: {field} — хотели: {wanted}; на платформе: {actual}"
 # поля спеки называются по CHANGED_FIELD_TEXT; здесь — только то, чего в спеке нет
@@ -208,7 +210,7 @@ MISMATCH_DESCRIPTION: Final[str] = "{length} символов, начало «{h
 AUDIENCE_NOT_FOR_KIDS: Final[str] = "не для детей"
 AUDIENCE_FOR_KIDS: Final[str] = "для детей"
 WARNING_STEP_TEXT: Final[dict[str, str]] = {
-    "thumbnail": "обложка не поставлена (нужен подтверждённый канал); эфир и ключ в силе",
+    "thumbnail": "обложка не поставлена; эфир и ключ в силе",
     "language": "язык эфира не записан; эфир и ключ в силе",
     "audience": "аудитория эфира была «для детей» (настройка канала) — планер снял её; проверьте настройки канала",
     "settings": "не удалось применить настройки эфира (язык, категория, аудитория); эфир и ключ в силе",
@@ -220,6 +222,60 @@ OUTCOME_AMBIGUOUS: Final[str] = (
     "не могу различить — разберитесь вручную"
 )
 OUTCOME_ERROR: Final[str] = "{prefix} — {origin}: {code} ({message})"
+OUTCOME_ERROR_EXPLAINED: Final[str] = "{prefix} — {origin}: {reason} ({code})"
+# Причины отказа YouTube (errors[0].reason и коды платформы) → текст для владельца.
+# Для шага обложки THUMBNAIL_REASON_TEXT главнее общего; причины нет — остаётся код и сообщение Google.
+THUMBNAIL_REASON_TEXT: Final[dict[str, str]] = {
+    "uploadRateLimitExceeded": (
+        "YouTube временно ограничил загрузку обложек на этом канале и срок не сообщает; остальные обложки "
+        "канала в этом запуске не ставились — следующий запуск доставит их сам, запустите через несколько часов"
+    ),
+    "forbidden": (
+        "YouTube не разрешает этому каналу свои обложки — подтвердите канал по телефону в Студии "
+        "(расширенные функции)"
+    ),
+    "invalidImage": "YouTube не принял картинку превью из пакета",
+}
+_RATE_LIMIT_TEXT: Final[str] = (
+    "YouTube отклонил слишком частые запросы, повторы не помогли — запустите планер позже "
+    "или увеличьте youtube_pause_seconds в secrets\\planer.json"
+)
+_ACCESS_TEXT: Final[str] = (
+    "доступ к каналу отозван или недостаточен — удалите файл токена канала в secrets\\ и запустите планер: "
+    "он откроет вход заново"
+)
+_CLOSED_TEXT: Final[str] = "канал или аккаунт закрыт на YouTube"
+_SUSPENDED_TEXT: Final[str] = "канал или аккаунт заблокирован YouTube"
+YOUTUBE_REASON_TEXT: Final[dict[str, str]] = {
+    "quotaExceeded": (
+        "исчерпана суточная квота YouTube API (одна на проект Google — на все каналы и броадкастер); "
+        "остальные обращения к YouTube в этом запуске не делались; квота обновляется около 10:00 по Киеву — "
+        "запустите планер после этого"
+    ),
+    "rateLimitExceeded": _RATE_LIMIT_TEXT,
+    "userRateLimitExceeded": _RATE_LIMIT_TEXT,
+    "userRequestsExceedRateLimit": _RATE_LIMIT_TEXT,
+    "liveStreamingNotEnabled": (
+        "на канале не включены прямые трансляции — включите их в Студии (YouTube включает до 24 часов)"
+    ),
+    "livePermissionBlocked": "YouTube запретил трансляции на канале — причина указана в Студии",
+    "insufficientLivePermissions": "аккаунт не может создавать трансляции на этом канале",
+    "userBroadcastsExceedLimit": (
+        "на канале слишком много запланированных эфиров, YouTube не даёт создать новые — удалите лишние в Студии"
+    ),
+    "authError": _ACCESS_TEXT,
+    "insufficientPermissions": _ACCESS_TEXT,
+    "channelClosed": _CLOSED_TEXT,
+    "authenticatedUserAccountClosed": _CLOSED_TEXT,
+    "channelSuspended": _SUSPENDED_TEXT,
+    "authenticatedUserAccountSuspended": _SUSPENDED_TEXT,
+    "authenticatedUserNotChannel": "у аккаунта нет канала YouTube — при входе выберите канал",
+    "videoNotFound": "эфир не найден на YouTube — возможно, удалён во время запуска",
+    "invalidScheduledStartTime": "YouTube не принял время старта эфира",
+    "transportFailed": (
+        "YouTube недоступен (сеть или сбой на стороне YouTube), повторы не помогли — запустите планер позже"
+    ),
+}
 OUTCOME_PLANER_ERROR: Final[str] = "{prefix} — {text}"
 OUTCOME_DRY_RUN_SUFFIX: Final[str] = " — не выполнено (dry-run)"
 FORM_MARK_SENT: Final[str] = "ключ передан в форму"

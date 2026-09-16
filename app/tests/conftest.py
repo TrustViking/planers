@@ -82,6 +82,7 @@ def build_config(
     auto_start: bool = True,
     set_thumbnail: bool = True,
     category_id: str = "22",
+    youtube_pause_seconds: int = 0,
 ) -> PlanerConfig:
     """Каналы — пары (account_name, языки); настройки — как в secrets\\planer.json."""
     return PlanerConfig(
@@ -91,6 +92,7 @@ def build_config(
             auto_start=auto_start,
             set_thumbnail=set_thumbnail,
             category_id=category_id,
+            youtube_pause_seconds=youtube_pause_seconds,
         ),
         channels=tuple(
             ChannelConfig(

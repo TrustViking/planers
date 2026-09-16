@@ -103,7 +103,10 @@ def test_full_create_failure_is_an_error_and_sends_nothing(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.exit_code == ExitCode.ERRORS
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.ERROR
-    assert "YouTube: liveStreamingNotEnabled (на канале не включены трансляции)" in _report_text(outcome)
+    assert (
+        f"YouTube: {msg.YOUTUBE_REASON_TEXT['liveStreamingNotEnabled']} (liveStreamingNotEnabled)"
+        in _report_text(outcome)
+    )
     assert form_sender.calls == []
 
 
@@ -343,6 +346,21 @@ def test_thumbnail_failure_is_a_warning_not_an_error(
     assert outcome.exit_code == ExitCode.OK
     assert outcome.report is not None and len(outcome.report.warnings) == 1
     assert "обложка не поставлена" in _report_text(outcome)
+    assert msg.THUMBNAIL_REASON_TEXT["forbidden"] in _report_text(outcome)
+
+
+def test_thumbnail_upload_limit_reaches_console_and_report_as_limit_text(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk", previews=1)])
+    fake_platform.fail_thumbnail["fakebc00001"] = PlatformError("uploadRateLimitExceeded", "HTTP 429: limit")
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.exit_code == ExitCode.OK and outcome.report is not None
+    console: str = render_console(outcome.report, root=planer_paths.root)
+    for text in (console, _report_text(outcome)):
+        assert msg.THUMBNAIL_REASON_TEXT["uploadRateLimitExceeded"] in text
+        assert "подтверждённый канал" not in text
 
 
 def test_video_settings_failure_is_a_warning_not_an_error(

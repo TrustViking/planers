@@ -11,7 +11,6 @@ from googleapiclient.errors import HttpError
 from dataclasses import replace
 
 from app.config.loader import ChannelConfig, Platform, Privacy
-from app.google import api_retry
 from app.platforms import youtube as youtube_module
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
@@ -25,7 +24,14 @@ from app.platforms.base import (
     UpcomingBroadcast,
     VideoFixes,
 )
-from app.platforms.youtube import YOUTUBE_STREAM_KEY_PATTERN, YouTubePlatform
+from app.platforms.youtube import (
+    ERROR_AUTH,
+    RETRY_MAX_ATTEMPTS,
+    YOUTUBE_STREAM_KEY_PATTERN,
+    ErrorBehavior,
+    YouTubePlatform,
+    _error_behavior,
+)
 
 CHANNEL: ChannelConfig = ChannelConfig(
     platform=Platform.YOUTUBE,
@@ -34,6 +40,7 @@ CHANNEL: ChannelConfig = ChannelConfig(
     languages=("uk",),
     privacy=Privacy.PUBLIC,
 )
+OTHER_CHANNEL: ChannelConfig = replace(CHANNEL, account_name="Канал RU", google_account="ru@gmail.com")
 GOOD_KEY: str = "abcd-1234-efgh-5678-ijkl"
 
 
@@ -47,13 +54,35 @@ class _FakeRequest:
         return self._response
 
 
+class _FakeClock:
+    """time для youtube.py: sleep двигает часы, сами запросы времени не занимают."""
+
+    def __init__(self) -> None:
+        self.now: float = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class _FakeResource:
     """Ресурс googleapiclient: .list(**kwargs) → объект с .execute()."""
 
-    def __init__(self, responses: list[Any], calls: list[dict[str, Any]], name: str) -> None:
+    def __init__(
+        self,
+        responses: list[Any],
+        calls: list[dict[str, Any]],
+        name: str,
+        clock: _FakeClock | None = None,
+    ) -> None:
         self._responses: list[Any] = responses
         self._calls: list[dict[str, Any]] = calls
         self._name: str = name
+        self._clock: _FakeClock | None = clock
 
     def list(self, **kwargs: Any) -> _FakeRequest:
         return self._call("list", **kwargs)
@@ -65,21 +94,25 @@ class _FakeResource:
         return lambda **kwargs: self._call(method, **kwargs)
 
     def _call(self, method: str, **kwargs: Any) -> _FakeRequest:
-        self._calls.append({"resource": self._name, "method": method, **kwargs})
+        call: dict[str, Any] = {"resource": self._name, "method": method, **kwargs}
+        if self._clock is not None:
+            call["at"] = self._clock.now      # момент запроса: для проверки паузы
+        self._calls.append(call)
         if not self._responses:
             raise AssertionError(f"неожиданный вызов {self._name}.{method}")
         return _FakeRequest(self._responses.pop(0))
 
 
 class _FakeService:
-    def __init__(self, **responses: list[Any]) -> None:
+    def __init__(self, clock: _FakeClock | None = None, **responses: list[Any]) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._clock: _FakeClock | None = clock
         self._resources: dict[str, _FakeResource] = {
-            name: _FakeResource(list(items), self.calls, name) for name, items in responses.items()
+            name: _FakeResource(list(items), self.calls, name, clock) for name, items in responses.items()
         }
 
     def _resource(self, name: str) -> _FakeResource:
-        return self._resources.setdefault(name, _FakeResource([], self.calls, name))
+        return self._resources.setdefault(name, _FakeResource([], self.calls, name, self._clock))
 
     def channels(self) -> _FakeResource:
         return self._resource("channels")
@@ -101,7 +134,15 @@ class _FakeService:
 def platform(tmp_path: Path) -> YouTubePlatform:
     client_secret: Path = tmp_path / "client_secret.json"
     client_secret.write_text("{}", encoding="utf-8")
-    return YouTubePlatform(client_secret, tmp_path)
+    return YouTubePlatform(client_secret, tmp_path, request_pause_sec=0)
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    """Часы и паузы youtube.py — поддельные: повторы и пауза между обращениями проверяются без ожидания."""
+    fake: _FakeClock = _FakeClock()
+    monkeypatch.setattr(youtube_module, "time", fake)
+    return fake
 
 
 def _install(
@@ -425,18 +466,245 @@ def test_http_error_becomes_platform_error_with_google_reason(
 def test_transport_failure_becomes_platform_error(
     platform: YouTubePlatform,
     monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
 ) -> None:
-    monkeypatch.setattr(api_retry.time, "sleep", lambda seconds: None)   # без пауз между попытками
-    monkeypatch.setattr(youtube_module.time, "sleep", lambda seconds: None)
-    attempts: int = youtube_module.RETRY_MAX_ATTEMPTS * youtube_module.RETRY_MAX_ATTEMPTS
-    _install(
+    service: _FakeService = _install(
         platform,
         monkeypatch,
-        _FakeService(liveBroadcasts=[ConnectionError("нет сети")] * attempts),
+        _FakeService(liveBroadcasts=[ConnectionError("нет сети")] * RETRY_MAX_ATTEMPTS),
     )
     with pytest.raises(PlatformError) as raised:
         platform.list_upcoming(CHANNEL)
     assert raised.value.code == "transportFailed"
+    assert len(service.calls) == RETRY_MAX_ATTEMPTS
+    assert clock.sleeps == [1.0, 2.0, 4.0]
+
+
+def _platform_with_pause(tmp_path: Path, pause: int) -> YouTubePlatform:
+    client_secret: Path = tmp_path / "client_secret.json"
+    client_secret.write_text("{}", encoding="utf-8")
+    return YouTubePlatform(client_secret, tmp_path, request_pause_sec=pause)
+
+
+def _stream_list(stream_id: str = "S1") -> dict[str, Any]:
+    return {"items": [{"id": stream_id, "snippet": {"title": "m"}, "cdn": {"ingestionInfo": {}}}]}
+
+
+def test_pause_keeps_requests_apart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock) -> None:
+    platform: YouTubePlatform = _platform_with_pause(tmp_path, 2)
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(clock, liveStreams=[_stream_list(), _stream_list(), _stream_list()])
+    )
+    for _ in range(3):
+        platform.get_stream(CHANNEL, "S1")
+    moments: list[float] = [call["at"] for call in service.calls]
+    assert all(later - earlier >= 2 for earlier, later in zip(moments, moments[1:]))
+    assert clock.sleeps == [2, 2]                       # перед первым обращением ждать нечего
+
+
+def test_retry_pause_counts_toward_the_request_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    """Пауза повтора 1 с дополняется до 2 с; паузы 2 и 4 с её уже покрывают — лишнего sleep нет."""
+    platform: YouTubePlatform = _platform_with_pause(tmp_path, 2)
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(clock, liveBroadcasts=[_http_error(503, "backendError", "x")] * 3 + [{"items": []}]),
+    )
+    assert platform.list_upcoming(CHANNEL) == []
+    assert clock.sleeps == [1.0, 1.0, 2.0, 4.0]
+    moments: list[float] = [call["at"] for call in service.calls]
+    assert all(later - earlier >= 2 for earlier, later in zip(moments, moments[1:]))
+
+
+def test_zero_pause_never_sleeps(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock) -> None:
+    _install(platform, monkeypatch, _FakeService(clock, liveStreams=[_stream_list(), _stream_list()]))
+    platform.get_stream(CHANNEL, "S1")
+    platform.get_stream(CHANNEL, "S1")
+    assert clock.sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("operation", "status", "reason", "behavior"),
+    [
+        ("thumbnails.set", 429, "uploadRateLimitExceeded", ErrorBehavior.OPERATION),
+        ("thumbnails.set", 403, "forbidden", ErrorBehavior.OPERATION),
+        ("liveBroadcasts.list", 403, "forbidden", ErrorBehavior.CALL),
+        ("liveBroadcasts.list", 403, "quotaExceeded", ErrorBehavior.PROJECT),
+        ("liveBroadcasts.list", 401, "authError", ErrorBehavior.CHANNEL),
+        ("channels.list", None, ERROR_AUTH, ErrorBehavior.CHANNEL),
+        ("liveBroadcasts.insert", 403, "liveStreamingNotEnabled", ErrorBehavior.OPERATION),
+        ("liveBroadcasts.list", 500, "backendError", ErrorBehavior.RETRY),
+        ("liveBroadcasts.list", 429, "somethingNew", ErrorBehavior.RETRY),
+        ("liveBroadcasts.list", 502, "somethingNew", ErrorBehavior.RETRY),
+        ("liveBroadcasts.list", 403, "somethingNew", ErrorBehavior.CALL),
+        ("videos.list", 404, "videoNotFound", ErrorBehavior.CALL),
+        ("channels.list", None, "channelNotFound", ErrorBehavior.CALL),
+    ],
+)
+def test_error_behavior_table(operation: str, status: int | None, reason: str, behavior: ErrorBehavior) -> None:
+    assert _error_behavior(operation, status, reason) is behavior
+
+
+def test_upload_limit_stops_thumbnails_of_that_channel_only(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            thumbnails=[_http_error(429, "uploadRateLimitExceeded", "лимит"), {}],
+            liveBroadcasts=[{"items": []}],
+        ),
+    )
+    with pytest.raises(PlatformError) as first:
+        platform.set_thumbnail(CHANNEL, "B1", b"jpg")
+    assert first.value.code == "uploadRateLimitExceeded"
+    assert len(service.calls) == 1 and clock.sleeps == []      # ни повторов, ни пауз повтора
+    with pytest.raises(PlatformError) as second:
+        platform.set_thumbnail(CHANNEL, "B2", b"jpg")          # без запроса
+    assert second.value.code == "uploadRateLimitExceeded"
+    assert len(service.calls) == 1
+    platform.set_thumbnail(OTHER_CHANNEL, "B3", b"jpg")        # другой канал — с запросом
+    platform.list_upcoming(CHANNEL)                            # другая операция того же канала — с запросом
+    assert [(call["resource"], call["method"]) for call in service.calls] == [
+        ("thumbnails", "set"),
+        ("thumbnails", "set"),
+        ("liveBroadcasts", "list"),
+    ]
+
+
+def test_forbidden_thumbnail_is_remembered_but_forbidden_list_is_not(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    forbidden: HttpError = _http_error(403, "forbidden", "нельзя")
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(thumbnails=[forbidden], liveBroadcasts=[forbidden, {"items": []}])
+    )
+    for _ in range(2):
+        with pytest.raises(PlatformError, match="forbidden"):
+            platform.set_thumbnail(CHANNEL, "B1", b"jpg")
+    with pytest.raises(PlatformError, match="forbidden"):
+        platform.list_upcoming(CHANNEL)
+    assert platform.list_upcoming(CHANNEL) == []               # CALL: следующий такой же вызов идёт в сеть
+    assert [call["resource"] for call in service.calls] == ["thumbnails", "liveBroadcasts", "liveBroadcasts"]
+
+
+def test_quota_exceeded_stops_every_channel(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(liveBroadcasts=[_http_error(403, "quotaExceeded", "квота")])
+    )
+    with pytest.raises(PlatformError, match="quotaExceeded"):
+        platform.list_upcoming(CHANNEL)
+    with pytest.raises(PlatformError, match="quotaExceeded"):
+        platform.list_upcoming(OTHER_CHANNEL)
+    with pytest.raises(PlatformError, match="quotaExceeded"):
+        platform.get_stream(CHANNEL, "S1")
+    assert len(service.calls) == 1
+
+
+def test_auth_error_stops_only_that_channel(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveBroadcasts=[_http_error(401, "authError", "токен отозван"), {"items": []}]),
+    )
+    with pytest.raises(PlatformError, match="authError"):
+        platform.list_upcoming(CHANNEL)
+    with pytest.raises(PlatformError, match="authError"):
+        platform.get_stream(CHANNEL, "S1")
+    assert platform.list_upcoming(OTHER_CHANNEL) == []
+    assert len(service.calls) == 2
+
+
+def test_failed_login_is_not_repeated(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Отказ входа — отказ канала: браузер за запуск второй раз не открывается."""
+    attempts: list[str] = []
+
+    def _service(channel: ChannelConfig) -> Any:
+        attempts.append(channel.account_name)
+        raise PlatformError(ERROR_AUTH, "flow_failed: отказ")
+
+    monkeypatch.setattr(platform, "_service", _service)
+    for _ in range(2):
+        with pytest.raises(PlatformError, match=ERROR_AUTH):
+            platform.list_upcoming(CHANNEL)
+    assert attempts == [CHANNEL.account_name]
+
+
+def test_live_streaming_disabled_stops_inserts_of_that_channel(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveBroadcasts=[_http_error(403, "liveStreamingNotEnabled", "выключено"), {"items": []}]),
+    )
+    spec: BroadcastSpec = _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc))
+    for _ in range(2):
+        with pytest.raises(PlatformError, match="liveStreamingNotEnabled"):
+            platform.create_broadcast(CHANNEL, spec)
+    assert platform.list_upcoming(CHANNEL) == []
+    assert [call["method"] for call in service.calls] == ["insert", "list"]
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "code"),
+    [
+        (500, "backendError", "transportFailed"),
+        (503, "somethingNew", "transportFailed"),
+        (403, "rateLimitExceeded", "rateLimitExceeded"),
+        (403, "userRateLimitExceeded", "userRateLimitExceeded"),
+        (429, "somethingNew", "somethingNew"),
+    ],
+)
+def test_retried_refusal_after_all_attempts(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+    status: int,
+    reason: str,
+    code: str,
+) -> None:
+    """5xx и сеть после всех попыток — transportFailed; лимит частоты сохраняет свою причину."""
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(liveBroadcasts=[_http_error(status, reason, "x")] * RETRY_MAX_ATTEMPTS)
+    )
+    with pytest.raises(PlatformError) as raised:
+        platform.list_upcoming(CHANNEL)
+    assert raised.value.code == code
+    assert len(service.calls) == RETRY_MAX_ATTEMPTS
+    assert clock.sleeps == [1.0, 2.0, 4.0]
+
+
+def test_unknown_refusal_without_retry_status_is_asked_once(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(liveBroadcasts=[_http_error(403, "somethingNew", "x")])
+    )
+    with pytest.raises(PlatformError, match="somethingNew"):
+        platform.list_upcoming(CHANNEL)
+    assert len(service.calls) == 1 and clock.sleeps == []
 
 
 def _stream_response(key: str = GOOD_KEY) -> dict[str, Any]:
@@ -531,6 +799,7 @@ def test_login_callback_gets_the_channel_before_the_browser(tmp_path: Path, monk
     platform: YouTubePlatform = YouTubePlatform(
         client_secret,
         tmp_path,
+        request_pause_sec=0,
         on_login=lambda channel: logins.append(channel.account_name),
     )
     token_files: list[Path] = []

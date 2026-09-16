@@ -3,6 +3,10 @@
 Чтение: describe_channel, list_upcoming, get_stream. Планирование: create_broadcast,
 update_broadcast, attach_stream, apply_video_settings, set_stream_marker. Любой сбой наружу — только PlatformError.
 Всё, что уходит в эфир, берётся из BroadcastSpec: отправляемое и сравниваемое совпадают по построению.
+
+Все обращения к YouTube идут через YouTubePlatform._execute: пауза youtube_pause_seconds между
+обращениями, повторы и память отказов. Что делать с отказом, решает одна таблица — REASON_BEHAVIORS
+(и OPERATION_REASON_BEHAVIORS для пар «операция, причина»), функция _error_behavior.
 """
 from __future__ import annotations
 
@@ -10,7 +14,8 @@ import json
 import re
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
@@ -20,7 +25,6 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
 
 from app.config.loader import ChannelConfig
-from app.google.api_retry import GoogleApiRetryPolicy, execute_with_retry
 from app.google.auth import AuthError, load_credentials, token_file_for
 from app.core.dates import format_datetime_text
 from app.observability.logging_setup import get_logger, mask_stream_key
@@ -87,25 +91,91 @@ LOG_MISSING: Final[str] = "-"   # чего площадка не прислал�
 RETRY_MAX_ATTEMPTS: Final[int] = 4
 RETRY_BASE_DELAY_SEC: Final[float] = 1.0
 RETRY_MAX_DELAY_SEC: Final[float] = 8.0
-TRANSIENT_STATUS_CODES: Final[frozenset[int]] = frozenset({500, 502, 503, 504})
-RETRY_LOG_PREFIX: Final[str] = "youtube"
-RETRY_RESOURCE_LABEL: Final[str] = "channel"
+HTTP_SERVER_ERROR_MIN: Final[int] = 500
+HTTP_TOO_MANY_REQUESTS: Final[int] = 429
 
 
-def _transient_error(status_code: int, resource_id: str, error: Exception) -> Exception:
-    return PlatformError(ERROR_TRANSPORT, f"HTTP {status_code} on {resource_id}: {error}")
+class ErrorBehavior(str, Enum):
+    """Что делать с отказом YouTube. Решает только _error_behavior."""
+
+    RETRY = "retry"          # повторить с паузой
+    CALL = "call"            # не повторять; следующий такой же вызов — как обычно
+    OPERATION = "operation"  # не повторять; эту операцию на этом канале до конца запуска не вызывать
+    CHANNEL = "channel"      # не повторять; к этому каналу до конца запуска не обращаться
+    PROJECT = "project"      # не повторять; к YouTube до конца запуска не обращаться
 
 
-RETRY_POLICY: Final[GoogleApiRetryPolicy] = GoogleApiRetryPolicy(
-    max_retries=RETRY_MAX_ATTEMPTS,
-    base_delay_sec=RETRY_BASE_DELAY_SEC,
-    max_delay_sec=RETRY_MAX_DELAY_SEC,
-    transient_status_codes=TRANSIENT_STATUS_CODES,
-    connection_errors=(OSError,),
-    log_prefix=RETRY_LOG_PREFIX,
-    resource_label=RETRY_RESOURCE_LABEL,
-    transient_error_factory=_transient_error,
-)
+# Причины отказа (errors[0].reason в ответе Google) и коды самого планера — единственная таблица поведения.
+REASON_BEHAVIORS: Final[dict[str, ErrorBehavior]] = {
+    "backendError": ErrorBehavior.RETRY,
+    "internalError": ErrorBehavior.RETRY,
+    "rateLimitExceeded": ErrorBehavior.RETRY,
+    "userRateLimitExceeded": ErrorBehavior.RETRY,
+    "userRequestsExceedRateLimit": ErrorBehavior.RETRY,
+    "uploadRateLimitExceeded": ErrorBehavior.OPERATION,
+    "userBroadcastsExceedLimit": ErrorBehavior.OPERATION,
+    "liveStreamingNotEnabled": ErrorBehavior.OPERATION,
+    "livePermissionBlocked": ErrorBehavior.OPERATION,
+    "insufficientLivePermissions": ErrorBehavior.OPERATION,
+    "authError": ErrorBehavior.CHANNEL,
+    "insufficientPermissions": ErrorBehavior.CHANNEL,
+    "channelClosed": ErrorBehavior.CHANNEL,
+    "channelSuspended": ErrorBehavior.CHANNEL,
+    "authenticatedUserAccountClosed": ErrorBehavior.CHANNEL,
+    "authenticatedUserAccountSuspended": ErrorBehavior.CHANNEL,
+    "authenticatedUserNotChannel": ErrorBehavior.CHANNEL,
+    ERROR_AUTH: ErrorBehavior.CHANNEL,          # после отказа входа браузер повторно не открывается
+    "quotaExceeded": ErrorBehavior.PROJECT,
+    "invalidImage": ErrorBehavior.CALL,
+    "mediaBodyRequired": ErrorBehavior.CALL,
+    "videoNotFound": ErrorBehavior.CALL,
+    ERROR_BAD_RESPONSE: ErrorBehavior.CALL,
+    ERROR_UNEXPECTED_KEY: ErrorBehavior.CALL,
+    ERROR_CHANNEL_NOT_FOUND: ErrorBehavior.CALL,   # совпадает с причиной Google channelNotFound
+}
+# Пара (операция, причина) главнее причины: forbidden у обложки — канал не подтверждён, у прочих — разовый отказ.
+OPERATION_REASON_BEHAVIORS: Final[dict[tuple[str, str], ErrorBehavior]] = {
+    ("thumbnails.set", "forbidden"): ErrorBehavior.OPERATION,
+}
+# Ключ памяти отказов: (канал, операция); None — «любой».
+RefusalKey = tuple[str | None, str | None]
+
+
+def _error_behavior(operation: str, http_status: int | None, reason: str) -> ErrorBehavior:
+    """Единственное место решения. Причины нет в таблицах — по HTTP-коду: 5xx и 429 повторяем, прочее — нет."""
+    paired: ErrorBehavior | None = OPERATION_REASON_BEHAVIORS.get((operation, reason))
+    if paired is not None:
+        return paired
+    known: ErrorBehavior | None = REASON_BEHAVIORS.get(reason)
+    if known is not None:
+        return known
+    if http_status is not None and (http_status >= HTTP_SERVER_ERROR_MIN or http_status == HTTP_TOO_MANY_REQUESTS):
+        return ErrorBehavior.RETRY
+    return ErrorBehavior.CALL
+
+
+def _retry_delay(attempt: int) -> float:
+    """Нарастающая пауза перед повтором: 1, 2, 4 с, не больше RETRY_MAX_DELAY_SEC."""
+    return min(RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)), RETRY_MAX_DELAY_SEC)
+
+
+def _refusal_key(behavior: ErrorBehavior, account_name: str, operation: str) -> RefusalKey | None:
+    if behavior is ErrorBehavior.OPERATION:
+        return (account_name, operation)
+    if behavior is ErrorBehavior.CHANNEL:
+        return (account_name, None)
+    if behavior is ErrorBehavior.PROJECT:
+        return (None, None)
+    return None
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """Отказ одной попытки: что поднять и как с ним поступить."""
+
+    error: PlatformError
+    behavior: ErrorBehavior
+    http_status: int | None
 
 
 class YouTubePlatform:
@@ -113,17 +183,23 @@ class YouTubePlatform:
 
     Настройки эфира площадка не хранит: всё, что уходит в эфир, приходит готовой спекой (§7.4).
     on_login вызывается ровно перед открытием браузера для входа в канал.
+    request_pause_sec — youtube_pause_seconds из planer.json: наименьший промежуток между обращениями.
     """
 
     def __init__(
         self,
         client_secret_file: Path,
         secrets_dir: Path,
+        *,
+        request_pause_sec: int,
         on_login: Callable[[ChannelConfig], None] | None = None,
     ) -> None:
         self._client_secret_file: Path = client_secret_file
         self._secrets_dir: Path = secrets_dir
+        self._request_pause_sec: int = request_pause_sec
         self._on_login: Callable[[ChannelConfig], None] | None = on_login
+        self._last_request_at: float | None = None   # time.monotonic() конца предыдущего обращения
+        self._refusals: dict[RefusalKey, tuple[PlatformError, ErrorBehavior]] = {}
         self._services: dict[str, Any] = {}
         self._channels: dict[str, ChannelInfo] = {}
         self._notices: list[PlatformNotice] = []   # замечания за запуск; забирает take_notices
@@ -496,43 +572,104 @@ class YouTubePlatform:
         return lambda: on_login(channel)
 
     def _execute(self, channel: ChannelConfig, operation: str, request_builder: Any) -> dict[str, Any]:
-        """Временная недоступность площадки (5xx) — не повод ронять канал: повторяем."""
+        """Единственная точка обращения к API: память отказов, пауза, повторы по _error_behavior."""
+        self._raise_if_refused(channel, operation)
+        service: Any = self._channel_service(channel, operation)
         for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+            self._wait_pause()
             try:
-                return self._execute_once(channel, operation, request_builder)
-            except PlatformError as error:
-                if error.code != ERROR_TRANSPORT or attempt >= RETRY_MAX_ATTEMPTS:
-                    raise
-                delay_sec: float = RETRY_POLICY.compute_delay(attempt)
-                LOGGER.warning(
-                    'request_retry operation=%s channel="%s" attempt=%d/%d delay_sec=%.1f code=%s',
-                    operation,
-                    channel.account_name,
-                    attempt,
-                    RETRY_MAX_ATTEMPTS,
-                    delay_sec,
-                    error.code,
+                response: Any = request_builder(service).execute()
+            except HttpError as error:
+                failure: _Failure = _http_failure(operation, error)
+            except OSError as error:
+                failure = _Failure(
+                    PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.account_name}: {error}"),
+                    ErrorBehavior.RETRY,
+                    None,
                 )
-                time.sleep(delay_sec)
+            else:
+                self._mark_request_done()
+                if not isinstance(response, dict):
+                    raise PlatformError(ERROR_BAD_RESPONSE, f"{operation} returned {type(response).__name__}")
+                return response
+            self._mark_request_done()
+            if failure.behavior is ErrorBehavior.RETRY and attempt < RETRY_MAX_ATTEMPTS:
+                _sleep_before_retry(channel, operation, attempt, failure)
+                continue
+            raise self._refuse(channel, operation, failure)
         raise PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.account_name}: retries exhausted")
 
-    def _execute_once(self, channel: ChannelConfig, operation: str, request_builder: Any) -> dict[str, Any]:
-        service: Any = self._service(channel)
+    def _wait_pause(self) -> None:
+        """Выждать остаток request_pause_sec от конца предыдущего обращения; паузы повторов входят в него."""
+        if self._request_pause_sec <= 0 or self._last_request_at is None:
+            return
+        remaining: float = self._request_pause_sec - (time.monotonic() - self._last_request_at)
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _mark_request_done(self) -> None:
+        self._last_request_at = time.monotonic()
+
+    def _channel_service(self, channel: ChannelConfig, operation: str) -> Any:
+        """Клиент канала; отказ входа — такой же отказ, как у запроса (ERROR_AUTH → CHANNEL)."""
         try:
-            response: Any = execute_with_retry(
-                policy=RETRY_POLICY,
-                logger=LOGGER,
-                operation_name=operation,
-                resource_id=channel.account_name,
-                request_callable=lambda: request_builder(service).execute(),
+            return self._service(channel)
+        except PlatformError as error:
+            behavior: ErrorBehavior = _error_behavior(operation, None, error.code)
+            raise self._refuse(channel, operation, _Failure(error, behavior, None)) from error
+
+    def _raise_if_refused(self, channel: ChannelConfig, operation: str) -> None:
+        """Запомненный отказ поднимается без обращения к сети и без паузы."""
+        for key in ((None, None), (channel.account_name, None), (channel.account_name, operation)):
+            remembered: tuple[PlatformError, ErrorBehavior] | None = self._refusals.get(key)
+            if remembered is None:
+                continue
+            error, behavior = remembered
+            LOGGER.info(
+                'request_skipped operation=%s channel="%s" reason=%s behavior=%s',
+                operation,
+                channel.account_name,
+                error.code,
+                behavior.value,
             )
-        except HttpError as error:
-            raise _platform_error_from_http(error) from error
-        except OSError as error:
-            raise PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.account_name}: {error}") from error
-        if not isinstance(response, dict):
-            raise PlatformError(ERROR_BAD_RESPONSE, f"{operation} returned {type(response).__name__}")
-        return response
+            raise error
+
+    def _refuse(self, channel: ChannelConfig, operation: str, failure: _Failure) -> PlatformError:
+        """Окончательный отказ: запомнить по поведению и вернуть ошибку для raise."""
+        error: PlatformError = failure.error
+        is_server_side: bool = failure.http_status is None or failure.http_status >= HTTP_SERVER_ERROR_MIN
+        if failure.behavior is ErrorBehavior.RETRY and is_server_side:
+            # 5xx и сеть после всех попыток — «YouTube недоступен»; лимит частоты сохраняет свою причину
+            error = PlatformError(ERROR_TRANSPORT, error.message)
+        LOGGER.warning(
+            'youtube_refused operation=%s channel="%s" http_status=%s reason=%s behavior=%s message="%s"',
+            operation,
+            channel.account_name,
+            failure.http_status if failure.http_status is not None else LOG_MISSING,
+            error.code,
+            failure.behavior.value,
+            error.message,
+        )
+        key: RefusalKey | None = _refusal_key(failure.behavior, channel.account_name, operation)
+        if key is not None:
+            self._refusals[key] = (error, failure.behavior)
+        return error
+
+
+
+def _sleep_before_retry(channel: ChannelConfig, operation: str, attempt: int, failure: _Failure) -> None:
+    delay_sec: float = _retry_delay(attempt)
+    LOGGER.warning(
+        'request_retry operation=%s channel="%s" attempt=%d/%d delay_sec=%.1f http_status=%s reason=%s',
+        operation,
+        channel.account_name,
+        attempt,
+        RETRY_MAX_ATTEMPTS,
+        delay_sec,
+        failure.http_status if failure.http_status is not None else LOG_MISSING,
+        failure.error.code,
+    )
+    time.sleep(delay_sec)   # через модуль time: тесты подменяют
 
 
 def _largest_thumbnail(thumbnails: dict[str, Any]) -> str | None:
@@ -761,14 +898,15 @@ def _warn_on_unexpected_key(account_name: str, stream: StreamInfo) -> None:
         )
 
 
-def _platform_error_from_http(error: HttpError) -> PlatformError:
-    reason, message = _google_error_details(error)
-    return PlatformError(reason, message)
+def _http_failure(operation: str, error: HttpError) -> _Failure:
+    status, reason, message = _google_error_details(error)
+    return _Failure(PlatformError(reason, message), _error_behavior(operation, status, reason), status)
 
 
-def _google_error_details(error: HttpError) -> tuple[str, str]:
-    """reason из тела ответа Google (liveStreamingNotEnabled и т.п.) + пояснение."""
-    status: Any = getattr(getattr(error, "resp", None), "status", None)
+def _google_error_details(error: HttpError) -> tuple[int | None, str, str]:
+    """HTTP-код, reason из тела ответа Google (liveStreamingNotEnabled и т.п.) и пояснение."""
+    raw_status: Any = getattr(getattr(error, "resp", None), "status", None)
+    status: int | None = _status_code(raw_status)
     payload: dict[str, Any] = _error_payload(error)
     body: dict[str, Any] = payload.get("error", {}) if isinstance(payload.get("error"), dict) else {}
     errors: Any = body.get("errors")
@@ -781,7 +919,16 @@ def _google_error_details(error: HttpError) -> tuple[str, str]:
         reason = str(body["status"])
     message: Any = body.get("message")
     detail: str = message if isinstance(message, str) and message else str(error)
-    return reason, f"HTTP {status}: {detail}" if status is not None else detail
+    return status, reason, f"HTTP {status}: {detail}" if status is not None else detail
+
+
+def _status_code(value: Any) -> int | None:
+    """resp.status у googleapiclient бывает и числом, и строкой."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def _error_payload(error: HttpError) -> dict[str, Any]:

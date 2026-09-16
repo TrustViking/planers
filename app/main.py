@@ -27,6 +27,7 @@ from app.config.loader import (
     ConfigError,
     Platform,
     PlanerConfig,
+    PlanerSettings,
     Privacy,
     allowed_values,
     load_planer_config,
@@ -111,9 +112,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_platform(paths: PlanerPaths, console: ChannelConsole) -> BroadcastPlatform:
-    """Боевая площадка; FakePlatform остаётся только для тестов. Настройки эфира площадка получает спекой."""
-    return YouTubePlatform(paths.client_secret_file, paths.secrets_dir, on_login=console.on_login)
+def build_platform(paths: PlanerPaths, console: ChannelConsole, settings: PlanerSettings) -> BroadcastPlatform:
+    """Боевая площадка; FakePlatform остаётся только для тестов.
+
+    Из planer.json площадка берёт только паузу между обращениями; настройки эфира она получает спекой.
+    """
+    return YouTubePlatform(
+        paths.client_secret_file,
+        paths.secrets_dir,
+        request_pause_sec=settings.youtube_pause_seconds,
+        on_login=console.on_login,
+    )
 
 
 def build_form_sender(paths: PlanerPaths, now_utc: datetime) -> FormSender:
@@ -194,7 +203,9 @@ def _build_dependencies(paths: PlanerPaths) -> _Dependencies | None:
         _say(msg.CLIENT_SECRET_MISSING.format(path=paths.client_secret_file))
         return None
     console: ChannelConsole = ChannelConsole()
-    platform: VerifiedPlatform = VerifiedPlatform(build_platform(paths, console), paths.channels_file, listener=console)
+    platform: VerifiedPlatform = VerifiedPlatform(
+        build_platform(paths, console, config.settings), paths.channels_file, listener=console
+    )
     return _Dependencies(config=config, platform=platform, console=console)
 
 

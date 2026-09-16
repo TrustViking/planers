@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Final
 
-from app.config.loader import ChannelConfig, PlanerConfig
+from app.config.loader import ChannelConfig, Platform, PlanerConfig
 from app.core.dates import FILE_STAMP_FORMAT
 from app.core.text import normalize_title
 from app.form.base import FORM_CODE_NOT_CONFIRMED
@@ -25,6 +25,7 @@ from app.paths import PlanerPaths
 from app.pipeline.plan import (
     WARNING_STEP_AMBIGUOUS,
     WARNING_STEP_REPORTED_FIELD,
+    WARNING_STEP_THUMBNAIL,
     BroadcastSpec,
     ChangedField,
     Decision,
@@ -374,12 +375,18 @@ def _warning_text(item: PlannedBroadcast, warning: OutcomeWarning) -> str:
         )
     if warning.step == WARNING_STEP_AMBIGUOUS:
         return msg.WARNING_AMBIGUOUS.format(prefix=prefix, urls=msg.AMBIGUOUS_URL_JOINER.join(item.ambiguous_urls))
-    return msg.WARNING_LINE.format(
-        prefix=prefix,
-        step=msg.WARNING_STEP_TEXT.get(warning.step, warning.step),
-        code=warning.code,
-        message=warning.message,
-    )
+    step: str = msg.WARNING_STEP_TEXT.get(warning.step, warning.step)
+    reason: str | None = _warning_reason_text(warning)
+    if reason is not None:
+        return msg.WARNING_REASON_LINE.format(prefix=prefix, step=step, reason=reason)
+    return msg.WARNING_LINE.format(prefix=prefix, step=step, code=warning.code, message=warning.message)
+
+
+def _warning_reason_text(warning: OutcomeWarning) -> str | None:
+    """Известная причина отказа — текстом; у шага обложки своя таблица главнее общей."""
+    if warning.step == WARNING_STEP_THUMBNAIL and warning.code in msg.THUMBNAIL_REASON_TEXT:
+        return msg.THUMBNAIL_REASON_TEXT[warning.code]
+    return msg.YOUTUBE_REASON_TEXT.get(warning.code)
 
 
 def spec_value_text(value: SpecValue) -> str:
@@ -717,6 +724,13 @@ def _error_text(outcome: PairOutcome, prefix: str) -> str:
     if error.origin in msg.PLANER_ERROR_TEXT_ORIGINS:
         text: str = msg.PLANER_ERROR_TEXT.get(error.code, error.code).format(detail=error.message)
         return msg.OUTCOME_PLANER_ERROR.format(prefix=prefix, text=text)
+    if error.origin == Platform.YOUTUBE.value and error.code in msg.YOUTUBE_REASON_TEXT:
+        return msg.OUTCOME_ERROR_EXPLAINED.format(
+            prefix=prefix,
+            origin=msg.ERROR_ORIGIN_TEXT.get(error.origin, error.origin),
+            reason=msg.YOUTUBE_REASON_TEXT[error.code],
+            code=error.code,
+        )
     return msg.OUTCOME_ERROR.format(
         prefix=prefix,
         origin=msg.ERROR_ORIGIN_TEXT.get(error.origin, error.origin),

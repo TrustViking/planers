@@ -233,7 +233,9 @@ def test_attention_collects_errors_forms_packages_restored_and_warnings() -> Non
     attention: list[str] = text.split("\n\n")[1].splitlines()
     assert msg.CONSOLE_BLOCK_ATTENTION in attention[0]
     assert (
-        "  ошибка: 20-03-2027 20:00 ru -> Osvald.X — YouTube: liveStreamingNotEnabled (на канале не включены трансляции)"
+        "  ошибка: 20-03-2027 20:00 ru -> Osvald.X — YouTube: "
+        + msg.YOUTUBE_REASON_TEXT["liveStreamingNotEnabled"]
+        + " (liveStreamingNotEnabled)"
     ) in attention
     assert "  пакет: broken.bcast — пакет повреждён: не ZIP-архив; файл не тронут" in attention
     assert f"  {UNDATED_WARNING}" in attention
@@ -283,7 +285,8 @@ def test_status_prints_total_attention_and_matched_only() -> None:
     lines: list[str] = text.splitlines()
     assert lines[0] == "Итог: уже стояло 1, ошибок 1"
     assert _block_titles(text) == ["ВНИМАНИЕ", "УЖЕ СТОЯЛО (1)"]
-    assert "  ошибка: Test RU — YouTube: quotaExceeded (квота исчерпана)" in lines
+    assert f"  ошибка: Test RU — YouTube: {msg.YOUTUBE_REASON_TEXT['quotaExceeded']} (quotaExceeded)" in lines
+    assert "квота исчерпана" not in text          # сообщение Google заменено текстом причины
     assert "    17-03-2027  19:00  ru  Эфир" in lines
     assert FULL_KEYS[0] not in text
 
