@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Final
 
 from app.core.dates import parse_date
+from app.core.text import normalize_handle
 from app.observability.logging_setup import mask_stream_key
 from app.output.report import (
     CREATED_OUTCOME_KINDS,
@@ -31,6 +32,7 @@ from app.output.report import (
     SkipKind,
     SkippedLine,
     build_totals,
+    channel_text,
     display_path,
     error_texts,
     form_reason_text,
@@ -63,7 +65,10 @@ def render_console(
     log_path: Path | None = None,
     channel_order: Sequence[str] = (),
 ) -> str:
-    """Готовый текст для консоли от «Итога» до подвала; печатает main.py. channel_order — порядок channels.json."""
+    """Готовый текст для консоли от «Итога» до подвала; печатает main.py.
+
+    channel_order — ключи каналов (ChannelConfig.key) в порядке channels.json.
+    """
     totals: RunTotals = build_totals(report)
     lines: list[str] = [
         _TOTALS[report.mode].format(
@@ -147,27 +152,34 @@ def _keys_block(report: RunReport, channel_order: Sequence[str]) -> tuple[str, l
 
 def _channel_lines(outcomes: list[PairOutcome], channel_order: Sequence[str], render: LineRender) -> list[str]:
     """Шапка канала один раз на группу; каналы — в порядке channels.json, внутри — по дате и времени."""
-    ranks: dict[str, int] = {name: index for index, name in enumerate(channel_order)}
+    ranks: dict[str, int] = {key: index for index, key in enumerate(channel_order)}
     for outcome in outcomes:
-        ranks.setdefault(outcome.account_name, len(ranks))
+        ranks.setdefault(_channel_key(outcome), len(ranks))
     ordered: list[PairOutcome] = sorted(
         outcomes,
-        key=lambda outcome: (ranks[outcome.account_name], parse_date(outcome.date or ""), outcome.time or ""),
+        key=lambda outcome: (ranks[_channel_key(outcome)], parse_date(outcome.date or ""), outcome.time or ""),
     )
     lines: list[str] = []
     current: str | None = None
     for outcome in ordered:
-        if outcome.account_name != current:
-            current = outcome.account_name
+        if _channel_key(outcome) != current:
+            current = _channel_key(outcome)
             lines.append(_channel_header(outcome))
         lines.append(render(outcome))
     return lines
 
 
+def _channel_key(outcome: PairOutcome) -> str:
+    """Группа — канал по нику: каналы с одинаковым названием не смешиваются."""
+    return normalize_handle(outcome.handle) if outcome.handle else outcome.account_name
+
+
 def _channel_header(outcome: PairOutcome) -> str:
     if not outcome.google_account:
-        return msg.CONSOLE_CHANNEL_GROUP_NO_ACCOUNT.format(account_name=outcome.account_name)
-    return msg.CONSOLE_CHANNEL_GROUP.format(account_name=outcome.account_name, google_account=outcome.google_account)
+        return msg.CONSOLE_CHANNEL_GROUP_NO_ACCOUNT.format(channel=channel_text(outcome.account_name, outcome.handle))
+    return msg.CONSOLE_CHANNEL_GROUP.format(
+        account_name=outcome.account_name, handle=outcome.handle, google_account=outcome.google_account
+    )
 
 
 def _broadcast_line(outcome: PairOutcome) -> str:

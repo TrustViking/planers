@@ -1,7 +1,8 @@
 """FakePlatform — площадка в памяти: только для тестов.
 
-Хранение по channel.account_name (каждый канал — отдельный YouTube-канал). Вход в канал
-имитируется: канал из tokens_missing при первом обращении вызывает on_login, как YouTube перед браузером. Идентификаторы
+Хранение по channel.key (каждый канал — отдельный YouTube-канал); тест называет канал ником или ключом —
+fake_key приводит их к одному ключу. Вход в канал имитируется: канал из tokens_missing при первом обращении
+вызывает on_login, как YouTube перед браузером; с allow_login=False — отказ ERROR_LOGIN_REQUIRED. Идентификаторы
 детерминированные (счётчик); ключи — 5 групп по 4 символа [a-z0-9], как у YouTube (§7.4).
 """
 from __future__ import annotations
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Final
 
 from app.config.loader import ChannelConfig
+from app.core.text import normalize_handle
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
     AppliedVideo,
@@ -34,9 +36,9 @@ FAKE_STREAM_URL: Final[str] = "rtmp://a.rtmp.youtube.com/live2"
 FAKE_BROADCAST_ID_TEMPLATE: Final[str] = "fakebc{number:05d}"
 FAKE_STREAM_ID_TEMPLATE: Final[str] = "fakestream{number:04d}"
 FAKE_STREAM_KEY_TEMPLATE: Final[str] = "fake-{number:04d}-0000-0000-0000"
-FAKE_CHANNEL_ID_TEMPLATE: Final[str] = "UCfake{account_name}"
-FAKE_CHANNEL_TITLE_TEMPLATE: Final[str] = "{account_name}"  # название = account_name: проверка канала проходит
+FAKE_CHANNEL_ID_TEMPLATE: Final[str] = "UCfake{key}"   # по ключу канала: у каналов с одним названием id разные
 NOT_FOUND_CODE: Final[str] = "broadcastNotFound"
+LOGIN_REQUIRED_CODE: Final[str] = "loginRequired"   # как ERROR_LOGIN_REQUIRED у YouTube
 # Те же лимиты, что у YouTube: тесты должны ловить реальное поведение обрезки.
 FAKE_TITLE_MAX_CHARS: Final[int] = 100
 FAKE_DESCRIPTION_MAX_CHARS: Final[int] = 5000
@@ -48,9 +50,14 @@ SEED_AUTO_START: Final[bool] = True
 SEED_CATEGORY_ID: Final[str] = "22"
 
 
+def fake_key(name: str) -> str:
+    """Ник («@yt_ua») или ключ («yt_ua») → ключ канала: тесты называют канал как удобнее."""
+    return normalize_handle(name)
+
+
 @dataclass(frozen=True)
 class FakeCall:
-    channel_id: str
+    channel_id: str      # channel.key
     broadcast_id: str
     marker: str
     preview: bytes | None
@@ -65,9 +72,9 @@ class FakePlatform:
         self.updated: list[FakeCall] = []
         self.list_calls: list[str] = []
         self.stream_calls: list[tuple[str, str]] = []
-        self.fail_list: dict[str, PlatformError] = {}     # account_name → ошибка list_upcoming
+        self.fail_list: dict[str, PlatformError] = {}     # channel.key → ошибка list_upcoming
         self.fail_create: dict[str, PlatformError] = {}   # slot_id → ошибка create_broadcast
-        self.fail_describe: dict[str, PlatformError] = {}  # account_name → ошибка describe_channel
+        self.fail_describe: dict[str, PlatformError] = {}  # channel.key → ошибка describe_channel
         self.fail_update: dict[str, PlatformError] = {}    # broadcast_id → ошибка update_broadcast
         self.fail_attach: dict[str, PlatformError] = {}    # broadcast_id → ошибка attach_stream
         self.fail_settings: dict[str, PlatformError] = {}  # broadcast_id → ошибка apply_video_settings
@@ -87,9 +94,10 @@ class FakePlatform:
         self._notices: list[PlatformNotice] = []             # замечания площадки: seed_undated_broadcast
         self.fail_marker: dict[str, PlatformError] = {}      # stream_id → ошибка set_stream_marker
         self.languages: dict[str, str] = {}                # broadcast_id → записанный язык
-        self.channel_info: dict[str, ChannelInfo] = {}     # account_name → ответ describe_channel
-        self.describe_calls: list[str] = []
-        self.tokens_missing: set[str] = set()              # account_name без токена: первый вызов — вход
+        self.channel_info: dict[str, ChannelInfo] = {}     # channel.key → ответ describe_channel
+        self.describe_calls: list[str] = []                # channel.key каждого describe_channel
+        self.describe_without_login: list[str] = []        # channel.key каждого describe_channel(allow_login=False)
+        self.tokens_missing: set[str] = set()              # channel.key без токена: первый вызов — вход
         self.on_login: Callable[[ChannelConfig], None] | None = None
         self.logins: list[str] = []
         self.pictures: dict[str, str] = {}   # broadcast_id → отпечаток текущей картинки эфира
@@ -111,7 +119,7 @@ class FakePlatform:
         picture: str | None = None,
         stream_description: str = "",
     ) -> UpcomingBroadcast:
-        """Эфир «уже на канале». marker — название потока (поток создаётся); без marker — эфир без потока.
+        """Эфир «уже на канале» channel_id (ник или ключ). marker — название потока; без marker — эфир без потока.
 
         Категория, как у YouTube, лежит только у ресурса видео: в списке эфиров её нет.
         picture — отпечаток картинки эфира (None — картинка не скачалась, обложка не сверяется);
@@ -121,7 +129,7 @@ class FakePlatform:
         stream_id: str | None = None
         if marker is not None:
             stream_id = FAKE_STREAM_ID_TEMPLATE.format(number=number)
-            self._streams.setdefault(channel_id, {})[stream_id] = StreamInfo(
+            self._streams.setdefault(fake_key(channel_id), {})[stream_id] = StreamInfo(
                 stream_id=stream_id,
                 title=marker,
                 ingestion_address=FAKE_STREAM_URL,
@@ -139,20 +147,22 @@ class FakePlatform:
             auto_stop=auto_stop,
             latency_preference=latency_preference,
         )
-        self._broadcasts.setdefault(channel_id, {})[broadcast.broadcast_id] = broadcast
+        self._broadcasts.setdefault(fake_key(channel_id), {})[broadcast.broadcast_id] = broadcast
         self.categories[broadcast.broadcast_id] = category_id
         if picture is not None:
             self.pictures[broadcast.broadcast_id] = picture
         return broadcast
 
     @staticmethod
-    def placeholder_of(account_name: str) -> str:
-        """Заглушка обложки канала в фейке: своя у каждого канала, как у YouTube."""
-        return picture_sha(account_name.encode("utf-8"))
+    def placeholder_of(channel_id: str) -> str:
+        """Заглушка обложки канала в фейке (канал — ник или ключ): своя у каждого канала, как у YouTube."""
+        return picture_sha(fake_key(channel_id).encode("utf-8"))
 
-    def seed_undated_broadcast(self, account_name: str, title: str) -> PlatformNotice:
+    def seed_undated_broadcast(self, account_name: str, title: str, handle: str = "") -> PlatformNotice:
         """Эфир без времени старта на канале: площадка его не отдаёт, а замечание копит до take_notices."""
-        notice: PlatformNotice = PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, account_name, title)
+        notice: PlatformNotice = PlatformNotice(
+            PlatformNoticeKind.UNDATED_BROADCAST, account_name, title, handle=handle
+        )
         self._notices.append(notice)
         return notice
 
@@ -163,7 +173,7 @@ class FakePlatform:
 
     def remove_broadcast(self, channel_id: str, broadcast_id: str) -> None:
         """Владелец удалил эфир руками."""
-        self._broadcasts.get(channel_id, {}).pop(broadcast_id, None)
+        self._broadcasts.get(fake_key(channel_id), {}).pop(broadcast_id, None)
 
     @property
     def limits(self) -> PlatformLimits:
@@ -174,43 +184,48 @@ class FakePlatform:
             latency_preference=FAKE_LATENCY_PREFERENCE,
         )
 
-    def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
-        """По умолчанию — детерминированный ответ по channel.account_name; тест может задать свой."""
-        self.describe_calls.append(channel.account_name)
+    def describe_channel(self, channel: ChannelConfig, *, allow_login: bool = True) -> ChannelInfo:
+        """По умолчанию — ответ «канал тот же»: id по ключу, название и ник как в конфиге; тест может задать свой."""
+        self.describe_calls.append(channel.key)
+        if not allow_login:
+            self.describe_without_login.append(channel.key)
+            if channel.key in self.tokens_missing:
+                raise PlatformError(LOGIN_REQUIRED_CODE, f"login required for {channel.handle}")
         self._login_if_needed(channel)
-        if channel.account_name in self.fail_describe:
-            raise self.fail_describe[channel.account_name]
-        return self.channel_info.get(channel.account_name, self.default_channel_info(channel.account_name))
+        if channel.key in self.fail_describe:
+            raise self.fail_describe[channel.key]
+        return self.channel_info.get(channel.key, self.default_channel_info(channel))
 
     @staticmethod
-    def default_channel_info(account_name: str) -> ChannelInfo:
+    def default_channel_info(channel: ChannelConfig) -> ChannelInfo:
         return ChannelInfo(
-            youtube_channel_id=FAKE_CHANNEL_ID_TEMPLATE.format(account_name=account_name),
-            title=FAKE_CHANNEL_TITLE_TEMPLATE.format(account_name=account_name),
+            youtube_channel_id=FAKE_CHANNEL_ID_TEMPLATE.format(key=channel.key),
+            title=channel.account_name,
             default_language=None,
+            handle_raw=channel.handle,
         )
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
-        self.list_calls.append(channel.account_name)
+        self.list_calls.append(channel.key)
         self._login_if_needed(channel)
-        if channel.account_name in self.fail_list:
-            raise self.fail_list[channel.account_name]
+        if channel.key in self.fail_list:
+            raise self.fail_list[channel.key]
         broadcasts: list[UpcomingBroadcast] = [
             replace(broadcast, thumbnail_sha=self.pictures.get(broadcast.broadcast_id))
-            for broadcast in self._broadcasts.get(channel.account_name, {}).values()
+            for broadcast in self._broadcasts.get(channel.key, {}).values()
         ]
         return sorted(broadcasts, key=lambda broadcast: (broadcast.start_utc, broadcast.broadcast_id))
 
     def get_stream(self, channel: ChannelConfig, stream_id: str) -> StreamInfo | None:
-        self.stream_calls.append((channel.account_name, stream_id))
-        return self._streams.get(channel.account_name, {}).get(stream_id)
+        self.stream_calls.append((channel.key, stream_id))
+        return self._streams.get(channel.key, {}).get(stream_id)
 
     def create_broadcast(self, channel: ChannelConfig, spec: BroadcastSpec) -> CreatedBroadcast:
         if spec.marker in self.fail_create:
             raise self.fail_create[spec.marker]
         number: int = self._next_number()
         # как у площадки: обложки ещё нет, картинка — заглушка канала, её отпечаток — в описании потока
-        placeholder: str = self.placeholder_of(channel.account_name)
+        placeholder: str = self.placeholder_of(channel.key)
         stream: StreamInfo = StreamInfo(
             stream_id=FAKE_STREAM_ID_TEMPLATE.format(number=number),
             title=spec.marker,
@@ -229,10 +244,10 @@ class FakePlatform:
             auto_stop=spec.auto_stop,
             latency_preference=spec.latency_preference,
         )
-        self._streams.setdefault(channel.account_name, {})[stream.stream_id] = stream
-        self._broadcasts.setdefault(channel.account_name, {})[broadcast.broadcast_id] = broadcast
+        self._streams.setdefault(channel.key, {})[stream.stream_id] = stream
+        self._broadcasts.setdefault(channel.key, {})[broadcast.broadcast_id] = broadcast
         self.pictures[broadcast.broadcast_id] = placeholder
-        self.created.append(FakeCall(channel.account_name, broadcast.broadcast_id, spec.marker, None))
+        self.created.append(FakeCall(channel.key, broadcast.broadcast_id, spec.marker, None))
         return CreatedBroadcast(
             broadcast_id=broadcast.broadcast_id,
             broadcast_url=broadcast_url_for(channel, broadcast.broadcast_id),
@@ -250,15 +265,15 @@ class FakePlatform:
     ) -> None:
         if broadcast_id in self.fail_update:
             raise self.fail_update[broadcast_id]
-        current: UpcomingBroadcast | None = self._broadcasts.get(channel.account_name, {}).get(broadcast_id)
+        current: UpcomingBroadcast | None = self._broadcasts.get(channel.key, {}).get(broadcast_id)
         if current is None:
             raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.account_name}")
-        self._broadcasts[channel.account_name][broadcast_id] = replace(
+        self._broadcasts[channel.key][broadcast_id] = replace(
             current,
             title=spec.title,
             description=spec.description,
         )
-        self.updated.append(FakeCall(channel.account_name, broadcast_id, spec.marker, None))
+        self.updated.append(FakeCall(channel.key, broadcast_id, spec.marker, None))
 
     def attach_stream(
         self,
@@ -268,7 +283,7 @@ class FakePlatform:
     ) -> CreatedBroadcast:
         if broadcast_id in self.fail_attach:
             raise self.fail_attach[broadcast_id]
-        current: UpcomingBroadcast | None = self._broadcasts.get(channel.account_name, {}).get(broadcast_id)
+        current: UpcomingBroadcast | None = self._broadcasts.get(channel.key, {}).get(broadcast_id)
         if current is None:
             raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.account_name}")
         number: int = self._next_number()
@@ -278,9 +293,9 @@ class FakePlatform:
             ingestion_address=FAKE_STREAM_URL,
             stream_name=FAKE_STREAM_KEY_TEMPLATE.format(number=number),
         )
-        self._streams.setdefault(channel.account_name, {})[stream.stream_id] = stream
-        self._broadcasts[channel.account_name][broadcast_id] = replace(current, stream_id=stream.stream_id)
-        self.attached.append(FakeCall(channel.account_name, broadcast_id, spec.marker, None))
+        self._streams.setdefault(channel.key, {})[stream.stream_id] = stream
+        self._broadcasts[channel.key][broadcast_id] = replace(current, stream_id=stream.stream_id)
+        self.attached.append(FakeCall(channel.key, broadcast_id, spec.marker, None))
         return CreatedBroadcast(
             broadcast_id=broadcast_id,
             broadcast_url=broadcast_url_for(channel, broadcast_id),
@@ -300,7 +315,7 @@ class FakePlatform:
         self.settings_calls.append(broadcast_id)
         if broadcast_id in self.fail_settings:
             raise self.fail_settings[broadcast_id]
-        current: UpcomingBroadcast | None = self._broadcasts.get(channel.account_name, {}).get(broadcast_id)
+        current: UpcomingBroadcast | None = self._broadcasts.get(channel.key, {}).get(broadcast_id)
         fixes: VideoFixes = VideoFixes(
             language_set=self.languages.get(broadcast_id) != language,
             category_set=self.categories.get(broadcast_id) != category_id,
@@ -313,7 +328,7 @@ class FakePlatform:
         self.categories[broadcast_id] = category_id
         self.made_for_kids[broadcast_id] = False
         if current is not None:
-            self._broadcasts[channel.account_name][broadcast_id] = replace(current, privacy_status=privacy)
+            self._broadcasts[channel.key][broadcast_id] = replace(current, privacy_status=privacy)
         self.settings_writes.append(broadcast_id)
         # как настоящая площадка: ответ записи говорит, что записано (VideoFixes.apply_to_facts)
         return replace(
@@ -330,17 +345,17 @@ class FakePlatform:
     def set_stream_marker(self, channel: ChannelConfig, stream_id: str, marker: str) -> None:
         if stream_id in self.fail_marker:
             raise self.fail_marker[stream_id]
-        stream: StreamInfo | None = self._streams.get(channel.account_name, {}).get(stream_id)
+        stream: StreamInfo | None = self._streams.get(channel.key, {}).get(stream_id)
         if stream is None:
             raise PlatformError(NOT_FOUND_CODE, f"stream {stream_id} not found on {channel.account_name}")
-        self._streams[channel.account_name][stream_id] = replace(stream, title=marker)
-        self.markers_set.append(FakeCall(channel.account_name, stream_id, marker, None))
+        self._streams[channel.key][stream_id] = replace(stream, title=marker)
+        self.markers_set.append(FakeCall(channel.key, stream_id, marker, None))
 
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
         if broadcast_id in self.fail_thumbnail:
             raise self.fail_thumbnail[broadcast_id]
         self.pictures[broadcast_id] = picture_sha(preview)
-        self.thumbnails.append(FakeCall(channel.account_name, broadcast_id, "", preview))
+        self.thumbnails.append(FakeCall(channel.key, broadcast_id, "", preview))
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         self.facts_calls.append(broadcast_id)
@@ -349,11 +364,11 @@ class FakePlatform:
         override: BroadcastFacts | None = self.facts_override.get(broadcast_id)
         if override is not None:
             return override
-        broadcast: UpcomingBroadcast | None = self._broadcasts.get(channel.account_name, {}).get(broadcast_id)
+        broadcast: UpcomingBroadcast | None = self._broadcasts.get(channel.key, {}).get(broadcast_id)
         if broadcast is None:
             raise PlatformError(NOT_FOUND_CODE, f"broadcast {broadcast_id} not found on {channel.account_name}")
         stream: StreamInfo | None = (
-            self._streams.get(channel.account_name, {}).get(broadcast.stream_id) if broadcast.stream_id else None
+            self._streams.get(channel.key, {}).get(broadcast.stream_id) if broadcast.stream_id else None
         )
         return BroadcastFacts(
             broadcast_id=broadcast_id,
@@ -375,10 +390,10 @@ class FakePlatform:
         )
 
     def _login_if_needed(self, channel: ChannelConfig) -> None:
-        if channel.account_name not in self.tokens_missing:
+        if channel.key not in self.tokens_missing:
             return
-        self.tokens_missing.discard(channel.account_name)
-        self.logins.append(channel.account_name)
+        self.tokens_missing.discard(channel.key)
+        self.logins.append(channel.key)
         if self.on_login is not None:
             self.on_login(channel)
 

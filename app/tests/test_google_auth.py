@@ -75,21 +75,47 @@ def test_scope_is_youtube_only() -> None:
 
 
 @pytest.mark.parametrize(
-    ("account_name", "file_name"),
+    ("handle", "file_name"),
     [
-        ("Osvald.X", "Osvald.X.token.json"),
-        ("Oktavian.X", "Oktavian.X.token.json"),
-        ("Maria Kamenskay", "Maria Kamenskay.token.json"),
-        ("Канал UA", "Канал UA.token.json"),
-        ("Новини: Україна", "Новини_ Україна.token.json"),
-        ("News | UA", "News _ UA.token.json"),
-        ("Канал.", "Канал_.token.json"),
-        ("CON", "CON_.token.json"),
+        ("@Osvald.X", "@Osvald.X.token.json"),
+        ("@MariaKamenskay", "@MariaKamenskay.token.json"),
+        ("@Ukrainian_girl25", "@Ukrainian_girl25.token.json"),
+        ("@TheImpact-r2b", "@TheImpact-r2b.token.json"),
+        ("@ПашаЭкскаватощик", "@ПашаЭкскаватощик.token.json"),
+        ("@Канал.", "@Канал_.token.json"),
     ],
 )
-def test_token_file_name_comes_from_the_account_name(tmp_path: Path, account_name: str, file_name: str) -> None:
-    """Существующие токены («Osvald.X» и др.) остаются под прежними именами."""
-    assert token_file_for(tmp_path, account_name) == tmp_path / file_name
+def test_token_file_name_comes_from_the_handle(tmp_path: Path, handle: str, file_name: str) -> None:
+    """Файл токена — ник как в channels.json; правила имени файла Windows — token_file_stem."""
+    assert token_file_for(tmp_path, handle) == tmp_path / file_name
+
+
+def test_login_not_allowed_without_token_does_not_open_browser(
+    client_secret: Path,
+    tmp_path: Path,
+    flow: type[_FakeFlow],
+) -> None:
+    logins: list[bool] = []
+    with pytest.raises(AuthError) as raised:
+        load_credentials(
+            client_secret, tmp_path / "@Osvald.X.token.json", LOGIN_HINT,
+            on_login=lambda: logins.append(True), allow_login=False,
+        )
+    assert raised.value.reason is AuthErrorReason.LOGIN_REQUIRED
+    assert flow.last_kwargs == {} and logins == []
+
+
+def test_login_not_allowed_keeps_the_token_to_reauthorize(
+    client_secret: Path,
+    tmp_path: Path,
+    flow: type[_FakeFlow],
+) -> None:
+    token_file: Path = tmp_path / "@Osvald.X.token.json"
+    token_file.write_text(TOKEN_JSON, encoding="utf-8")
+    with pytest.raises(AuthError) as raised:
+        load_credentials(client_secret, token_file, LOGIN_HINT, force_reauth=True, allow_login=False)
+    assert raised.value.reason is AuthErrorReason.LOGIN_REQUIRED
+    assert token_file.read_text(encoding="utf-8") == TOKEN_JSON and flow.last_kwargs == {}
 
 
 def test_on_login_is_called_right_before_the_browser(
@@ -217,6 +243,10 @@ def test_revoked_token_falls_back_to_browser(
         "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: revoked),
     )
+    with pytest.raises(AuthError) as raised:
+        load_credentials(client_secret, token_file, LOGIN_HINT, allow_login=False)
+    assert raised.value.reason is AuthErrorReason.LOGIN_REQUIRED       # без разрешения браузер не открывается
+    assert flow.last_kwargs == {}
     load_credentials(client_secret, token_file, LOGIN_HINT)
     assert flow.last_kwargs["port"] == 0
 

@@ -160,6 +160,7 @@ class PairOutcome:
     google_account: str | None = None      # почта аккаунта канала — шапка группы в консоли
     stream_key: str | None = None          # полный ключ; маскирует консоль
     field_changes: tuple[FieldChange, ...] = ()   # было и стало по исправленным полям
+    handle: str = ""                       # ник канала; пусто — строка не о канале (файл ключей)
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,7 @@ class OrphanLine:
     language: str
     account_name: str
     broadcast_url: str
+    handle: str = ""
 
 
 @dataclass(frozen=True)
@@ -271,6 +273,7 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
     return PairOutcome(
         kind=kind,
         account_name=item.account_name,
+        handle=item.channel.handle,
         date=item.date,
         time=item.time,
         language=item.language,
@@ -307,6 +310,7 @@ def outcome_from_marked(marked: MarkedBroadcast) -> PairOutcome:
     return PairOutcome(
         kind=OutcomeKind.MATCHED,
         account_name=marked.channel.account_name,
+        handle=marked.channel.handle,
         date=marked.parts.date,
         time=marked.parts.time,
         language=marked.parts.language,
@@ -321,6 +325,7 @@ def platform_error_outcome(channel: ChannelConfig, error: PlatformError) -> Pair
     return PairOutcome(
         kind=OutcomeKind.ERROR,
         account_name=channel.account_name,
+        handle=channel.handle,
         error=OutcomeError(origin=channel.platform.value, code=error.code, message=error.message),
     )
 
@@ -338,16 +343,24 @@ def build_warning_lines(
     planned: Sequence[PlannedBroadcast],
     diagnostics: Sequence[str] = (),
     notices: Sequence[PlatformNotice] = (),
+    channel_warnings: Sequence[str] = (),
 ) -> list[str]:
     """Два списка одним результатом: предупреждения запуска (с замечаниями площадки), затем её особенности.
 
-    Разделяют их RunReport.run_warnings и RunReport.notes по PLATFORM_NOTE_LINES.
+    channel_warnings — предупреждения сверки каналов при старте (ChannelSync.run): тот же путь, что и прочие.
+    Разделяют списки RunReport.run_warnings и RunReport.notes по PLATFORM_NOTE_LINES.
     """
     return (
-        build_run_warning_lines(planned, diagnostics)
-        + build_undated_warning_lines(notices)
+        list(channel_warnings)
+        + build_run_warning_lines(planned, diagnostics)
+        + build_notice_warning_lines(notices)
         + build_platform_note_lines(planned)
     )
+
+
+def channel_text(account_name: str, handle: str) -> str:
+    """Канал для людей: название и ник рядом; ника нет — только название."""
+    return msg.CHANNEL_LABEL.format(account_name=account_name, handle=handle) if handle else account_name
 
 
 def build_run_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Sequence[str] = ()) -> list[str]:
@@ -357,18 +370,22 @@ def build_run_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Se
     return lines
 
 
-def build_undated_warning_lines(notices: Sequence[PlatformNotice]) -> list[str]:
-    """Эфиры без времени старта: площадка их отбрасывает, планер их не видит. Повтор (канал, название) — одна строка."""
-    entries: dict[tuple[str, str], None] = {}
+def build_notice_warning_lines(notices: Sequence[PlatformNotice]) -> list[str]:
+    """Замечания площадки: эфиры без времени старта и строки о каналах. Повтор строки — одна строка."""
+    lines: dict[str, None] = {}
     for notice in notices:
         if notice.kind is PlatformNoticeKind.UNDATED_BROADCAST:
-            entries.setdefault((notice.account_name, notice.title), None)   # канал за запуск читается не раз
-    return [msg.WARNING_UNDATED_BROADCAST.format(account_name=name, title=title) for name, title in entries]
+            # канал за запуск читается не раз
+            channel: str = channel_text(notice.account_name, notice.handle)
+            lines.setdefault(msg.WARNING_UNDATED_BROADCAST.format(channel=channel, title=notice.title), None)
+        elif notice.kind is PlatformNoticeKind.CHANNEL:
+            lines.setdefault(notice.text, None)
+    return list(lines)
 
 
 def _warning_text(item: PlannedBroadcast, warning: OutcomeWarning) -> str:
     """Предупреждения сверки собирают текст из объекта: значения полей и ссылки на эфиры."""
-    prefix: str = _slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name)
+    prefix: str = _slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, channel=channel_text(item.account_name, item.channel.handle))
     if warning.step == WARNING_STEP_REPORTED_FIELD and item.actual is not None:
         name: ChangedField = ChangedField(warning.code)
         return msg.WARNING_REPORTED_FIELD.format(
@@ -426,7 +443,7 @@ def build_mismatch_lines(planned: Sequence[PlannedBroadcast], limits: PlatformLi
     for item in planned:
         if item.facts is None:
             continue
-        prefix: str = _slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, account_name=item.account_name)
+        prefix: str = _slot_text(msg.OUTCOME_SLOT_PREFIX, item.slot, channel=channel_text(item.account_name, item.channel.handle))
         lines.extend(msg.MISMATCH_LINE.format(prefix=prefix, field=field, wanted=wanted, actual=actual)
                      for field, wanted, actual in _mismatches(item, limits))
     return lines
@@ -654,12 +671,12 @@ def _keys_file_part(report: RunReport) -> str:
 
 def outcome_prefix(outcome: PairOutcome) -> str:
     if outcome.date is None:
-        return msg.OUTCOME_CHANNEL_PREFIX.format(account_name=outcome.account_name)
+        return msg.OUTCOME_CHANNEL_PREFIX.format(channel=channel_text(outcome.account_name, outcome.handle))
     return msg.OUTCOME_SLOT_PREFIX.format(
         date=outcome.date,
         time=outcome.time,
         language=outcome.language,
-        account_name=outcome.account_name,
+        channel=channel_text(outcome.account_name, outcome.handle),
     )
 
 
@@ -748,7 +765,7 @@ def _orphan_text(orphan: OrphanLine) -> str:
         date=orphan.date,
         time=orphan.time,
         language=orphan.language,
-        account_name=orphan.account_name,
+        channel=channel_text(orphan.account_name, orphan.handle),
         url=orphan.broadcast_url,
     )
 

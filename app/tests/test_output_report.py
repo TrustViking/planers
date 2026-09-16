@@ -23,7 +23,7 @@ from app.output.report import (
     build_run_warning_lines,
     build_skipped_lines,
     build_totals,
-    build_undated_warning_lines,
+    build_notice_warning_lines,
     build_warning_lines,
     error_texts,
     render_report,
@@ -350,10 +350,10 @@ def test_undated_notices_are_deduplicated_by_channel_and_title() -> None:
     """Канал за запуск читается не раз: одинаковое замечание — одна строка предупреждения."""
     notice: PlatformNotice = PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, "Test UA", "Брифинг")
     other: PlatformNotice = PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, "Test RU", "Брифинг")
-    lines: list[str] = build_undated_warning_lines([notice, other, notice])
+    lines: list[str] = build_notice_warning_lines([notice, other, notice])
     assert lines == [
-        msg.WARNING_UNDATED_BROADCAST.format(account_name="Test UA", title="Брифинг"),
-        msg.WARNING_UNDATED_BROADCAST.format(account_name="Test RU", title="Брифинг"),
+        msg.WARNING_UNDATED_BROADCAST.format(channel="Test UA", title="Брифинг"),
+        msg.WARNING_UNDATED_BROADCAST.format(channel="Test RU", title="Брифинг"),
     ]
     assert build_warning_lines([], (), [notice]) == lines[:1]
 
@@ -426,7 +426,7 @@ def _thumbnail_item(code: str, message: str) -> PlannedBroadcast:
 def test_thumbnail_upload_limit_is_explained_without_verified_channel_hint() -> None:
     [line] = build_run_warning_lines([_thumbnail_item("uploadRateLimitExceeded", "HTTP 429: limit")])
     assert line == (
-        "17-03-2027 19:00 uk -> yt_ua: " + msg.WARNING_STEP_TEXT["thumbnail"] + " — "
+        "17-03-2027 19:00 uk -> yt_ua @yt_ua: " + msg.WARNING_STEP_TEXT["thumbnail"] + " — "
         + msg.THUMBNAIL_REASON_TEXT["uploadRateLimitExceeded"]
     )
     assert "подтверждённ" not in line and "подтвердите" not in line

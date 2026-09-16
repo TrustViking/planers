@@ -1,18 +1,22 @@
 """Площадка с проверкой канала при первом обращении (ТЗ §5.3).
 
 Обёртка над любой BroadcastPlatform. Первое обращение к каналу за запуск — describe_channel:
-у YouTube это же и вход (токена нет — браузер), затем сверка названия канала на YouTube
-с account_name из channels.json (то же имя уходит в форму как «Название канала»).
-Не совпало — ChannelBindingError: это PlatformError, и сверка изолирует его как любой сбой
-канала (все объекты канала — ошибка, остальные каналы работают). Файлов планер тут не пишет.
+у YouTube это же и вход (токена нет — браузер), затем проверка в порядке ник → id по паспорту → название:
+  - у канала на YouTube нет ника — отказ channelHandleMissing;
+  - ник другой: паспорт по нику из channels.json подтверждает тот же id — выровнять (ChannelSync) и работать,
+    иначе — отказ channelHandleMismatch;
+  - ник совпал, а в паспорте у этого ника другой id — отказ channelIdMismatch;
+  - название другое при совпавшем нике — выровнять название и работать.
+Выравнивание по ходу запуска меняет файлы (channels.json, токен, паспорт), но не этот запуск: в выводе
+и форме остаются прежние значения. Отказ — ChannelBindingError: это PlatformError, и сверка изолирует его
+как любой сбой канала (все объекты канала — ошибка, остальные каналы работают).
 """
 from __future__ import annotations
 
-import unicodedata
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
 from app.config.loader import ChannelConfig
+from app.core.text import handle_from_custom_url
 from app.observability.logging_setup import get_logger
 from app.platforms.base import (
     BroadcastFacts,
@@ -22,10 +26,13 @@ from app.platforms.base import (
     PlatformError,
     PlatformLimits,
     PlatformNotice,
+    PlatformNoticeKind,
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
 )
+from app.platforms.channel_sync import ChannelSync, normalize_channel_title, youtube_handle_key
+from app.platforms.passport import PassportEntry
 from app.ui import messages_ru as msg
 
 if TYPE_CHECKING:   # спека живёт в pipeline; здесь она нужна только для аннотаций
@@ -33,8 +40,9 @@ if TYPE_CHECKING:   # спека живёт в pipeline; здесь она ну�
 
 LOGGER = get_logger("channel")
 
-ERROR_CHANNEL_NAME_MISMATCH: Final[str] = "channelNameMismatch"
-CHANNEL_TITLE_FORM: Final[str] = "NFC"   # так же приводится account_name в config/loader.py
+ERROR_CHANNEL_HANDLE_MISSING: Final[str] = "channelHandleMissing"
+ERROR_CHANNEL_HANDLE_MISMATCH: Final[str] = "channelHandleMismatch"
+ERROR_CHANNEL_ID_MISMATCH: Final[str] = "channelIdMismatch"
 
 
 class ChannelBindingError(PlatformError):
@@ -43,25 +51,21 @@ class ChannelBindingError(PlatformError):
 
 class ChannelListener(Protocol):
     def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo) -> None:
-        """Канал проверен: название на YouTube совпало с account_name."""
+        """Канал проверен: ник и id подтверждены."""
         ...
 
 
-def normalize_channel_title(title: str) -> str:
-    return unicodedata.normalize(CHANNEL_TITLE_FORM, title).strip()
-
-
 class VerifiedPlatform:
-    """Каждый метод площадки сначала проверяет канал; проверка — один раз на канал за запуск."""
+    """Каждый метод площадки сначала проверяет канал; проверка — один раз на канал (channel.key) за запуск."""
 
     def __init__(
         self,
         platform: BroadcastPlatform,
-        channels_file: Path,
+        sync: ChannelSync,
         listener: ChannelListener | None = None,
     ) -> None:
         self._platform: BroadcastPlatform = platform
-        self._channels_file: Path = channels_file   # только для подсказки владельцу
+        self._sync: ChannelSync = sync
         self._listener: ChannelListener | None = listener
         self._verified: dict[str, ChannelInfo] = {}
         self._refused: dict[str, ChannelBindingError] = {}
@@ -71,23 +75,43 @@ class VerifiedPlatform:
         return self._platform.limits
 
     def verify(self, channel: ChannelConfig) -> ChannelInfo:
-        """Вход и сверка названия; сбой площадки не запоминается, отказ — до конца запуска."""
-        name: str = channel.account_name
-        if name in self._verified:
-            return self._verified[name]
-        if name in self._refused:
-            raise self._refused[name]
+        """Вход и проверка; сбой площадки не запоминается, отказ — до конца запуска."""
+        key: str = channel.key
+        if key in self._verified:
+            return self._verified[key]
+        if key in self._refused:
+            raise self._refused[key]
         info: ChannelInfo = self._platform.describe_channel(channel)
-        if normalize_channel_title(info.title) != name:
-            error: ChannelBindingError = self._refusal(channel, info)
-            self._refused[name] = error
-            raise error
-        self._verified[name] = info
+        try:
+            is_recorded: bool = self._check(channel, info)
+        except ChannelBindingError as error:
+            self._refused[key] = error
+            raise
+        if not is_recorded:
+            self._sync.confirm(channel, info)
+        self._verified[key] = info
         if self._listener is not None:
             self._listener.on_channel_ready(channel, info)
         return info
 
-    def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
+    def _check(self, channel: ChannelConfig, info: ChannelInfo) -> bool:
+        """Ник → id → название. True — выравнивание уже записало паспорт."""
+        handle_key: str | None = youtube_handle_key(info)
+        if handle_key is None:
+            raise self._refusal(channel, info, ERROR_CHANNEL_HANDLE_MISSING, msg.AUTH_CHANNEL_HANDLE_MISSING)
+        entry: PassportEntry | None = self._sync.passport.find_by_key(channel.key)
+        if handle_key != channel.key:
+            if entry is None or entry.youtube_channel_id != info.youtube_channel_id:
+                raise self._refusal(channel, info, ERROR_CHANNEL_HANDLE_MISMATCH, msg.AUTH_CHANNEL_HANDLE_MISMATCH)
+            return self._sync.align_in_run(channel, info)
+        if entry is not None and entry.youtube_channel_id != info.youtube_channel_id:
+            raise self._refusal(channel, info, ERROR_CHANNEL_ID_MISMATCH, msg.AUTH_CHANNEL_ID_MISMATCH, entry)
+        if normalize_channel_title(info.title) != channel.account_name:
+            return self._sync.align_in_run(channel, info)
+        return False
+
+    def describe_channel(self, channel: ChannelConfig, *, allow_login: bool = True) -> ChannelInfo:
+        """Проверка всегда с входом: без него канал не проверить (сверка при старте ходит мимо обёртки)."""
         return self.verify(channel)
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
@@ -130,25 +154,48 @@ class VerifiedPlatform:
         self._platform.set_thumbnail(channel, broadcast_id, preview)
 
     def take_notices(self) -> tuple[PlatformNotice, ...]:
-        """Замечания копит обёрнутая площадка; проверка канала тут не нужна."""
-        return self._platform.take_notices()
+        """Замечания обёрнутой площадки и предупреждения выравнивания каналов по ходу запуска."""
+        channel_notices: tuple[PlatformNotice, ...] = tuple(
+            PlatformNotice(PlatformNoticeKind.CHANNEL, account_name="", title="", text=text)
+            for text in self._sync.take_warnings()
+        )
+        return self._platform.take_notices() + channel_notices
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         self.verify(channel)
         return self._platform.read_facts(channel, broadcast_id)
 
-    def _refusal(self, channel: ChannelConfig, info: ChannelInfo) -> ChannelBindingError:
+    def _refusal(
+        self,
+        channel: ChannelConfig,
+        info: ChannelInfo,
+        code: str,
+        template: str,
+        entry: PassportEntry | None = None,
+    ) -> ChannelBindingError:
+        youtube_handle: str = handle_from_custom_url(info.handle_raw) if info.handle_raw else msg.AUTH_YOUTUBE_HANDLE_MISSING
+        passport_channel_id: str = entry.youtube_channel_id if entry is not None else ""
         LOGGER.error(
-            'channel_name_mismatch channel="%s" youtube_title="%s" youtube_channel_id=%s',
+            'channel_refused code=%s channel="%s" handle=%s youtube_title="%s" handle_raw=%s '
+            "youtube_channel_id=%s passport_channel_id=%s",
+            code,
             channel.account_name,
+            channel.handle,
             info.title,
+            info.handle_raw or "-",
             info.youtube_channel_id,
+            passport_channel_id or "-",
         )
         return ChannelBindingError(
-            ERROR_CHANNEL_NAME_MISMATCH,
-            msg.AUTH_CHANNEL_NAME_MISMATCH.format(
+            code,
+            template.format(
                 account_name=channel.account_name,
+                handle=channel.handle,
                 youtube_title=info.title,
-                channels_file=self._channels_file,
+                youtube_handle=youtube_handle,
+                youtube_channel_id=info.youtube_channel_id,
+                passport_channel_id=passport_channel_id,
+                channels_file=self._sync.paths.channels_file,
+                token_file=self._sync.token_file(channel),
             ),
         )

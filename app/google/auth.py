@@ -28,7 +28,7 @@ LOCAL_SERVER_PORT: Final[int] = 0          # 0 — любой свободный
 ACCESS_TYPE: Final[str] = "offline"        # без него Google не выдаст refresh-токен
 PROMPT: Final[str] = "consent"             # при повторной авторизации refresh-токен выдаётся заново
 TOKEN_ENCODING: Final[str] = "utf-8"
-TOKEN_FILE_TEMPLATE: Final[str] = "{account_name}.token.json"
+TOKEN_FILE_TEMPLATE: Final[str] = "{stem}.token.json"
 
 
 class AuthErrorReason(str, Enum):
@@ -36,6 +36,7 @@ class AuthErrorReason(str, Enum):
     TOKEN_UNREADABLE = "token_unreadable"
     FLOW_FAILED = "flow_failed"
     REFRESH_FAILED = "refresh_failed"
+    LOGIN_REQUIRED = "login_required"   # нужен браузер, а вызывающий вход запретил (allow_login=False)
 
 
 class AuthError(Exception):
@@ -47,9 +48,9 @@ class AuthError(Exception):
         self.detail: str = detail
 
 
-def token_file_for(secrets_dir: Path, account_name: str) -> Path:
-    """secrets\\<имя>.token.json — единственный источник пути к токену; имя — core.text.token_file_stem."""
-    return secrets_dir / TOKEN_FILE_TEMPLATE.format(account_name=token_file_stem(account_name))
+def token_file_for(secrets_dir: Path, handle: str) -> Path:
+    """secrets\\<ник>.token.json — единственный источник пути к токену; имя — core.text.token_file_stem."""
+    return secrets_dir / TOKEN_FILE_TEMPLATE.format(stem=token_file_stem(handle))
 
 
 def load_credentials(
@@ -58,26 +59,57 @@ def load_credentials(
     login_hint: str,
     force_reauth: bool = False,
     on_login: Callable[[], None] | None = None,
+    allow_login: bool = True,
 ) -> Credentials:
     """Готовые к работе учётные данные: из токена, обновлением или через браузер.
 
     login_hint — почта аккаунта Google канала (google_account): браузер сразу предлагает этот аккаунт.
     on_login вызывается ровно перед открытием браузера: владелец должен знать, какой канал выбирать.
+    allow_login=False — браузер не открывается: нужен вход — AuthError(LOGIN_REQUIRED), токен не трогается.
     """
     if not client_secret_file.is_file():
         raise AuthError(AuthErrorReason.CLIENT_SECRET_MISSING, str(client_secret_file))
+    login: _Login = _Login(client_secret_file, token_file, login_hint, on_login, allow_login)
     if force_reauth:
+        login.check_allowed()
         _drop_token(token_file)
-        return _login(client_secret_file, token_file, login_hint, on_login)
+        return login.run()
     credentials: Credentials | None = _load_token(token_file)
     if credentials is None:
-        return _login(client_secret_file, token_file, login_hint, on_login)
+        return login.run()
     if credentials.valid:
         return credentials
     refreshed: Credentials | None = _refresh(credentials, token_file)
     if refreshed is not None:
         return refreshed
-    return _login(client_secret_file, token_file, login_hint, on_login)
+    return login.run()
+
+
+class _Login:
+    """Вход через браузер — единственный путь к нему; запрет входа проверяется здесь же."""
+
+    def __init__(
+        self,
+        client_secret_file: Path,
+        token_file: Path,
+        login_hint: str,
+        on_login: Callable[[], None] | None,
+        allow_login: bool,
+    ) -> None:
+        self._client_secret_file: Path = client_secret_file
+        self._token_file: Path = token_file
+        self._login_hint: str = login_hint
+        self._on_login: Callable[[], None] | None = on_login
+        self._allow_login: bool = allow_login
+
+    def check_allowed(self) -> None:
+        if not self._allow_login:
+            LOGGER.info("login_not_allowed file=%s", self._token_file.name)
+            raise AuthError(AuthErrorReason.LOGIN_REQUIRED, self._token_file.name)
+
+    def run(self) -> Credentials:
+        self.check_allowed()
+        return _login(self._client_secret_file, self._token_file, self._login_hint, self._on_login)
 
 
 def _login(

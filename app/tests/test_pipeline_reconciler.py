@@ -88,7 +88,7 @@ def test_fields_the_platform_did_not_return_are_logged_once_per_broadcast(
         _reconcile(fake_platform, make_config(), item)
     lines: list[str] = [message for message in caplog.messages if message.startswith("spec_fields_not_compared")]
     # картинку эфира площадка не отдала (посеянный эфир без картинки) — обложка тоже не сверялась
-    assert lines == [f'spec_fields_not_compared slot_id={slot.slot_id} channel="yt_ua" fields=category,thumbnail']
+    assert lines == [f'spec_fields_not_compared slot_id={slot.slot_id} channel="yt_ua" handle=@yt_ua fields=category,thumbnail']
     assert [record.levelname for record in caplog.records if "spec_fields_not_compared" in record.getMessage()] == ["INFO"]
 
 

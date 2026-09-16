@@ -133,6 +133,7 @@ class _RunContext:
     rng: random.Random
     notice: str | None
     form_diagnostics: list[str]   # пути сохранённых ответов формы (§7.5)
+    channel_warnings: tuple[str, ...]   # сверка каналов при старте (ChannelSync.run)
     progress: RunProgress
 
     @property
@@ -164,8 +165,12 @@ def run(
     *,
     notice: str | None = None,
     progress: RunProgress = NoProgress(),
+    channel_warnings: Sequence[str] = (),
 ) -> RunOutcome:
-    context: _RunContext = _RunContext(mode, config, paths, platform, form_sender, now_utc, rng, notice, [], progress)
+    """channel_warnings — предупреждения сверки каналов при старте: в отчёт и консоль вместе с прочими."""
+    context: _RunContext = _RunContext(
+        mode, config, paths, platform, form_sender, now_utc, rng, notice, [], tuple(channel_warnings), progress
+    )
     if mode is RunMode.STATUS:
         return _run_status(context)
     return _run_bcast(context)
@@ -209,7 +214,9 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         orphans=[_orphan_line(orphan) for orphan in orphans],
         skipped=build_skipped_lines(scan, selection, context.config),
         mismatches=build_mismatch_lines(selection.planned, context.platform.limits),
-        warnings=build_warning_lines(selection.planned, context.form_diagnostics, notices),
+        warnings=build_warning_lines(
+            selection.planned, context.form_diagnostics, notices, context.channel_warnings
+        ),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )
@@ -259,7 +266,7 @@ def _run_status(context: _RunContext) -> RunOutcome:
         mode=RunMode.STATUS,
         generated_at_text=context.generated_at_text,
         outcomes=outcomes,
-        warnings=build_warning_lines((), (), notices),
+        warnings=build_warning_lines((), (), notices, context.channel_warnings),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )
@@ -296,6 +303,7 @@ def _orphan_line(orphan: OrphanBroadcast) -> OrphanLine:
         time=parts.time if parts else "",
         language=parts.language if parts else "",
         account_name=orphan.channel.account_name,
+        handle=orphan.channel.handle,
         broadcast_url=broadcast_url_for(orphan.channel, orphan.broadcast.broadcast_id),
     )
 
@@ -330,9 +338,10 @@ def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> li
         if result.diagnostic_path is not None:
             diagnostics.append(str(result.diagnostic_path))
         LOGGER.info(
-            'form_send slot_id=%s channel="%s" confirmed=%s stream_key=%s',
+            'form_send slot_id=%s channel="%s" handle=%s confirmed=%s stream_key=%s',
             item.slot_id,
             item.channel.account_name,
+            item.channel.handle,
             result.confirmed,
             mask_stream_key(item.stream_key),
         )
@@ -390,7 +399,11 @@ def _one_line(text: str) -> str:
 
 
 def _log_line(item: PlannedBroadcast, fields: dict[str, object]) -> str:
-    identity: dict[str, object] = {"slot_id": item.slot_id, "channel": _quoted(item.channel.account_name)}
+    identity: dict[str, object] = {
+        "slot_id": item.slot_id,
+        "channel": _quoted(item.channel.account_name),
+        "handle": item.channel.handle,
+    }
     return " ".join(f"{key}={value}" for key, value in (identity | fields).items())
 
 
@@ -427,9 +440,10 @@ def _mark_video_fixes(item: PlannedBroadcast, fixes: VideoFixes) -> None:
         item.decision = Decision.UPDATE
     item.require_key_delivery()
     LOGGER.info(
-        'video_fields_fixed slot_id=%s channel="%s" fields=%s',
+        'video_fields_fixed slot_id=%s channel="%s" handle=%s fields=%s',
         item.slot_id,
         item.channel.account_name,
+        item.channel.handle,
         ",".join(name.value for name in added),
     )
 
@@ -440,14 +454,14 @@ class _Executor:
     def __init__(self, context: _RunContext) -> None:
         self._context: _RunContext = context
         self._platform: BroadcastPlatform = context.platform
-        self._resent: set[tuple[str, str]] = set()   # (slot_id, канал): эфир уже переотправлен в этом запуске
+        self._resent: set[tuple[str, str]] = set()   # (slot_id, channel.key): эфир уже переотправлен в этом запуске
 
     def execute(self, item: PlannedBroadcast) -> None:
         try:
             self._dispatch(item)
             self._finish(item)
         except PlatformError as error:
-            LOGGER.warning('pair_failed slot_id=%s channel="%s" code=%s', item.slot_id, item.channel.account_name, error.code)
+            LOGGER.warning('pair_failed slot_id=%s channel="%s" handle=%s code=%s', item.slot_id, item.channel.account_name, item.channel.handle, error.code)
             item.error = OutcomeError(origin=item.channel.platform.value, code=error.code, message=error.message)
             item.last_error = error.message or error.code
             item.decision = Decision.ERROR
@@ -475,9 +489,10 @@ class _Executor:
         created: CreatedBroadcast = self._platform.create_broadcast(item.channel, item.expected)
         item.take_new_key(created)
         LOGGER.info(
-            'broadcast_created slot_id=%s channel="%s" broadcast_id=%s stream_key=%s',
+            'broadcast_created slot_id=%s channel="%s" handle=%s broadcast_id=%s stream_key=%s',
             item.slot_id,
             item.channel.account_name,
+            item.channel.handle,
             created.broadcast_id,
             mask_stream_key(created.stream_key),
         )
@@ -495,9 +510,10 @@ class _Executor:
         item.stream_attached = True
         item.take_new_key(attached)
         LOGGER.info(
-            'stream_attached slot_id=%s channel="%s" broadcast_id=%s stream_key=%s',
+            'stream_attached slot_id=%s channel="%s" handle=%s broadcast_id=%s stream_key=%s',
             item.slot_id,
             item.channel.account_name,
+            item.channel.handle,
             attached.broadcast_id,
             mask_stream_key(attached.stream_key),
         )
@@ -514,7 +530,7 @@ class _Executor:
 
     def _resend(self, item: PlannedBroadcast, broadcast_id: str, *, with_marker: bool) -> None:
         """Одна переотправка на эфир за запуск: liveBroadcasts.update, метка (если отличалась), обложка из пакета."""
-        self._resent.add((item.slot_id, item.channel.account_name))
+        self._resent.add((item.slot_id, item.channel.key))
         self._context.progress.broadcast_step_started(item, BroadcastStep.FIX)
         self._platform.update_broadcast(item.channel, broadcast_id, item.expected)
         if with_marker and ChangedField.MARKER in item.changed_fields and item.found_stream is not None:
@@ -522,9 +538,10 @@ class _Executor:
             self._platform.set_stream_marker(item.channel, item.found_stream.stream_id, item.expected.marker)
         self._set_thumbnail(item, broadcast_id)
         LOGGER.info(
-            'broadcast_updated slot_id=%s channel="%s" broadcast_id=%s fields=%s',
+            'broadcast_updated slot_id=%s channel="%s" handle=%s broadcast_id=%s fields=%s',
             item.slot_id,
             item.channel.account_name,
+            item.channel.handle,
             broadcast_id,
             ",".join(changed.value for changed in item.changed_fields),
         )
@@ -536,7 +553,7 @@ class _Executor:
             return
         was_match: bool = item.decision is Decision.MATCH
         fixes: VideoFixes | None = self._apply_video_settings(item, broadcast_id)
-        is_resent: bool = (item.slot_id, item.channel.account_name) in self._resent
+        is_resent: bool = (item.slot_id, item.channel.key) in self._resent
         if was_match and item.decision is Decision.UPDATE and not is_resent:
             # видимость или категория разошлись у ресурса видео: эфир тоже переотправляется целиком,
             # настройки видео второй раз не проходятся
@@ -568,9 +585,10 @@ class _Executor:
             )
         except PlatformError as error:
             LOGGER.warning(
-                'video_settings_failed slot_id=%s channel="%s" code=%s',
+                'video_settings_failed slot_id=%s channel="%s" handle=%s code=%s',
                 item.slot_id,
                 item.channel.account_name,
+                item.channel.handle,
                 error.code,
             )
             item.warn(OutcomeWarning(WARNING_STEP_SETTINGS, error.code, error.message))
@@ -592,9 +610,10 @@ class _Executor:
             facts: BroadcastFacts = self._platform.read_facts(item.channel, broadcast_id)
         except PlatformError as error:
             LOGGER.warning(
-                'facts_read_failed slot_id=%s channel="%s" code=%s',
+                'facts_read_failed slot_id=%s channel="%s" handle=%s code=%s',
                 item.slot_id,
                 item.channel.account_name,
+                item.channel.handle,
                 error.code,
             )
             item.warn(OutcomeWarning(WARNING_STEP_FACTS, error.code, error.message))
@@ -613,9 +632,10 @@ class _Executor:
             self._platform.set_thumbnail(item.channel, broadcast_id, preview)
         except PlatformError as error:
             LOGGER.warning(
-                'thumbnail_failed slot_id=%s channel="%s" code=%s',
+                'thumbnail_failed slot_id=%s channel="%s" handle=%s code=%s',
                 item.slot_id,
                 item.channel.account_name,
+                item.channel.handle,
                 error.code,
             )
             item.warn(OutcomeWarning(WARNING_STEP_THUMBNAIL, error.code, error.message))

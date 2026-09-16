@@ -27,8 +27,10 @@ from app.platforms.base import (
     picture_sha,
     placeholder_sha_from_description,
 )
+from app.google.auth import AuthError, AuthErrorReason
 from app.platforms.youtube import (
     ERROR_AUTH,
+    ERROR_LOGIN_REQUIRED,
     RETRY_MAX_ATTEMPTS,
     YOUTUBE_STREAM_KEY_PATTERN,
     ErrorBehavior,
@@ -39,11 +41,14 @@ from app.platforms.youtube import (
 CHANNEL: ChannelConfig = ChannelConfig(
     platform=Platform.YOUTUBE,
     account_name="Канал UA",
+    handle="@KanalUA",
     google_account="owner@gmail.com",
     languages=("uk",),
     privacy=Privacy.PUBLIC,
 )
-OTHER_CHANNEL: ChannelConfig = replace(CHANNEL, account_name="Канал RU", google_account="ru@gmail.com")
+OTHER_CHANNEL: ChannelConfig = replace(
+    CHANNEL, account_name="Канал RU", handle="@KanalRU", google_account="ru@gmail.com"
+)
 GOOD_KEY: str = "abcd-1234-efgh-5678-ijkl"
 
 
@@ -154,7 +159,7 @@ def _install(
     service: _FakeService,
 ) -> _FakeService:
     """Готовый клиент вместо build() и OAuth: сеть в тестах запрещена."""
-    monkeypatch.setattr(platform, "_service", lambda channel: service)
+    monkeypatch.setattr(platform, "_service", lambda channel, allow_login: service)
     return service
 
 
@@ -310,7 +315,7 @@ def test_undated_broadcast_becomes_one_notice_taken_once(
     _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [undated, dated]}]))
     assert [broadcast.broadcast_id for broadcast in platform.list_upcoming(CHANNEL)] == ["B2"]
     assert platform.take_notices() == (
-        PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, account_name="Канал UA", title="Эфир B1"),
+        PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, account_name="Канал UA", title="Эфир B1", handle="@KanalUA"),
     )
     assert platform.take_notices() == ()                 # накопитель очищен
 
@@ -347,7 +352,7 @@ def test_ordinary_undated_broadcast_next_to_default_still_gives_one_notice(
     _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [permanent, undated]}]))
     assert platform.list_upcoming(CHANNEL) == []
     assert platform.take_notices() == (
-        PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, account_name="Канал UA", title="Эфир B1"),
+        PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, account_name="Канал UA", title="Эфир B1", handle="@KanalUA"),
     )
 
 
@@ -639,7 +644,7 @@ def test_failed_login_is_not_repeated(platform: YouTubePlatform, monkeypatch: py
     """Отказ входа — отказ канала: браузер за запуск второй раз не открывается."""
     attempts: list[str] = []
 
-    def _service(channel: ChannelConfig) -> Any:
+    def _service(channel: ChannelConfig, allow_login: bool) -> Any:
         attempts.append(channel.account_name)
         raise PlatformError(ERROR_AUTH, "flow_failed: отказ")
 
@@ -764,7 +769,7 @@ def test_create_broadcast_inserts_binds_and_returns_key(
     stream_body: dict[str, Any] = service.calls[1]["body"]
     assert stream_body["snippet"]["title"] == spec.marker      # маркер планера (§7.3)
     # описание ключа в Студии: чей ключ и для какого эфира
-    assert stream_body["snippet"]["description"].startswith("Ключ планера: канал «Канал UA», эфир 17-03-2027 19:00, язык uk")
+    assert stream_body["snippet"]["description"].startswith("Ключ планера: канал «Канал UA» @KanalUA, эфир 17-03-2027 19:00, язык uk")
     assert stream_body["cdn"] == {"ingestionType": "rtmp", "resolution": "variable", "frameRate": "variable"}
     assert service.calls[2]["method"] == "bind"
     assert (service.calls[2]["id"], service.calls[2]["streamId"]) == ("B1", "S1")
@@ -795,7 +800,7 @@ def test_broadcast_body_comes_from_the_spec(platform: YouTubePlatform, monkeypat
 
 
 def test_login_callback_gets_the_channel_before_the_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Токен ищется по account_name; вход — через on_login ровно перед браузером."""
+    """Токен ищется по нику; вход — через on_login ровно перед браузером."""
     client_secret: Path = tmp_path / "client_secret.json"
     client_secret.write_text("{}", encoding="utf-8")
     logins: list[str] = []
@@ -814,6 +819,7 @@ def test_login_callback_gets_the_channel_before_the_browser(tmp_path: Path, monk
         login_hint: str,
         force_reauth: bool = False,
         on_login: Any = None,
+        allow_login: bool = True,
     ) -> object:
         token_files.append(token_file)
         hints.append(login_hint)
@@ -822,11 +828,46 @@ def test_login_callback_gets_the_channel_before_the_browser(tmp_path: Path, monk
 
     monkeypatch.setattr(youtube_module, "load_credentials", _load)
     monkeypatch.setattr(youtube_module, "build", lambda *args, **kwargs: _FakeService())
-    platform._service(CHANNEL)
-    platform._service(CHANNEL)                         # клиент кешируется: вход один раз
+    platform._service(CHANNEL, True)
+    platform._service(CHANNEL, True)                   # клиент кешируется: вход один раз
     assert logins == ["Канал UA"]
-    assert token_files == [tmp_path / "Канал UA.token.json"]
+    assert token_files == [tmp_path / "@KanalUA.token.json"]
     assert hints == ["owner@gmail.com"]
+
+
+def test_describe_without_login_is_refused_but_not_remembered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """allow_login=False: нужен вход — loginRequired без браузера; следующий обычный вызов входит как всегда."""
+    client_secret: Path = tmp_path / "client_secret.json"
+    client_secret.write_text("{}", encoding="utf-8")
+    platform: YouTubePlatform = YouTubePlatform(client_secret, tmp_path, request_pause_sec=0)
+    allowed: list[bool] = []
+
+    def _load(
+        client_secret_file: Path,
+        token_file: Path,
+        login_hint: str,
+        force_reauth: bool = False,
+        on_login: Any = None,
+        allow_login: bool = True,
+    ) -> object:
+        allowed.append(allow_login)
+        if not allow_login:
+            raise AuthError(AuthErrorReason.LOGIN_REQUIRED, token_file.name)
+        return object()
+
+    service: _FakeService = _FakeService(
+        channels=[{"items": [{"id": "UC1", "snippet": {"title": "Канал UA", "customUrl": "@kanalua"}}]}]
+    )
+    monkeypatch.setattr(youtube_module, "load_credentials", _load)
+    monkeypatch.setattr(youtube_module, "build", lambda *args, **kwargs: service)
+    with pytest.raises(PlatformError) as refused:
+        platform.describe_channel(CHANNEL, allow_login=False)
+    assert refused.value.code == ERROR_LOGIN_REQUIRED
+    info: ChannelInfo = platform.describe_channel(CHANNEL)
+    assert (info.youtube_channel_id, info.handle_raw) == ("UC1", "@kanalua")
+    assert allowed == [False, True]
 
 
 def test_unexpected_stream_key_is_an_error(
@@ -896,7 +937,7 @@ def test_set_stream_marker_rewrites_snippet_whole(platform: YouTubePlatform, mon
     body: dict[str, Any] = service.calls[1]["body"]
     assert body["id"] == "S1"
     assert body["snippet"]["title"] == "17-03-2027_1900_uk"
-    assert body["snippet"]["description"].startswith("Ключ планера: канал «Канал UA», эфир 17-03-2027 19:00, язык uk")
+    assert body["snippet"]["description"].startswith("Ключ планера: канал «Канал UA» @KanalUA, эфир 17-03-2027 19:00, язык uk")
     assert (body["snippet"]["channelId"], body["snippet"]["isDefaultStream"]) == ("UC1", False)   # не затёрты
 
 
@@ -1282,7 +1323,7 @@ def test_set_stream_marker_keeps_the_placeholder_token(platform: YouTubePlatform
     )
     platform.set_stream_marker(CHANNEL, "S1", "17-03-2027_1900_uk")
     description: str = service.calls[1]["body"]["snippet"]["description"]
-    assert description.startswith("Ключ планера: канал «Канал UA», эфир 17-03-2027 19:00")
+    assert description.startswith("Ключ планера: канал «Канал UA» @KanalUA, эфир 17-03-2027 19:00")
     assert placeholder_sha_from_description(description) == "044eb0835668"
 
 
@@ -1347,3 +1388,22 @@ def test_pause_also_separates_picture_downloads(
     moments: list[float] = [service.calls[0]["at"]] + [moment for _, moment in session.calls if moment is not None]
     assert len(moments) == 3
     assert all(later - earlier >= 2 for earlier, later in zip(moments, moments[1:]))
+
+
+def test_refusals_of_channels_with_one_title_do_not_mix(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    """Память отказов — по ключу канала (нику): одинаковое название другого канала отказ не наследует."""
+    twin: ChannelConfig = replace(CHANNEL, handle="@KanalUA2")
+    assert twin.account_name == CHANNEL.account_name
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(liveBroadcasts=[_http_error(401, "authError", "токен отозван"), {"items": []}]),
+    )
+    with pytest.raises(PlatformError, match="authError"):
+        platform.list_upcoming(CHANNEL)
+    assert platform.list_upcoming(twin) == []
+    assert len(service.calls) == 2

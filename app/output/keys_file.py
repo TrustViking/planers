@@ -30,6 +30,7 @@ class KeyRow:
     date: str
     time: str
     account_name: str
+    handle: str
     form_status_text: str
     stream_url: str
     stream_key: str
@@ -54,6 +55,7 @@ def key_row_from_planned(item: PlannedBroadcast) -> KeyRow:
         date=item.date,
         time=item.time,
         account_name=item.account_name,
+        handle=item.channel.handle,
         form_status_text=form_status_text(item),
         stream_url=item.stream_url or MISSING_VALUE,
         stream_key=item.stream_key or MISSING_VALUE,
@@ -68,6 +70,7 @@ def key_row_from_marked(marked: MarkedBroadcast) -> KeyRow:
         date=marked.parts.date,
         time=marked.parts.time,
         account_name=marked.channel.account_name,
+        handle=marked.channel.handle,
         form_status_text=msg.KEY_FORM_KEPT,
         stream_url=marked.stream.ingestion_address,
         stream_key=marked.stream.stream_name,
@@ -90,7 +93,9 @@ def render_keys_file(rows: Iterable[KeyRow], generated_at_text: str) -> str:
 
 def _row_block(row: KeyRow) -> list[str]:
     return [
-        msg.KEYS_BLOCK_TITLE.format(date=row.date, time=row.time, language=row.language, account_name=row.account_name),
+        msg.KEYS_BLOCK_TITLE.format(
+            date=row.date, time=row.time, language=row.language, account_name=row.account_name, handle=row.handle
+        ),
         msg.KEYS_BLOCK_KEY.format(value=row.stream_key),
         msg.KEYS_BLOCK_STREAM.format(value=row.stream_url),
         msg.KEYS_BLOCK_BROADCAST.format(value=row.broadcast_url),

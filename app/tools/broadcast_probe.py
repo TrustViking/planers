@@ -81,20 +81,20 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(description=PROGRAM_DESCRIPTION)
-    parser.add_argument("--channel", required=True, help="имя канала как в secrets\\channels.json")
+    parser.add_argument("--channel", required=True, help="ник канала (handle) как в secrets\\channels.json")
     parser.add_argument("--remove", default="", help="идентификатор эфира без времени старта, который надо удалить")
     return parser.parse_args(argv)
 
 
-def _channel(paths: PlanerPaths, account_name: str) -> ChannelConfig:
+def _channel(paths: PlanerPaths, handle: str) -> ChannelConfig:
     config: PlanerConfig = load_planer_config(paths.config_file, paths.channels_file)
-    channel: ChannelConfig | None = config.channel(account_name)
+    channel: ChannelConfig | None = config.channel_by_handle(handle)
     if channel is None:
-        names: str = ", ".join(item.account_name for item in config.channels)
+        names: str = ", ".join(item.handle for item in config.channels)
         raise ConfigError(
             config_path=paths.channels_file,
             key_path=CHANNELS_KEY,
-            problem=f"канала «{account_name}» нет в конфиге; есть: {names}",
+            problem=f"канала с ником {handle} нет в конфиге; есть: {names}",
         )
     return channel
 
@@ -102,7 +102,7 @@ def _channel(paths: PlanerPaths, account_name: str) -> ChannelConfig:
 def _service(paths: PlanerPaths, channel: ChannelConfig) -> Any:
     credentials: Any = load_credentials(
         paths.client_secret_file,
-        token_file_for(paths.secrets_dir, channel.account_name),
+        token_file_for(paths.secrets_dir, channel.handle),
         login_hint=channel.google_account,
     )
     return build(API_SERVICE_NAME, API_VERSION, credentials=credentials, cache_discovery=False)

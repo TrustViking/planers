@@ -31,11 +31,15 @@ from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
 
 ROOT: Path = Path("D:/planer")
-OSVALD: dict[str, str] = {"account_name": "Osvald.X", "google_account": "trustviorel@gmail.com"}
-OKTAVIAN: dict[str, str] = {"account_name": "Oktavian.X", "google_account": "oktavian.tibery@gmail.com"}
-CHANNEL_ORDER: tuple[str, ...] = ("Osvald.X", "Oktavian.X")      # как в channels.json
+OSVALD: dict[str, str] = {"account_name": "Osvald.X", "handle": "@Osvald.X", "google_account": "trustviorel@gmail.com"}
+OKTAVIAN: dict[str, str] = {
+    "account_name": "Oktavian.X",
+    "handle": "@Oktavian.X",
+    "google_account": "oktavian.tibery@gmail.com",
+}
+CHANNEL_ORDER: tuple[str, ...] = ("osvald.x", "oktavian.x")      # ключи каналов в порядке channels.json
 FULL_KEYS: tuple[str, ...] = ("aaaa-bbbb-cccc-dddd-6jty", "aaaa-bbbb-cccc-dddd-3j1j", "aaaa-bbbb-cccc-dddd-9zzz")
-UNDATED_WARNING: str = msg.WARNING_UNDATED_BROADCAST.format(account_name="Osvald.X", title="Брифинг в Конгрессе")
+UNDATED_WARNING: str = msg.WARNING_UNDATED_BROADCAST.format(channel="Osvald.X @Osvald.X", title="Брифинг в Конгрессе")
 RESTORED_WARNING: str = (
     "не можем исправить: 19-03-2027 19:00 uk -> Oktavian.X — автостарт: нужно да, на площадке нет; "
     "через API это не исправляется"
@@ -45,30 +49,30 @@ RESTORED_WARNING: str = (
 SAMPLE_CONSOLE: str = f"""Итог: опубликовано 2, исправлено 1, уже стояло 1, не публиковали 2, ошибок 0
 
 ======================= ВНИМАНИЕ =======================
-  ключ не дошёл до стримера: 18-03-2027 20:00 ru -> Osvald.X — форма недоступна (HTTP 503)
-  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: было private, стало unlisted
+  ключ не дошёл до стримера: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — форма недоступна (HTTP 503)
+  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — видимость: было private, стало unlisted
   {RESTORED_WARNING}
   {UNDATED_WARNING}
 
 =================== ОПУБЛИКОВАЛИ (2) ===================
-  Osvald.X (trustviorel@gmail.com)
+  Osvald.X @Osvald.X (trustviorel@gmail.com)
     17-03-2027  19:00  ru  Контроль влажности экономит до 40% энергии
-  Oktavian.X (oktavian.tibery@gmail.com)
+  Oktavian.X @Oktavian.X (oktavian.tibery@gmail.com)
     17-03-2027  19:00  uk  Депортовані діти мають повернутися
 
 ==================== ИСПРАВИЛИ (1) =====================
-  Osvald.X (trustviorel@gmail.com)
+  Osvald.X @Osvald.X (trustviorel@gmail.com)
     18-03-2027  20:00  ru  Второй эфир — обновлено: описание
 
 ================== КЛЮЧИ СТРИМЕРУ (3) ==================
-  Osvald.X (trustviorel@gmail.com)
+  Osvald.X @Osvald.X (trustviorel@gmail.com)
     17-03-2027  19:00  ru  ****-6jty  передан в форму
     18-03-2027  20:00  ru  ****-9zzz  НЕ передан — форма недоступна (HTTP 503)
-  Oktavian.X (oktavian.tibery@gmail.com)
+  Oktavian.X @Oktavian.X (oktavian.tibery@gmail.com)
     17-03-2027  19:00  uk  ****-3j1j  передан в форму
 
 ==================== УЖЕ СТОЯЛО (1) ====================
-  Oktavian.X (oktavian.tibery@gmail.com)
+  Oktavian.X @Oktavian.X (oktavian.tibery@gmail.com)
     19-03-2027  19:00  uk  Третій ефір
 
 ================== НЕ ПУБЛИКОВАЛИ (2) ==================
@@ -169,11 +173,11 @@ def test_broadcasts_are_grouped_by_channel_in_channels_json_order() -> None:
     """Шапка канала с почтой — один раз на группу; внутри канала — по дате и времени."""
     text: str = _render(_sample_report())
     keys_block: list[str] = text.split("КЛЮЧИ СТРИМЕРУ (3)")[1].split("\n\n")[0].splitlines()[1:]
-    assert keys_block[0] == "  Osvald.X (trustviorel@gmail.com)"
+    assert keys_block[0] == "  Osvald.X @Osvald.X (trustviorel@gmail.com)"
     assert keys_block[1].startswith("    17-03-2027  19:00") and keys_block[2].startswith("    18-03-2027  20:00")
-    assert keys_block[3] == "  Oktavian.X (oktavian.tibery@gmail.com)"
-    assert text.count("  Osvald.X (trustviorel@gmail.com)") == 3        # по разу в каждом блоке, где канал есть
-    assert "-> Osvald.X" not in text.split("ОПУБЛИКОВАЛИ (2)")[1]         # в строках эфиров канала нет
+    assert keys_block[3] == "  Oktavian.X @Oktavian.X (oktavian.tibery@gmail.com)"
+    assert text.count("  Osvald.X @Osvald.X (trustviorel@gmail.com)") == 3        # по разу в каждом блоке, где канал есть
+    assert "-> Osvald.X @Osvald.X" not in text.split("ОПУБЛИКОВАЛИ (2)")[1]         # в строках эфиров канала нет
 
 
 def test_stream_key_is_masked_and_the_full_key_appears_nowhere() -> None:
@@ -205,9 +209,9 @@ def test_settings_only_fix_has_no_tail_in_fixed_and_is_named_in_attention() -> N
     text: str = _render(report)
     lines: list[str] = text.splitlines()
     fixed: list[str] = text.split("ИСПРАВИЛИ (1)")[1].split("\n\n")[0].splitlines()[1:]
-    assert fixed == ["  Osvald.X (trustviorel@gmail.com)", "    18-03-2027  20:00  ru  Второй эфир"]
+    assert fixed == ["  Osvald.X @Osvald.X (trustviorel@gmail.com)", "    18-03-2027  20:00  ru  Второй эфир"]
     assert lines[0] == "Итог: опубликовано 0, исправлено 1, уже стояло 0, не публиковали 0, ошибок 0"
-    assert "  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: было private, стало unlisted" in lines
+    assert "  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — видимость: было private, стало unlisted" in lines
     assert text.count("видимость") == 1
 
 
@@ -233,7 +237,7 @@ def test_attention_collects_errors_forms_packages_restored_and_warnings() -> Non
     attention: list[str] = text.split("\n\n")[1].splitlines()
     assert msg.CONSOLE_BLOCK_ATTENTION in attention[0]
     assert (
-        "  ошибка: 20-03-2027 20:00 ru -> Osvald.X — YouTube: "
+        "  ошибка: 20-03-2027 20:00 ru -> Osvald.X @Osvald.X — YouTube: "
         + msg.YOUTUBE_REASON_TEXT["liveStreamingNotEnabled"]
         + " (liveStreamingNotEnabled)"
     ) in attention
@@ -264,7 +268,7 @@ def test_dry_run_speaks_of_intent_and_has_no_keys_block() -> None:
     assert lines[0] == "Итог: опубликуем 1, исправим 1, уже стояло 0, не публиковали 2, ошибок 0"
     assert _block_titles(text) == ["ВНИМАНИЕ", "ОПУБЛИКУЕМ (1)", "ИСПРАВИМ (1)", "НЕ ПУБЛИКОВАЛИ (2)"]
     assert "    18-03-2027  20:00  ru  Второй эфир — будет обновлено: описание" in lines
-    assert "  вернём к пакету: 18-03-2027 20:00 ru -> Osvald.X — видимость: сейчас private, будет unlisted" in lines
+    assert "  вернём к пакету: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — видимость: сейчас private, будет unlisted" in lines
     assert msg.CONSOLE_BLOCK_KEYS not in text and msg.CONSOLE_LABEL_KEYS + " " not in text
 
 

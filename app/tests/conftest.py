@@ -16,6 +16,7 @@ import pytest
 
 from app.config.loader import ChannelConfig, Platform, PlanerConfig, PlanerSettings, Privacy
 from app.core.dates import build_slot_id, format_date, format_time, parse_date, parse_time
+from app.core.text import HANDLE_PREFIX
 from app.form.base import FormSendResult
 from app.output.progress import BroadcastStep
 from app.package.model import FormSpec, Package, Slot
@@ -84,7 +85,7 @@ def build_config(
     category_id: str = "22",
     youtube_pause_seconds: int = 0,
 ) -> PlanerConfig:
-    """Каналы — пары (account_name, языки); настройки — как в secrets\\planer.json."""
+    """Каналы — пары (account_name, языки), ник — «@» + account_name; настройки — как в secrets\\planer.json."""
     return PlanerConfig(
         settings=PlanerSettings(
             min_lead_minutes=min_lead_minutes,
@@ -98,6 +99,7 @@ def build_config(
             ChannelConfig(
                 platform=Platform.YOUTUBE,
                 account_name=account_name,
+                handle=HANDLE_PREFIX + account_name,
                 google_account="owner@gmail.com",
                 languages=tuple(languages),
                 privacy=Privacy.PUBLIC,
@@ -208,11 +210,11 @@ class RecordingProgress:
     def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None:
         self.calls.append(("packages_read", packages, slots_total, slots_mine))
 
-    def channel_read_started(self, account_name: str) -> None:
-        self.calls.append(("channel_read_started", account_name, *self._list_count()))
+    def channel_read_started(self, channel: ChannelConfig) -> None:
+        self.calls.append(("channel_read_started", channel.account_name, *self._list_count()))
 
-    def channel_read_done(self, account_name: str, upcoming: int) -> None:
-        self.calls.append(("channel_read_done", account_name, upcoming, *self._list_count()))
+    def channel_read_done(self, channel: ChannelConfig, upcoming: int) -> None:
+        self.calls.append(("channel_read_done", channel.account_name, upcoming, *self._list_count()))
 
     def broadcast_step_started(self, item: PlannedBroadcast, step: BroadcastStep) -> None:
         self.calls.append(("broadcast_step_started", item.slot_id, item.account_name, step))

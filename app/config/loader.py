@@ -1,7 +1,9 @@
 """secrets\\planer.json + secrets\\channels.json → PlanerConfig (ТЗ §5.2).
 
 Два файла, оба JSON, все поля обязательные, умолчаний в коде нет. channels.json заполняет
-владелец: только пять полей канала. planer.json — технический, поставляется со сборкой
+владелец: только шесть полей канала; ключ канала — ник (handle). Переписывает channels.json планер
+только при выравнивании ника и названия по id YouTube (app/platforms/channel_sync.py) — функцией
+save_channels_file, текст — только render_channels_file. planer.json — технический, поставляется со сборкой
 заполненным и действует на все каналы. Язык стримов назначает оператор в channels.json;
 язык канала на YouTube на решения не влияет. Файла нет — это ConfigError, копирования
 примеров нет: шаблон печатает main.
@@ -9,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -16,8 +19,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Final
 
-from app.core.text import CONTROL_CHAR_LIMIT, token_file_stem
-from app.google.auth import token_file_for
+from app.core.text import CONTROL_CHAR_LIMIT, HANDLE_PREFIX, UNICODE_FORM, normalize_handle
+from app.paths import write_text_atomically
 from app.ui import messages_ru as msg
 
 
@@ -53,16 +56,26 @@ SETTINGS_KEYS: Final[tuple[str, ...]] = (
     "youtube_pause_seconds",
 )
 CHANNELS_TOP_LEVEL_KEYS: Final[tuple[str, ...]] = (CHANNELS_KEY,)
-CHANNEL_KEYS: Final[tuple[str, ...]] = ("platform", "account_name", "google_account", "languages", "privacy")
-AUTH_ALL: Final[str] = "all"  # --auth all: все каналы из channels.json; каналом с таким именем быть не может
-# account_name — название канала буква в букву как на YouTube; имя файла токена из него строит
-# core.text.token_file_stem, поэтому ограничений имени файла у названия нет.
+CHANNEL_KEYS: Final[tuple[str, ...]] = ("platform", "account_name", "handle", "google_account", "languages", "privacy")
+# Как render_channels_file раскладывает канал: первая строка — эти поля, вторая — остальные.
+CHANNEL_FIRST_LINE_KEYS: Final[tuple[str, ...]] = CHANNEL_KEYS[:4]
+CHANNEL_SECOND_LINE_KEYS: Final[tuple[str, ...]] = CHANNEL_KEYS[4:]
+CHANNELS_FILE_HEAD: Final[str] = '{\n  "channels": [\n'
+CHANNELS_FILE_TAIL: Final[str] = "\n  ]\n}\n"
+CHANNEL_LINES: Final[str] = "    {{{first},\n     {second}}}"
+CHANNEL_FIELD: Final[str] = "{key}: {value}"
+CHANNEL_FIELD_JOINER: Final[str] = ", "
+CHANNEL_JOINER: Final[str] = ",\n"
+AUTH_ALL: Final[str] = "all"  # --auth all: все каналы из channels.json
+# handle — ник канала на YouTube, ключ канала: из него строится имя файла токена (core.text.token_file_stem).
+HANDLE_MIN_CHARS: Final[int] = 3
+HANDLE_MAX_CHARS: Final[int] = 30
+HANDLE_FORBIDDEN_CHARS: Final[str] = '<>:"/\\|?*'
+# account_name — название канала для людей и формы; одинаковые названия у разных каналов допустимы.
 ACCOUNT_NAME_EDGE_CHAR: Final[str] = " "   # YouTube не отдаёт названия с пробелом по краю: такое не совпадёт
 # google_account — подсказка аккаунта при входе, а не проверка почты: ровно один «@», части непустые, без пробелов.
 GOOGLE_ACCOUNT_SEPARATOR: Final[str] = "@"
-# Лимит длины: имя файла токена + путь к secrets\ должны уложиться в 260 символов пути Windows.
-ACCOUNT_NAME_MAX_CHARS: Final[int] = 100
-ACCOUNT_NAME_UNICODE_FORM: Final[str] = "NFC"
+ACCOUNT_NAME_MAX_CHARS: Final[int] = 100   # предел названия канала на YouTube
 
 
 class ConfigError(Exception):
@@ -90,17 +103,23 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class ChannelConfig:
-    """Ровно пять полей channels.json. account_name — название канала как на YouTube: проверка канала,
-    форма, логи, отчёт; имя файла токена строится из него (core.text.token_file_stem).
+    """Ровно шесть полей channels.json. handle — ник канала как в файле: файл токена, --auth;
+    key — его единственная нормализация, ключ всех словарей и кешей по каналу.
+    account_name — название канала для людей и формы.
 
     google_account — почта аккаунта Google канала: подсказка браузеру при входе.
     """
 
     platform: Platform
     account_name: str
+    handle: str
     google_account: str
     languages: tuple[str, ...]
     privacy: Privacy
+
+    @property
+    def key(self) -> str:
+        return normalize_handle(self.handle)
 
 
 @dataclass(frozen=True)
@@ -125,11 +144,11 @@ class PlanerConfig:
         """Языки, за которые отвечает хотя бы один канал."""
         return frozenset(language for channel in self.channels for language in channel.languages)
 
-    def channel(self, account_name: str) -> ChannelConfig | None:
-        """Имя из командной строки (--auth) приводится к той же форме, что и имена из конфига."""
-        wanted: str = normalize_account_name(account_name)
+    def channel_by_handle(self, handle: str) -> ChannelConfig | None:
+        """Ник из командной строки (--auth, пробники) — с «@» или без, в любом регистре."""
+        wanted: str = normalize_handle(handle)
         for channel in self.channels:
-            if channel.account_name == wanted:
+            if channel.key == wanted:
                 return channel
         return None
 
@@ -148,6 +167,40 @@ def load_planer_config(settings_file: Path, channels_file: Path) -> PlanerConfig
     """Каналы читаются первыми: их владелец заполняет сам, ошибка в них вероятнее."""
     channels: tuple[ChannelConfig, ...] = load_channels(channels_file)
     return PlanerConfig(settings=load_settings(settings_file), channels=channels)
+
+
+def render_channels_file(channels: Iterable[ChannelConfig]) -> str:
+    """Текст channels.json в том виде, в каком его пишет владелец: канал — две строки."""
+    body: str = CHANNEL_JOINER.join(_channel_lines(channel) for channel in channels)
+    return CHANNELS_FILE_HEAD + body + CHANNELS_FILE_TAIL
+
+
+def save_channels_file(channels_file: Path, previous_file: Path, channels: Iterable[ChannelConfig]) -> None:
+    """Прежний файл байт в байт — в previous_file (перезаписывается), новый — атомарно. Сбой — OSError."""
+    text: str = render_channels_file(channels)
+    shutil.copyfile(channels_file, previous_file)
+    write_text_atomically(channels_file, text, CONFIG_ENCODING)
+
+
+def _channel_lines(channel: ChannelConfig) -> str:
+    values: dict[str, Any] = {
+        "platform": channel.platform.value,
+        "account_name": channel.account_name,
+        "handle": channel.handle,
+        "google_account": channel.google_account,
+        "languages": list(channel.languages),
+        "privacy": channel.privacy.value,
+    }
+    return CHANNEL_LINES.format(
+        first=_channel_fields(values, CHANNEL_FIRST_LINE_KEYS),
+        second=_channel_fields(values, CHANNEL_SECOND_LINE_KEYS),
+    )
+
+
+def _channel_fields(values: dict[str, Any], keys: tuple[str, ...]) -> str:
+    return CHANNEL_FIELD_JOINER.join(
+        CHANNEL_FIELD.format(key=json.dumps(key), value=json.dumps(values[key], ensure_ascii=False)) for key in keys
+    )
 
 
 def _read_json(path: Path) -> Any:
@@ -190,14 +243,33 @@ def _is_language_code(value: Any) -> bool:
 
 
 def normalize_account_name(value: str) -> str:
-    """Одна форма Unicode (NFC): «й» одним символом и «и» + знак — одно имя и один токен."""
-    return unicodedata.normalize(ACCOUNT_NAME_UNICODE_FORM, value)
+    """Одна форма Unicode (NFC): «й» одним символом и «и» + знак — одно название."""
+    return unicodedata.normalize(UNICODE_FORM, value)
 
 
-def _account_name_problem(value: str) -> str | None:
-    """None — название годится; иначе что именно не так. value — уже в NFC; непустоту проверил _text.
+def handle_problem(value: str) -> str | None:
+    """None — ник годится; иначе что именно не так. value — уже в NFC.
 
-    Символы, недопустимые в имени файла, — законная часть названия: их заменяет token_file_stem.
+    Той же проверкой проходит ник, который планер сам пишет в channels.json при выравнивании.
+    """
+    if not value.startswith(HANDLE_PREFIX):
+        return msg.CONFIG_PROBLEM_HANDLE_PREFIX.format(value=value, prefix=HANDLE_PREFIX)
+    body: str = value[len(HANDLE_PREFIX):]
+    if not HANDLE_MIN_CHARS <= len(body) <= HANDLE_MAX_CHARS:
+        return msg.CONFIG_PROBLEM_HANDLE_LENGTH.format(
+            value=value, minimum=HANDLE_MIN_CHARS, maximum=HANDLE_MAX_CHARS, length=len(body)
+        )
+    for char in body:
+        if char.isspace() or ord(char) < CONTROL_CHAR_LIMIT or char in HANDLE_FORBIDDEN_CHARS:
+            return msg.CONFIG_PROBLEM_HANDLE_CHAR.format(value=value, char=repr(char))
+    return None
+
+
+def account_name_problem(value: str) -> str | None:
+    """None — название годится; иначе что именно не так. value — уже в NFC и непустое.
+
+    Название в именах файлов не участвует: ограничения — только те, что есть у названий на YouTube.
+    Той же проверкой проходит название, которое планер сам пишет в channels.json при выравнивании.
     """
     if len(value) > ACCOUNT_NAME_MAX_CHARS:
         return msg.CONFIG_PROBLEM_ACCOUNT_NAME_TOO_LONG.format(maximum=ACCOUNT_NAME_MAX_CHARS, length=len(value))
@@ -205,8 +277,6 @@ def _account_name_problem(value: str) -> str | None:
         return msg.CONFIG_PROBLEM_ACCOUNT_NAME_CONTROL
     if value.startswith(ACCOUNT_NAME_EDGE_CHAR) or value.endswith(ACCOUNT_NAME_EDGE_CHAR):
         return msg.CONFIG_PROBLEM_ACCOUNT_NAME_SPACE_EDGE.format(value=value)
-    if value.casefold() == AUTH_ALL.casefold():
-        return msg.CONFIG_PROBLEM_ACCOUNT_NAME_AUTH_ALL.format(value=value, auth_all=AUTH_ALL)
     return None
 
 
@@ -297,24 +367,17 @@ class _ConfigParser:
         for index, raw_channel in enumerate(raw):
             prefix: str = f"{CHANNELS_KEY}[{index}]."
             channel: ChannelConfig = self._channel(raw_channel, prefix=prefix)
-            self._check_unique(channel.account_name, channels, prefix=prefix)
+            self._check_unique(channel, channels, prefix=prefix)
             channels.append(channel)
         return tuple(channels)
 
-    def _check_unique(self, name: str, earlier: list[ChannelConfig], *, prefix: str) -> None:
-        """Один файл токена — один канал: Windows не различает регистр в имени файла."""
-        stem: str = token_file_stem(name).casefold()
+    def _check_unique(self, channel: ChannelConfig, earlier: list[ChannelConfig], *, prefix: str) -> None:
+        """Ник — ключ канала: повтор без учёта регистра — ошибка. Названия могут совпадать."""
         for other in earlier:
-            if other.account_name.casefold() == name.casefold():
+            if other.key == channel.key:
                 raise self._error(
-                    f"{prefix}account_name", msg.CONFIG_PROBLEM_ACCOUNT_NAME_DUPLICATE.format(value=name)
-                )
-            if token_file_stem(other.account_name).casefold() == stem:
-                raise self._error(
-                    f"{prefix}account_name",
-                    msg.CONFIG_PROBLEM_TOKEN_FILE_COLLISION.format(
-                        first=other.account_name, second=name, file_name=token_file_for(Path(), name).name
-                    ),
+                    f"{prefix}handle",
+                    msg.CONFIG_PROBLEM_HANDLE_DUPLICATE.format(value=channel.handle, other=other.handle),
                 )
 
     def _channel(self, raw: Any, *, prefix: str) -> ChannelConfig:
@@ -327,17 +390,26 @@ class _ConfigParser:
         return ChannelConfig(
             platform=self._platform(mapping, prefix=prefix),
             account_name=self._account_name(mapping, prefix=prefix),
+            handle=self._handle(mapping, prefix=prefix),
             google_account=self._google_account(mapping, prefix=prefix),
             languages=self._languages(mapping, prefix=prefix),
             privacy=self._privacy(mapping, prefix=prefix),
         )
 
     def _account_name(self, mapping: dict[str, Any], *, prefix: str) -> str:
-        """Название приводится к NFC до проверок: дальше везде — проверка канала, токен, отчёт — только эта форма."""
+        """Название приводится к NFC до проверок: дальше везде — проверка канала, форма, отчёт — только эта форма."""
         value: str = normalize_account_name(self._text(mapping, "account_name", prefix=prefix))
-        problem: str | None = _account_name_problem(value)
+        problem: str | None = account_name_problem(value)
         if problem is not None:
             raise self._error(f"{prefix}account_name", problem)
+        return value
+
+    def _handle(self, mapping: dict[str, Any], *, prefix: str) -> str:
+        """Ник хранится как в файле (NFC); сравнивается только через ChannelConfig.key."""
+        value: str = unicodedata.normalize(UNICODE_FORM, self._text(mapping, "handle", prefix=prefix))
+        problem: str | None = handle_problem(value)
+        if problem is not None:
+            raise self._error(f"{prefix}handle", problem)
         return value
 
     def _google_account(self, mapping: dict[str, Any], *, prefix: str) -> str:

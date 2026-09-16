@@ -10,7 +10,6 @@ import pytest
 
 from app.config.loader import (
     ACCOUNT_NAME_MAX_CHARS,
-    AUTH_ALL,
     ConfigError,
     ConfigProblem,
     PlanerConfig,
@@ -19,6 +18,8 @@ from app.config.loader import (
     load_channels,
     load_planer_config,
     load_settings,
+    render_channels_file,
+    save_channels_file,
 )
 from app.google.auth import token_file_for
 from app.ui import messages_ru as msg
@@ -39,6 +40,7 @@ BASE_CHANNELS: dict[str, Any] = {
         {
             "platform": "youtube",
             "account_name": "Канал UA",
+            "handle": "@KanalUA",
             "google_account": "ua@gmail.com",
             "languages": ["uk"],
             "privacy": "public",
@@ -46,12 +48,34 @@ BASE_CHANNELS: dict[str, Any] = {
         {
             "platform": "youtube",
             "account_name": "Канал RU",
+            "handle": "@KanalRU",
             "google_account": "ru@gmail.com",
             "languages": ["ru", "en"],
             "privacy": "unlisted",
         },
     ],
 }
+
+# secrets\\channels.json после задачи 5l: шесть полей, канал — две строки (render_channels_file)
+OWNER_CHANNELS_FILE: str = """{
+  "channels": [
+    {"platform": "youtube", "account_name": "Osvald.X", "handle": "@Osvald.X", "google_account": "trustviorel@gmail.com",
+     "languages": ["ru"], "privacy": "public"},
+    {"platform": "youtube", "account_name": "Oktavian.X", "handle": "@Oktavian.X", "google_account": "oktavian.tibery@gmail.com",
+     "languages": ["uk"], "privacy": "public"},
+    {"platform": "youtube", "account_name": "Maria Kamenskay", "handle": "@MariaKamenskay", "google_account": "maria.lotos11@gmail.com",
+     "languages": ["uk", "ru"], "privacy": "public"},
+    {"platform": "youtube", "account_name": "Nick Moss", "handle": "@NickMoss85", "google_account": "nino4kahx@gmail.com",
+     "languages": ["en"], "privacy": "public"},
+    {"platform": "youtube", "account_name": "Паша Экскаватощик", "handle": "@ПашаЭкскаватощик", "google_account": "warerabeliaev@gmail.com",
+     "languages": ["uk"], "privacy": "public"},
+    {"platform": "youtube", "account_name": "Українка я", "handle": "@TheImpact-r2b", "google_account": "impactthe95@gmail.com",
+     "languages": ["uk"], "privacy": "public"},
+    {"platform": "youtube", "account_name": "Українка Я", "handle": "@Ukrainian_girl25", "google_account": "lisathomson2024@gmail.com",
+     "languages": ["uk"], "privacy": "public"}
+  ]
+}
+"""
 
 
 def _write(path: Path, config: Any) -> Path:
@@ -101,11 +125,15 @@ INVALID_CHANNELS: list[tuple[str, Callable[[dict[str, Any]], object], str]] = [
     ("account_name_trailing_space", lambda c: _channel(0)(c).update(account_name="Osvald "), "channels[0].account_name"),
     ("account_name_newline", lambda c: _channel(0)(c).update(account_name="Osv\nald"), "channels[0].account_name"),
     ("account_name_tab", lambda c: _channel(0)(c).update(account_name="Osv\tald"), "channels[0].account_name"),
-    ("account_name_token_collision", lambda c: (_channel(0)(c).update(account_name="A:B"), _channel(1)(c).update(account_name="A|B")), "channels[1].account_name"),
-    ("account_name_duplicate", lambda c: _channel(1)(c).update(account_name="Канал UA"), "channels[1].account_name"),
-    ("account_name_duplicate_case", lambda c: _channel(1)(c).update(account_name="канал ua"), "channels[1].account_name"),
     ("account_name_too_long", lambda c: _channel(0)(c).update(account_name="К" * 101), "channels[0].account_name"),
-    ("account_name_auth_all", lambda c: _channel(0)(c).update(account_name="All"), "channels[0].account_name"),
+    ("handle_without_at", lambda c: _channel(0)(c).update(handle="KanalUA"), "channels[0].handle"),
+    ("handle_too_short", lambda c: _channel(0)(c).update(handle="@ab"), "channels[0].handle"),
+    ("handle_too_long", lambda c: _channel(0)(c).update(handle="@" + "a" * 31), "channels[0].handle"),
+    ("handle_space", lambda c: _channel(0)(c).update(handle="@Kanal UA"), "channels[0].handle"),
+    ("handle_slash", lambda c: _channel(0)(c).update(handle="@Kanal/UA"), "channels[0].handle"),
+    ("handle_blank", lambda c: _channel(0)(c).update(handle=" "), "channels[0].handle"),
+    ("handle_not_string", lambda c: _channel(0)(c).update(handle=1), "channels[0].handle"),
+    ("handle_duplicate_case", lambda c: _channel(1)(c).update(handle="@kanalua"), "channels[1].handle"),
     ("google_account_blank", lambda c: _channel(0)(c).update(google_account=""), "channels[0].google_account"),
     ("google_account_no_at", lambda c: _channel(0)(c).update(google_account="ua.gmail.com"), "channels[0].google_account"),
     ("google_account_two_at", lambda c: _channel(0)(c).update(google_account="u@a@gmail.com"), "channels[0].google_account"),
@@ -114,9 +142,9 @@ INVALID_CHANNELS: list[tuple[str, Callable[[dict[str, Any]], object], str]] = [
     ("google_account_space", lambda c: _channel(0)(c).update(google_account="u a@gmail.com"), "channels[0].google_account"),
     ("google_account_not_string", lambda c: _channel(0)(c).update(google_account=1), "channels[0].google_account"),
     (
-        "account_name_duplicate_unicode_form",
-        lambda c: (_channel(0)(c).update(account_name=COMPOSED), _channel(1)(c).update(account_name=DECOMPOSED)),
-        "channels[1].account_name",
+        "handle_duplicate_unicode_form",
+        lambda c: (_channel(0)(c).update(handle="@" + COMPOSED[:3]), _channel(1)(c).update(handle="@" + DECOMPOSED[:4])),
+        "channels[1].handle",
     ),
     ("languages_empty", lambda c: _channel(0)(c).update(languages=[]), "channels[0].languages"),
     ("languages_uppercase", lambda c: _channel(0)(c).update(languages=["UK"]), "channels[0].languages"),
@@ -127,7 +155,7 @@ INVALID_CHANNELS: list[tuple[str, Callable[[dict[str, Any]], object], str]] = [
     ("unknown_channel_key", lambda c: _channel(0)(c).update(token="x"), "channels[0].token"),
 ]
 
-MISSING_CHANNEL_FIELDS: list[str] = ["platform", "account_name", "google_account", "languages", "privacy"]
+MISSING_CHANNEL_FIELDS: list[str] = ["platform", "account_name", "handle", "google_account", "languages", "privacy"]
 
 
 def test_repo_planer_json_and_channels_example_load_together(
@@ -157,8 +185,9 @@ def test_console_templates_are_valid_configs(tmp_path: Path, repo_planer_config:
     config: PlanerConfig = load_planer_config(settings, channels)
     assert config.settings == load_settings(repo_planer_config)
     [channel] = config.channels
-    assert (channel.account_name, channel.google_account, channel.languages, channel.privacy) == (
+    assert (channel.account_name, channel.handle, channel.google_account, channel.languages, channel.privacy) == (
         "Название канала на YouTube",
+        "@ник_канала",
         "you@gmail.com",
         ("ru",),
         Privacy.UNLISTED,
@@ -174,6 +203,7 @@ def test_unknown_language_code_is_accepted(tmp_path: Path) -> None:
                 {
                     "platform": "youtube",
                     "account_name": "X",
+                    "handle": "@xxx",
                     "google_account": "x@gmail.com",
                     "languages": ["zz"],
                     "privacy": "public",
@@ -213,19 +243,78 @@ def test_account_name_is_normalized_to_nfc(tmp_path: Path) -> None:
         _write_channels(tmp_path, channels),
     )
     assert config.channels[0].account_name == COMPOSED
-    assert token_file_for(tmp_path, config.channels[0].account_name).name == f"{COMPOSED}.token.json"
-    assert config.channel(DECOMPOSED) is config.channels[0]      # --auth с именем в другой форме
 
 
-def test_channel_lookup_by_account_name(tmp_path: Path) -> None:
+def test_handle_is_normalized_to_nfc_and_keyed_without_case(tmp_path: Path) -> None:
+    """Ник в другой форме Unicode — тот же ник и тот же файл токена; --auth находит его с «@» и без."""
+    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
+    channels["channels"][0]["handle"] = "@" + DECOMPOSED.replace(" ", "")
+    config: PlanerConfig = load_planer_config(
+        _write_settings(tmp_path, copy.deepcopy(BASE_SETTINGS)),
+        _write_channels(tmp_path, channels),
+    )
+    wanted: str = "@" + COMPOSED.replace(" ", "")
+    assert config.channels[0].handle == wanted
+    assert token_file_for(tmp_path, config.channels[0].handle).name == f"{wanted}.token.json"
+    assert config.channels[0].key == COMPOSED.replace(" ", "").casefold()
+    assert config.channel_by_handle(DECOMPOSED.replace(" ", "").upper()) is config.channels[0]
+
+
+def test_channel_lookup_by_handle(tmp_path: Path) -> None:
     config: PlanerConfig = load_planer_config(
         _write_settings(tmp_path, copy.deepcopy(BASE_SETTINGS)),
         _write_channels(tmp_path, copy.deepcopy(BASE_CHANNELS)),
     )
-    found = config.channel("Канал RU")
+    found = config.channel_by_handle("@kanalru")
     assert found is not None and found.languages == ("ru", "en")
-    assert config.channel("Канал XX") is None
+    assert config.channel_by_handle("KanalRU") is found
+    assert config.channel_by_handle("Канал RU") is None       # по названию каналы не ищутся
     assert config.served_languages == frozenset({"uk", "ru", "en"})
+
+
+def test_two_ukrainka_channels_differ_by_handle(tmp_path: Path) -> None:
+    """«Українка я» и «Українка Я»: названия различаются только регистром — разные ники, разные токены."""
+    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
+    channels["channels"][0].update(account_name="Українка я", handle="@TheImpact-r2b")
+    channels["channels"][1].update(account_name="Українка Я", handle="@Ukrainian_girl25")
+    [first, second] = load_channels(_write_channels(tmp_path, channels))
+    assert (first.account_name, second.account_name) == ("Українка я", "Українка Я")
+    assert token_file_for(tmp_path, first.handle).name.casefold() != token_file_for(tmp_path, second.handle).name.casefold()
+    assert token_file_for(tmp_path / "secrets", second.handle) == tmp_path / "secrets" / "@Ukrainian_girl25.token.json"
+
+
+def test_same_title_with_other_handles_is_allowed(tmp_path: Path) -> None:
+    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
+    channels["channels"][1]["account_name"] = "Канал UA"
+    [first, second] = load_channels(_write_channels(tmp_path, channels))
+    assert first.account_name == second.account_name and first.key != second.key
+
+
+def test_handle_duplicate_names_both_handles(tmp_path: Path) -> None:
+    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
+    channels["channels"][1]["handle"] = "@KANALUA"
+    with pytest.raises(ConfigError) as raised:
+        load_channels(_write_channels(tmp_path, channels))
+    assert raised.value.problem == msg.CONFIG_PROBLEM_HANDLE_DUPLICATE.format(value="@KANALUA", other="@KanalUA")
+
+
+def test_owner_channels_file_renders_back_byte_for_byte(tmp_path: Path) -> None:
+    """Файл, который планер пишет при выравнивании, — того же вида, что файл владельца."""
+    path: Path = tmp_path / "channels.json"
+    path.write_bytes(OWNER_CHANNELS_FILE.encode("utf-8"))
+    channels = load_channels(path)
+    assert len(channels) == 7
+    assert render_channels_file(channels).encode("utf-8") == OWNER_CHANNELS_FILE.encode("utf-8")
+
+
+def test_save_keeps_previous_file_and_writes_atomically(tmp_path: Path) -> None:
+    path: Path = _write_channels(tmp_path, copy.deepcopy(BASE_CHANNELS))
+    before: bytes = path.read_bytes()
+    channels = load_channels(path)
+    save_channels_file(path, tmp_path / "channels.previous.json", channels[:1])
+    assert (tmp_path / "channels.previous.json").read_bytes() == before
+    assert [channel.handle for channel in load_channels(path)] == ["@KanalUA"]
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["channels.json", "channels.previous.json"]
 
 
 @pytest.mark.parametrize(
@@ -304,13 +393,11 @@ def test_every_channel_field_is_required(tmp_path: Path, field: str) -> None:
     assert raised.value.kind is ConfigProblem.FIELD_MISSING
 
 
-def test_account_name_all_is_taken_by_auth_all(tmp_path: Path) -> None:
-    """Канал «all» перехватил бы режим --auth all: имя занято без учёта регистра."""
+def test_account_name_all_is_an_ordinary_title(tmp_path: Path) -> None:
+    """--auth ищет канал по нику: название «All» режиму --auth all не мешает."""
     channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
     channels["channels"][0]["account_name"] = "ALL"
-    with pytest.raises(ConfigError) as raised:
-        load_channels(_write_channels(tmp_path, channels))
-    assert raised.value.problem == msg.CONFIG_PROBLEM_ACCOUNT_NAME_AUTH_ALL.format(value="ALL", auth_all=AUTH_ALL)
+    assert load_channels(_write_channels(tmp_path, channels))[0].account_name == "ALL"
 
 
 def test_google_account_is_loaded_as_written(tmp_path: Path) -> None:
@@ -324,7 +411,7 @@ def test_google_account_is_loaded_as_written(tmp_path: Path) -> None:
     ids=["colon", "pipe", "trailing_dot", "reserved_windows_name", "quotes", "slash_question"],
 )
 def test_youtube_title_with_file_name_characters_is_accepted(tmp_path: Path, name: str) -> None:
-    """Название — как на YouTube; символы, недопустимые в имени файла, заменяются только в имени токена."""
+    """Название — как на YouTube; в именах файлов оно не участвует."""
     channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
     channels["channels"][0]["account_name"] = name
     assert load_channels(_write_channels(tmp_path, channels))[0].account_name == name
@@ -336,27 +423,6 @@ def test_space_at_edge_names_the_title(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as raised:
         load_channels(_write_channels(tmp_path, channels))
     assert raised.value.problem == msg.CONFIG_PROBLEM_ACCOUNT_NAME_SPACE_EDGE.format(value="Osvald ")
-
-
-@pytest.mark.parametrize(("first", "second"), [("A:B", "A|B"), ("A:B", "a|b")], ids=["same_case", "other_case"])
-def test_titles_giving_one_token_file_are_a_collision(tmp_path: Path, first: str, second: str) -> None:
-    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
-    channels["channels"][0]["account_name"] = first
-    channels["channels"][1]["account_name"] = second
-    with pytest.raises(ConfigError) as raised:
-        load_channels(_write_channels(tmp_path, channels))
-    assert raised.value.key_path == "channels[1].account_name"
-    assert raised.value.problem == msg.CONFIG_PROBLEM_TOKEN_FILE_COLLISION.format(
-        first=first, second=second, file_name=f"{second[0]}_{second[2]}.token.json"
-    )
-
-
-def test_same_title_in_other_case_is_a_duplicate_not_a_collision(tmp_path: Path) -> None:
-    channels: dict[str, Any] = copy.deepcopy(BASE_CHANNELS)
-    channels["channels"][1]["account_name"] = "канал ua"
-    with pytest.raises(ConfigError) as raised:
-        load_channels(_write_channels(tmp_path, channels))
-    assert raised.value.problem == msg.CONFIG_PROBLEM_ACCOUNT_NAME_DUPLICATE.format(value="канал ua")
 
 
 def test_facebook_error_names_stage_6(tmp_path: Path) -> None:

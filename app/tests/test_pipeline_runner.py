@@ -879,10 +879,10 @@ def test_auto_start_difference_keeps_decision_but_reaches_owner(
     [pair] = outcome.report.outcomes
     assert pair.kind is OutcomeKind.MATCHED
     assert form_sender.calls == []
-    warning: str = "не можем исправить: 17-03-2027 19:00 uk -> yt_ua — автостарт: нужно да, на площадке нет;"
+    warning: str = "не можем исправить: 17-03-2027 19:00 uk -> yt_ua @yt_ua — автостарт: нужно да, на площадке нет;"
     assert any(line.startswith(warning) for line in outcome.report.run_warnings)
     report_text: str = _report_text(outcome)
-    assert "17-03-2027 19:00 uk -> yt_ua: автостарт — хотели: да; на платформе: нет" in report_text
+    assert "17-03-2027 19:00 uk -> yt_ua @yt_ua: автостарт — хотели: да; на платформе: нет" in report_text
     console: str = render_console(outcome.report, root=planer_paths.root, report_path=outcome.report_path)
     assert any(line.startswith(f"  {warning}") for line in console.splitlines())
     assert outcome.exit_code == ExitCode.OK
@@ -1163,3 +1163,41 @@ def test_upload_limit_on_resend_keeps_update_and_key(
     assert [call.broadcast_id for call in fake_platform.updated] == [found.broadcast_id]
     assert [call.stream_key for call in form_sender.calls] == [PLATFORM_KEY]
     assert any(msg.THUMBNAIL_REASON_TEXT["uploadRateLimitExceeded"] in line for line in outcome.report.warnings)
+
+
+def test_channels_with_one_title_and_other_handles_do_not_mix(
+    planer_paths: PlanerPaths,
+    make_package: Callable[..., Path],
+    make_slot: Callable[..., dict[str, Any]],
+    make_config: Callable[..., PlanerConfig],
+    fake_platform: FakePlatform,
+    form_sender: FakeFormSender,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    """Два канала «Українка» с разными никами: свои эфиры, свои потоки, свой отказ и своя группа в консоли."""
+    base: PlanerConfig = make_config([("twin_a", ["uk"]), ("twin_b", ["uk"])])
+    config: PlanerConfig = replace(
+        base, channels=tuple(replace(channel, account_name="Українка") for channel in base.channels)
+    )
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "uk")])
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    fake_platform.seed_broadcast("@twin_a", UK_START, spec["title"], spec["description"], marker=UK_SLOT)
+    fake_platform.fail_list["twin_b"] = PlatformError("liveStreamingNotEnabled", "выключены")
+    outcome: RunOutcome = run(RunMode.FULL, config, planer_paths, fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    kinds = sorted((item.handle, item.date or "", item.kind.value) for item in outcome.report.outcomes)
+    assert kinds == [
+        ("@twin_a", "17-03-2027", OutcomeKind.MATCHED.value),
+        ("@twin_a", "18-03-2027", OutcomeKind.CREATED.value),
+        ("@twin_b", "17-03-2027", OutcomeKind.ERROR.value),
+        ("@twin_b", "18-03-2027", OutcomeKind.ERROR.value),
+    ]
+    assert [call.channel_id for call in fake_platform.created] == ["twin_a"]
+    assert {channel for channel, _stream in fake_platform.stream_calls} == {"twin_a"}
+    assert fake_platform.list_calls == ["twin_a", "twin_b"]
+    console: str = render_console(outcome.report, root=planer_paths.root, channel_order=("twin_a", "twin_b"))
+    lines: list[str] = console.splitlines()
+    assert lines.count("  Українка @twin_a (owner@gmail.com)") == 3       # ОПУБЛИКОВАЛИ, КЛЮЧИ, УЖЕ СТОЯЛО
+    assert "  Українка @twin_b (owner@gmail.com)" not in lines            # у twin_b только ошибки
+    assert any(line.startswith("  ошибка: 17-03-2027 19:00 uk -> Українка @twin_b — ") for line in lines)

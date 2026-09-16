@@ -22,13 +22,21 @@ from app.version import APP_VERSION
 
 UA: str = "Канал UA"
 RU: str = "Канал RU"
+UA_HANDLE: str = "@KanalUA"
+RU_HANDLE: str = "@KanalRU"
+UA_KEY: str = "kanalua"
+RU_KEY: str = "kanalru"
+UA_NAMES: dict[str, str] = {"account_name": UA, "handle": UA_HANDLE}
+RU_NAMES: dict[str, str] = {"account_name": RU, "handle": RU_HANDLE}
 UA_GOOGLE: str = "ua@gmail.com"
 RU_GOOGLE: str = "ru@gmail.com"
-CHANNEL_NAMES: tuple[str, ...] = (UA, RU)
+CHANNEL_KEYS: tuple[str, ...] = (UA_KEY, RU_KEY)
 CHANNELS_JSON: dict[str, Any] = {
     "channels": [
-        {"platform": "youtube", "account_name": UA, "google_account": UA_GOOGLE, "languages": ["uk"], "privacy": "public"},
-        {"platform": "youtube", "account_name": RU, "google_account": RU_GOOGLE, "languages": ["ru", "en"], "privacy": "unlisted"},
+        {"platform": "youtube", "account_name": UA, "handle": UA_HANDLE, "google_account": UA_GOOGLE,
+         "languages": ["uk"], "privacy": "public"},
+        {"platform": "youtube", "account_name": RU, "handle": RU_HANDLE, "google_account": RU_GOOGLE,
+         "languages": ["ru", "en"], "privacy": "unlisted"},
     ]
 }
 PackageFactory = Callable[..., Path]
@@ -68,10 +76,10 @@ def _write_config(root: Path) -> None:
     (root / "secrets" / "channels.json").write_text(json.dumps(CHANNELS_JSON, ensure_ascii=False), encoding="utf-8")
 
 
-def _write_tokens(root: Path, *account_names: str) -> None:
+def _write_tokens(root: Path, *handles: str) -> None:
     (root / "secrets").mkdir(parents=True, exist_ok=True)
-    for name in account_names or CHANNEL_NAMES:
-        (root / "secrets" / f"{name}.token.json").write_text("{}", encoding="utf-8")
+    for handle in handles or (UA_HANDLE, RU_HANDLE):
+        (root / "secrets" / f"{handle}.token.json").write_text("{}", encoding="utf-8")
 
 
 def _ready(root: Path) -> None:
@@ -88,6 +96,7 @@ def _fake_login(calls: list[Path] | None = None) -> CredentialsLoader:
         login_hint: str,
         force_reauth: bool = False,
         on_login: Any = None,
+        allow_login: bool = True,
     ) -> None:
         if on_login is not None:
             on_login()
@@ -113,7 +122,7 @@ def test_run_without_flags_is_the_full_cycle(
     assert re.fullmatch(rf"Planer {re.escape(APP_VERSION)} — \d{{2}}-\d{{2}}-\d{{4}} \d{{2}}:\d{{2}}", lines[0])
     assert lines.count("Итог: опубликовано 1, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0") == 1
     assert sum(1 for line in lines if line.startswith("Planer ")) == 1          # шапка одна на прогон
-    assert f"  {UA} ({UA_GOOGLE})" in lines
+    assert f"  {UA} {UA_HANDLE} ({UA_GOOGLE})" in lines
     assert "    01-01-2099  19:00  uk  ****-0000  передан в форму" in lines
     assert "## " not in out                                            # markdown — только в отчёте
     assert re.search(r"^  лог +logs\\\d{2}-\d{2}-\d{4}_\d{6}_planer\.log$", out, re.MULTILINE)
@@ -142,14 +151,14 @@ def test_full_run_prints_title_then_progress_then_blank_line_then_total(
     progress: list[str] = [
         "  " + msg.PROGRESS_PACKAGES_READ.format(packages=1, slots_total=2, slots_mine=2),
         # каналы — в порядке объектов (слоты по дате, времени и языку): ru раньше uk
-        "  " + msg.PROGRESS_CHANNEL_READ_STARTED.format(account_name=RU),
-        "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=RU, count=0),
-        "  " + msg.PROGRESS_CHANNEL_READ_STARTED.format(account_name=UA),
-        "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=UA, count=0),
-        "  " + msg.PROGRESS_BROADCAST_CREATE.format(account_name=RU, date="01-01-2099", time="19:00", language="ru"),
-        "  " + msg.PROGRESS_BROADCAST_CREATE.format(account_name=UA, date="01-01-2099", time="19:00", language="uk"),
-        "  " + msg.PROGRESS_KEY_SEND.format(account_name=RU, date="01-01-2099", time="19:00", language="ru"),
-        "  " + msg.PROGRESS_KEY_SEND.format(account_name=UA, date="01-01-2099", time="19:00", language="uk"),
+        "  " + msg.PROGRESS_CHANNEL_READ_STARTED.format(**RU_NAMES),
+        "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(**RU_NAMES, count=0),
+        "  " + msg.PROGRESS_CHANNEL_READ_STARTED.format(**UA_NAMES),
+        "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(**UA_NAMES, count=0),
+        "  " + msg.PROGRESS_BROADCAST_CREATE.format(**RU_NAMES, date="01-01-2099", time="19:00", language="ru"),
+        "  " + msg.PROGRESS_BROADCAST_CREATE.format(**UA_NAMES, date="01-01-2099", time="19:00", language="uk"),
+        "  " + msg.PROGRESS_KEY_SEND.format(**RU_NAMES, date="01-01-2099", time="19:00", language="ru"),
+        "  " + msg.PROGRESS_KEY_SEND.format(**UA_NAMES, date="01-01-2099", time="19:00", language="uk"),
         "  " + msg.PROGRESS_REPORT,
     ]
     assert lines[1 : 1 + len(progress)] == progress
@@ -171,7 +180,7 @@ def test_dry_run_prints_channel_and_package_progress_but_no_actions(
     assert lines[0].startswith(f"Planer {APP_VERSION} — ") and lines[0].endswith(
         " — dry-run: ничего не создано и в форму не отправлено"
     )
-    assert "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=UA, count=0) in lines
+    assert "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(**UA_NAMES, count=0) in lines
     assert "  " + msg.PROGRESS_PACKAGES_READ.format(packages=1, slots_total=1, slots_mine=1) in lines
     assert not [line for line in lines if "создаю эфир" in line or "исправляю эфир" in line or "отправляю ключ" in line]
     assert lines.index("  " + msg.PROGRESS_REPORT) < lines.index(
@@ -193,7 +202,7 @@ def test_run_without_flags_on_empty_bcast_exits_3_without_touching_channels(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
-    fake_platform_in_main.tokens_missing = set(CHANNEL_NAMES)
+    fake_platform_in_main.tokens_missing = set(CHANNEL_KEYS)
     assert run_cli([]) == 3
     out: str = capsys.readouterr().out
     assert "нет пакетов" in out and "bcast" in out
@@ -231,7 +240,8 @@ def test_missing_channels_json_prints_template_and_creates_nothing(
     ]
     assert all(line in lines for line in fields)
     hint: int = lines.index(msg.CONFIG_CHANNELS_HINT.format(path=channels_file))
-    assert lines[hint + 1].startswith("  account_name — название канала точно как на YouTube")
+    assert lines[hint + 1].startswith("  account_name — название канала как на YouTube")
+    assert lines[hint + 2].startswith("  handle — ник канала на YouTube, начинается с @")
     assert lines[hint + len(msg.CONFIG_CHANNELS_FIELDS) + 1] == msg.CONFIG_CHANNELS_TEMPLATE.splitlines()[0]
     assert "Osvald.X" not in out
     assert sorted(path.name for path in (planer_root / "secrets").iterdir()) == ["client_secret.json", "planer.json"]
@@ -281,28 +291,30 @@ def test_missing_token_logs_in_at_first_access_and_run_continues(
 ) -> None:
     """ТЗ §5.3: вход — когда до канала дошло дело; канал без объектов не трогается."""
     _write_config(planer_root)
-    fake_platform_in_main.tokens_missing = set(CHANNEL_NAMES)
+    fake_platform_in_main.tokens_missing = set(CHANNEL_KEYS)
     make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
     assert run_cli(["--dry-run"]) == 0
     out: str = capsys.readouterr().out
     # порядок: что происходит, какой аккаунт, какой канал, и только потом длинное предупреждение
     login_lines: list[str] = [
-        msg.AUTH_STARTING.format(account_name=UA),
-        msg.AUTH_CHOOSE_ACCOUNT.format(google_account=UA_GOOGLE, account_name=UA),
-        msg.AUTH_CHOOSE_RIGHT_CHANNEL.format(account_name=UA),
+        msg.AUTH_STARTING.format(**UA_NAMES),
+        msg.AUTH_CHOOSE_ACCOUNT.format(google_account=UA_GOOGLE, **UA_NAMES),
+        msg.AUTH_CHOOSE_RIGHT_CHANNEL.format(**UA_NAMES),
         msg.AUTH_UNVERIFIED_APP_WARNING,
     ]
     positions: list[int] = [out.index(line) for line in login_lines]
     assert positions == sorted(positions)
-    assert msg.AUTH_OK.format(account_name=UA, title=UA, youtube_channel_id=f"UCfake{UA}") in out
+    assert msg.AUTH_OK.format(
+        **UA_NAMES, title=UA, youtube_handle=UA_HANDLE, youtube_channel_id=f"UCfake{UA_KEY}"
+    ) in out
     # шапка — до входа, итог — после
-    assert out.index(f"Planer {APP_VERSION} — ") < out.index(msg.AUTH_STARTING.format(account_name=UA))
+    assert out.index(f"Planer {APP_VERSION} — ") < out.index(msg.AUTH_STARTING.format(**UA_NAMES))
     assert out.index("Google hasn't verified this app") < out.index("Итог: ")
-    assert fake_platform_in_main.logins == [UA]
-    assert fake_platform_in_main.describe_calls == [UA]
+    assert fake_platform_in_main.logins == [UA_KEY]
+    assert fake_platform_in_main.describe_calls == [UA_KEY]        # сверка при старте без токенов канал не спрашивает
 
 
-def test_channel_title_mismatch_fails_only_that_channel(
+def test_channel_handle_mismatch_fails_only_that_channel(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     make_package: PackageFactory,
@@ -311,8 +323,8 @@ def test_channel_title_mismatch_fails_only_that_channel(
 ) -> None:
     _write_config(planer_root)
     _write_tokens(planer_root)
-    fake_platform_in_main.channel_info[UA] = ChannelInfo(
-        youtube_channel_id="UCsomeoneElse", title="Чужой канал", default_language=None
+    fake_platform_in_main.channel_info[UA_KEY] = ChannelInfo(
+        youtube_channel_id="UCsomeoneElse", title="Чужой канал", default_language=None, handle_raw="@chuzhoy"
     )
     make_package(
         planer_root / "bcast",
@@ -321,9 +333,9 @@ def test_channel_title_mismatch_fails_only_that_channel(
     assert run_cli([]) == 1
     out: str = capsys.readouterr().out
     assert "«Чужой канал»" in out
-    assert f"  {RU} ({RU_GOOGLE})" in out.splitlines()
-    assert "  ошибка: 01-01-2099 19:00 uk -> Канал UA — YouTube: channelNameMismatch (" in out
-    assert [call.channel_id for call in fake_platform_in_main.created] == [RU]
+    assert f"  {RU} {RU_HANDLE} ({RU_GOOGLE})" in out.splitlines()
+    assert "  ошибка: 01-01-2099 19:00 uk -> Канал UA @KanalUA — YouTube: channelHandleMismatch (" in out
+    assert [call.channel_id for call in fake_platform_in_main.created] == [RU_KEY]
     assert not (planer_root / "app").exists()                          # файлов привязок больше нет
 
 
@@ -345,14 +357,16 @@ def test_dry_run_on_valid_package(
     assert "Итог: опубликуем 2, исправим 0, уже стояло 0, не публиковали 0, ошибок 0" in captured.out
     assert "ОПУБЛИКУЕМ (2)" in captured.out and "КЛЮЧИ СТРИМЕРУ" not in captured.out
     # каналы — в порядке channels.json: сначала UA, потом RU
-    assert captured.out.index(f"  {UA} ({UA_GOOGLE})") < captured.out.index(f"  {RU} ({RU_GOOGLE})")
+    assert captured.out.index(f"  {UA} {UA_HANDLE} ({UA_GOOGLE})") < captured.out.index(
+        f"  {RU} {RU_HANDLE} ({RU_GOOGLE})"
+    )
     assert "будет создан" not in captured.out                          # подробности — в отчёте
     assert "run_started" not in captured.err
     [report] = list((planer_root / "logs").glob("*_report.md"))
     report_text: str = report.read_text(encoding="utf-8")
     assert f"{path.name} — принят, слотов 2, из них под мои языки 2" in report_text
-    assert f"- 01-01-2099 19:00 en -> {RU} — эфира нет, будет создан — не выполнено (dry-run)" in report_text
-    assert f"- 01-01-2099 19:00 uk -> {UA} — эфира нет, будет создан — не выполнено (dry-run)" in report_text
+    assert f"- 01-01-2099 19:00 en -> {RU} {RU_HANDLE} — эфира нет, будет создан — не выполнено (dry-run)" in report_text
+    assert f"- 01-01-2099 19:00 uk -> {UA} {UA_HANDLE} — эфира нет, будет создан — не выполнено (dry-run)" in report_text
     assert f"отчёт   logs\\{report.name}" in captured.out
     assert path.exists()
     assert not (planer_root / "keystreams" / "keys.txt").exists()
@@ -399,10 +413,10 @@ def test_undated_broadcast_goes_to_attention_not_to_the_log_console(
     """Замечание площадки приходит данными (take_notices): одна строка — и во «Внимание», и в файле отчёта."""
     _ready(planer_root)
     make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
-    fake_platform_in_main.seed_undated_broadcast(UA, "Брифинг без времени")
+    fake_platform_in_main.seed_undated_broadcast(UA, "Брифинг без времени", handle=UA_HANDLE)
     assert run_cli(["--dry-run"]) == 0
     captured = capsys.readouterr()
-    warning: str = msg.WARNING_UNDATED_BROADCAST.format(account_name=UA, title="Брифинг без времени")
+    warning: str = msg.WARNING_UNDATED_BROADCAST.format(channel=f"{UA} {UA_HANDLE}", title="Брифинг без времени")
     lines: list[str] = captured.out.splitlines()
     attention: int = next(index for index, line in enumerate(lines) if msg.CONSOLE_BLOCK_ATTENTION in line)
     assert lines[attention + 1] == f"  {warning}"
@@ -417,14 +431,15 @@ def test_check_reports_every_channel(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _ready(planer_root)
-    fake_platform_in_main.channel_info[UA] = ChannelInfo(
-        youtube_channel_id=f"UCfake{UA}",
+    fake_platform_in_main.channel_info[UA_KEY] = ChannelInfo(
+        youtube_channel_id=f"UCfake{UA_KEY}",
         title=UA,
         default_language="uk",
+        handle_raw="@kanalua",
     )
     assert run_cli(["--check"]) == 0
     out: str = capsys.readouterr().out
-    assert f"- {UA}: {UA} (id UCfake{UA}), язык канала на YouTube: uk" in out
+    assert f"- «{UA}» {UA_HANDLE}: «{UA}» @kanalua (id UCfake{UA_KEY}), язык канала на YouTube: uk" in out
     assert msg.CHECK_CHANNEL_LANGUAGE_UNSET in out       # у второго канала язык не задан
     assert "языки стримов из channels.json: ru, en" in out
     assert "запланированных эфиров: 0" in out
@@ -437,10 +452,10 @@ def test_check_reports_disabled_streaming_and_exits_1(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _ready(planer_root)
-    fake_platform_in_main.fail_list[RU] = PlatformError("liveStreamingNotEnabled", "трансляции не включены")
+    fake_platform_in_main.fail_list[RU_KEY] = PlatformError("liveStreamingNotEnabled", "трансляции не включены")
     assert run_cli(["--check"]) == 1
     out: str = capsys.readouterr().out
-    assert f"- {RU}: liveStreamingNotEnabled (трансляции не включены)" in out
+    assert f"- «{RU}» {RU_HANDLE}: liveStreamingNotEnabled (трансляции не включены)" in out
     assert msg.CHECK_HAS_PROBLEMS in out
 
 
@@ -450,33 +465,61 @@ def test_check_logs_in_channel_without_token(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
-    _write_tokens(planer_root, UA)
-    fake_platform_in_main.tokens_missing = {RU}
+    _write_tokens(planer_root, UA_HANDLE)
+    fake_platform_in_main.tokens_missing = {RU_KEY}
     assert run_cli(["--check"]) == 0
     out: str = capsys.readouterr().out
-    assert msg.AUTH_STARTING.format(account_name=RU) in out
-    assert msg.AUTH_STARTING.format(account_name=UA) not in out
+    assert msg.AUTH_STARTING.format(**RU_NAMES) in out
+    assert msg.AUTH_STARTING.format(**UA_NAMES) not in out
     assert msg.CHECK_ALL_OK in out
 
 
-def test_check_refuses_channel_renamed_on_youtube(
+def test_check_aligns_channel_renamed_on_youtube_without_login(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ник совпал, название на YouTube новое: channels.json выровнен при старте, вход не нужен."""
+    _write_config(planer_root)
+    _write_tokens(planer_root)
+    fake_platform_in_main.channel_info[UA_KEY] = ChannelInfo(
+        youtube_channel_id=f"UCfake{UA_KEY}", title="Новое имя", default_language=None, handle_raw=UA_HANDLE
+    )
+    assert run_cli(["--check"]) == 0
+    lines: list[str] = capsys.readouterr().out.splitlines()
+    aligned: str = msg.WARNING_CHANNEL_ALIGNED.format(
+        youtube_channel_id=f"UCfake{UA_KEY}", title_before=UA, handle_before=UA_HANDLE,
+        title_after="Новое имя", handle_after=UA_HANDLE,
+    )
+    assert f"  {aligned}" in lines
+    assert f"- «Новое имя» {UA_HANDLE}: «Новое имя» {UA_HANDLE} (id UCfake{UA_KEY}), язык канала на YouTube: не указан; " \
+        "языки стримов из channels.json: uk; запланированных эфиров: 0" in lines
+    secrets: Path = planer_root / "secrets"
+    assert '"account_name": "Новое имя"' in (secrets / "channels.json").read_text(encoding="utf-8")
+    assert json.loads((secrets / "channels.previous.json").read_text(encoding="utf-8")) == CHANNELS_JSON
+    assert (secrets / "channels_passport.json").is_file()
+    assert fake_platform_in_main.logins == []
+
+
+def test_check_refuses_channel_with_other_handle(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
     _write_tokens(planer_root)
-    fake_platform_in_main.channel_info[UA] = ChannelInfo(
-        youtube_channel_id=f"UCfake{UA}", title="Новое имя", default_language=None
+    fake_platform_in_main.channel_info[UA_KEY] = ChannelInfo(
+        youtube_channel_id="UCother", title="Другой", default_language=None, handle_raw="@drugoy"
     )
     assert run_cli(["--check"]) == 1
     out: str = capsys.readouterr().out
-    refusal: str = msg.AUTH_CHANNEL_NAME_MISMATCH.format(
-        account_name=UA, youtube_title="Новое имя", channels_file=planer_root / "secrets" / "channels.json"
+    refusal: str = msg.AUTH_CHANNEL_HANDLE_MISMATCH.format(
+        **UA_NAMES, youtube_title="Другой", youtube_handle="@drugoy", youtube_channel_id="UCother",
+        channels_file=planer_root / "secrets" / "channels.json",
     )
     assert msg.CHECK_CHANNEL_REFUSED.format(message=refusal) in out.splitlines()
-    assert f"- {RU}: {RU} (id UCfake{RU})" in out
-    assert fake_platform_in_main.list_calls == [RU]
+    assert f"- «{RU}» {RU_HANDLE}: «{RU}» {RU_HANDLE} (id UCfake{RU_KEY})" in out
+    assert fake_platform_in_main.list_calls == [RU_KEY]
     assert msg.CHECK_HAS_PROBLEMS in out
 
 
@@ -492,36 +535,36 @@ def test_auth_all_logs_in_every_channel(
     assert run_cli(["--auth", "all"]) == 0
     out: str = capsys.readouterr().out
     assert "Google hasn't verified this app" in out
-    assert msg.AUTH_OK.format(account_name=RU, title=RU, youtube_channel_id=f"UCfake{RU}") in out
-    assert [path.name for path in calls] == [f"{UA}.token.json", f"{RU}.token.json"]
+    assert msg.AUTH_OK.format(**RU_NAMES, title=RU, youtube_handle=RU_HANDLE, youtube_channel_id=f"UCfake{RU_KEY}") in out
+    assert [path.name for path in calls] == [f"{UA_HANDLE}.token.json", f"{RU_HANDLE}.token.json"]
     assert [path.parent for path in calls] == [planer_root / "secrets"] * 2
 
 
-def test_auth_refuses_channel_with_other_title(
+def test_auth_refuses_channel_with_other_handle(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
-    fake_platform_in_main.channel_info[UA] = ChannelInfo(
-        youtube_channel_id="UCwrong", title="Другой канал аккаунта", default_language=None
+    fake_platform_in_main.channel_info[UA_KEY] = ChannelInfo(
+        youtube_channel_id="UCwrong", title="Другой канал аккаунта", default_language=None, handle_raw="@drugoy"
     )
     monkeypatch.setattr(main_module, "load_credentials", _fake_login())
-    assert run_cli(["--auth", UA]) == 1
+    assert run_cli(["--auth", "kanalua"]) == 1                      # ник — без «@» и в другом регистре
     out: str = capsys.readouterr().out
-    assert "«Другой канал аккаунта»" in out and f'planer.bat --auth "{UA}"' in out
-    assert msg.AUTH_OK.format(account_name=UA, title="Другой канал аккаунта", youtube_channel_id="UCwrong") not in out
+    assert "«Другой канал аккаунта»" in out and f"planer.bat --auth {UA_HANDLE}" in out
+    assert "вход выполнен" not in out
 
 
-def test_auth_unknown_channel_lists_account_names(
+def test_auth_unknown_channel_lists_handles(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
     assert run_cli(["--auth", "yt_unknown"]) == 1
-    assert f"«{UA}», «{RU}»" in capsys.readouterr().out
+    assert f"{UA_HANDLE} «{UA}», {RU_HANDLE} «{RU}»" in capsys.readouterr().out
 
 
 def test_auth_failure_names_the_reason_and_scope_hint(
@@ -538,11 +581,12 @@ def test_auth_failure_names_the_reason_and_scope_hint(
         login_hint: str,
         force_reauth: bool = False,
         on_login: Any = None,
+        allow_login: bool = True,
     ) -> None:
         raise AuthError(AuthErrorReason.FLOW_FAILED, "browser closed")
 
     monkeypatch.setattr(main_module, "load_credentials", _fail)
-    assert run_cli(["--auth", UA]) == 1
+    assert run_cli(["--auth", UA_HANDLE]) == 1
     out: str = capsys.readouterr().out
     assert msg.AUTH_REASON_TEXT["flow_failed"] in out
     assert "скоуп youtube не добавлен" in out

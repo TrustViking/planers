@@ -7,7 +7,9 @@ safe_trim — по образцу broadcaster/app/core/safe_trim.py (грани�
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Final
+from urllib.parse import unquote
 
 WORD_CHAR_PATTERN: Final[re.Pattern[str]] = re.compile(r"\w", re.UNICODE)
 SENTENCE_END_CHARS: Final[str] = ".!?…"
@@ -17,7 +19,10 @@ WORD_MIN_SHARE: Final[float] = 0.5       # короче — граница сл�
 CRLF: Final[str] = "\r\n"
 CR: Final[str] = "\r"
 LF: Final[str] = "\n"
-# Имя файла токена secrets\<имя>.token.json: название канала как на YouTube, приведённое к правилам Windows.
+# Ник канала (@handle) — ключ канала: уникален на YouTube и не зависит от регистра.
+HANDLE_PREFIX: Final[str] = "@"
+UNICODE_FORM: Final[str] = "NFC"
+# Имя файла токена secrets\<ник>.token.json: ник как в channels.json, приведённый к правилам Windows.
 TOKEN_FILE_FORBIDDEN_CHARS: Final[str] = '\\/:*?"<>|'
 TOKEN_FILE_EDGE_CHARS: Final[str] = " ."
 TOKEN_FILE_RESERVED: Final[re.Pattern[str]] = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE)
@@ -36,15 +41,29 @@ def normalize_description(text: str) -> str:
     return LF.join(line.rstrip() for line in unified.split(LF)).strip()
 
 
-def token_file_stem(account_name: str) -> str:
-    """Имя файла токена без расширения; account_name — уже в NFC.
+def normalize_handle(text: str) -> str:
+    """Ключ канала — единственная нормализация ника: без «@», NFC, без различия регистра."""
+    return unicodedata.normalize(UNICODE_FORM, text).removeprefix(HANDLE_PREFIX).casefold()
+
+
+def handle_from_custom_url(raw: str) -> str:
+    """snippet.customUrl → ник в написании channels.json: края сняты, %-кодирование раскрыто, NFC, «@» в начале.
+
+    Регистр — как прислал YouTube: сравнивать ники можно только через normalize_handle.
+    """
+    text: str = unicodedata.normalize(UNICODE_FORM, unquote(raw.strip()))
+    return text if text.startswith(HANDLE_PREFIX) else HANDLE_PREFIX + text
+
+
+def token_file_stem(handle: str) -> str:
+    """Имя файла токена без расширения; handle — ник как в channels.json, уже в NFC.
 
     Запрещённые и управляющие символы → «_»; пробелы и точки по краям → «_» каждый (длина не меняется);
     зарезервированное имя Windows получает «_» в конце. Имена без таких символов не меняются.
     """
     stem: str = "".join(
         TOKEN_FILE_REPLACEMENT if char in TOKEN_FILE_FORBIDDEN_CHARS or ord(char) < CONTROL_CHAR_LIMIT else char
-        for char in account_name
+        for char in handle
     )
     body: str = stem.strip(TOKEN_FILE_EDGE_CHARS)
     if not body:

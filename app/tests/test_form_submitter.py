@@ -96,7 +96,8 @@ def test_body_contains_expected_entries(
     [(url, body)] = session.post_calls
     assert url == RESPONSE_URL                                             # язык ответа задаёт планер
     assert body["entry.1"] == ["Русский ( Russian)"]                       # язык из form.values
-    assert body["entry.2"] == ["yt_ru"]                            # название канала
+    assert body["entry.2"] == ["yt_ru"]                            # название канала, без ника
+    assert not any("@yt_ru" in value for values in body.values() for value in values)
     assert body["entry.3"] == ["17.03.2027 Дата стрима (время стрима указано в объявлении)"]
     assert body["entry.4"] == ["You Tube"]
     assert body["entry.5"] == [STREAM_KEY]

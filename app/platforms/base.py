@@ -21,6 +21,13 @@ if TYPE_CHECKING:   # спека живёт в pipeline; здесь она ну�
 BROADCAST_URL_TEMPLATES: Final[dict[Platform, str]] = {
     Platform.YOUTUBE: "https://www.youtube.com/watch?v={broadcast_id}",
 }
+# Ссылки на канал для паспорта каналов: по id (не меняется никогда) и по нику (как в channels.json).
+CHANNEL_URL_TEMPLATES: Final[dict[Platform, str]] = {
+    Platform.YOUTUBE: "https://www.youtube.com/channel/{channel_id}",
+}
+HANDLE_URL_TEMPLATES: Final[dict[Platform, str]] = {
+    Platform.YOUTUBE: "https://www.youtube.com/{handle}",
+}
 # Отпечаток картинки эфира: сравнивается с заглушкой канала («обложки нет» = картинка = заглушка).
 PICTURE_SHA_CHARS: Final[int] = 12
 # Отпечаток заглушки в описании потока: планер записывает его при создании эфира, пока обложки ещё нет.
@@ -60,6 +67,7 @@ class ChannelInfo:
     youtube_channel_id: str
     title: str
     default_language: str | None   # язык канала на площадке; справочный, на решения не влияет
+    handle_raw: str | None = None  # ник канала как пришёл (snippet.customUrl); None — ника нет
 
 
 @dataclass(frozen=True)
@@ -80,6 +88,7 @@ class UpcomingBroadcast:
 
 class PlatformNoticeKind(str, Enum):
     UNDATED_BROADCAST = "undated_broadcast"   # эфир без времени старта: площадка его отбрасывает
+    CHANNEL = "channel"                       # канал выровнен или его файлы не записаны: text — готовая строка
 
 
 @dataclass(frozen=True)
@@ -89,6 +98,8 @@ class PlatformNotice:
     kind: PlatformNoticeKind
     account_name: str
     title: str
+    handle: str = ""
+    text: str = ""   # CHANNEL: строка предупреждения запуска целиком
 
 
 @dataclass(frozen=True)
@@ -204,8 +215,11 @@ class BroadcastPlatform(Protocol):
         """Пределы длины названия и описания (ТЗ §7.4 п.1)."""
         ...
 
-    def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
-        """Канал, на который ведёт токен: id, название, язык канала (ТЗ §5.3)."""
+    def describe_channel(self, channel: ChannelConfig, *, allow_login: bool = True) -> ChannelInfo:
+        """Канал, на который ведёт токен: id, название, ник, язык канала (ТЗ §5.3).
+
+        allow_login=False — вход в браузере запрещён: нужен вход — PlatformError, браузер не открывается.
+        """
         ...
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
@@ -280,3 +294,11 @@ class BroadcastPlatform(Protocol):
 
 def broadcast_url_for(channel: ChannelConfig, broadcast_id: str) -> str:
     return BROADCAST_URL_TEMPLATES[channel.platform].format(broadcast_id=broadcast_id)
+
+
+def channel_url_for(platform: Platform, channel_id: str) -> str:
+    return CHANNEL_URL_TEMPLATES[platform].format(channel_id=channel_id)
+
+
+def handle_url_for(platform: Platform, handle: str) -> str:
+    return HANDLE_URL_TEMPLATES[platform].format(handle=handle)

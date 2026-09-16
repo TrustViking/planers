@@ -102,22 +102,22 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(description="Обложки запланированных эфиров")
-    parser.add_argument("--channel", default="", help="название канала как в secrets\\channels.json; пусто — все")
+    parser.add_argument("--channel", default="", help="ник канала (handle) как в secrets\\channels.json; пусто — все")
     parser.add_argument("--video", action="append", default=[], help="id эфира вне upcoming (можно несколько)")
     return parser.parse_args(argv)
 
 
-def _channels(config: PlanerConfig, account_name: str) -> list[ChannelConfig]:
-    if not account_name:
+def _channels(config: PlanerConfig, handle: str) -> list[ChannelConfig]:
+    if not handle:
         return list(config.channels)
-    channel: ChannelConfig | None = config.channel(account_name)
+    channel: ChannelConfig | None = config.channel_by_handle(handle)
     return [channel] if channel is not None else []
 
 
 def _probe_channel(paths: PlanerPaths, channel: ChannelConfig, extra_ids: list[str]) -> list[ProbeRow]:
     credentials: Any = load_credentials(
         paths.client_secret_file,
-        token_file_for(paths.secrets_dir, channel.account_name),
+        token_file_for(paths.secrets_dir, channel.handle),
         login_hint=channel.google_account,
     )
     service: Any = build(API_SERVICE_NAME, API_VERSION, credentials=credentials, cache_discovery=False)

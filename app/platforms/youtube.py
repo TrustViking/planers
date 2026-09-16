@@ -26,7 +26,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
 
 from app.config.loader import ChannelConfig
-from app.google.auth import AuthError, load_credentials, token_file_for
+from app.google.auth import AuthError, AuthErrorReason, load_credentials, token_file_for
 from app.core.dates import format_datetime_text
 from app.observability.logging_setup import get_logger, mask_stream_key
 from app.pipeline.plan import BroadcastSpec
@@ -89,6 +89,7 @@ YOUTUBE_STREAM_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]{4}(-
 # Коды ошибок площадки, которые планер называет сам (ответа Google за ними нет).
 ERROR_CHANNEL_NOT_FOUND: Final[str] = "channelNotFound"
 ERROR_AUTH: Final[str] = "authFailed"
+ERROR_LOGIN_REQUIRED: Final[str] = "loginRequired"   # вход нужен, но запрещён (allow_login=False)
 ERROR_TRANSPORT: Final[str] = "transportFailed"
 ERROR_BAD_RESPONSE: Final[str] = "badResponse"
 ERROR_UNEXPECTED_KEY: Final[str] = "unexpectedStreamKeyFormat"
@@ -133,6 +134,7 @@ REASON_BEHAVIORS: Final[dict[str, ErrorBehavior]] = {
     "authenticatedUserAccountSuspended": ErrorBehavior.CHANNEL,
     "authenticatedUserNotChannel": ErrorBehavior.CHANNEL,
     ERROR_AUTH: ErrorBehavior.CHANNEL,          # после отказа входа браузер повторно не открывается
+    ERROR_LOGIN_REQUIRED: ErrorBehavior.CALL,   # вход запретил вызывающий: обычный вызов потом войдёт
     "quotaExceeded": ErrorBehavior.PROJECT,
     "invalidImage": ErrorBehavior.CALL,
     "mediaBodyRequired": ErrorBehavior.CALL,
@@ -145,7 +147,7 @@ REASON_BEHAVIORS: Final[dict[str, ErrorBehavior]] = {
 OPERATION_REASON_BEHAVIORS: Final[dict[tuple[str, str], ErrorBehavior]] = {
     ("thumbnails.set", "forbidden"): ErrorBehavior.OPERATION,
 }
-# Ключ памяти отказов: (канал, операция); None — «любой».
+# Ключ памяти отказов: (ключ канала, операция); None — «любой».
 RefusalKey = tuple[str | None, str | None]
 
 
@@ -167,11 +169,11 @@ def _retry_delay(attempt: int) -> float:
     return min(RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)), RETRY_MAX_DELAY_SEC)
 
 
-def _refusal_key(behavior: ErrorBehavior, account_name: str, operation: str) -> RefusalKey | None:
+def _refusal_key(behavior: ErrorBehavior, channel_key: str, operation: str) -> RefusalKey | None:
     if behavior is ErrorBehavior.OPERATION:
-        return (account_name, operation)
+        return (channel_key, operation)
     if behavior is ErrorBehavior.CHANNEL:
-        return (account_name, None)
+        return (channel_key, None)
     if behavior is ErrorBehavior.PROJECT:
         return (None, None)
     return None
@@ -187,7 +189,7 @@ class _Failure:
 
 
 class YouTubePlatform:
-    """Клиент строится лениво и кешируется по channel.account_name: один токен — один канал.
+    """Клиент строится лениво и кешируется по channel.key: один токен — один канал.
 
     Настройки эфира площадка не хранит: всё, что уходит в эфир, приходит готовой спекой (§7.4).
     on_login вызывается ровно перед открытием браузера для входа в канал.
@@ -222,15 +224,19 @@ class YouTubePlatform:
             latency_preference=LATENCY_PREFERENCE,
         )
 
-    def describe_channel(self, channel: ChannelConfig) -> ChannelInfo:
-        """Кеш на процесс: за запуск канал спрашивается один раз (квота §6.1 п.3)."""
-        cached: ChannelInfo | None = self._channels.get(channel.account_name)
+    def describe_channel(self, channel: ChannelConfig, *, allow_login: bool = True) -> ChannelInfo:
+        """Кеш на процесс: за запуск канал спрашивается один раз (квота §6.1 п.3).
+
+        allow_login=False — без браузера: токена нет или он отозван — PlatformError(ERROR_LOGIN_REQUIRED).
+        """
+        cached: ChannelInfo | None = self._channels.get(channel.key)
         if cached is not None:
             return cached
         response: dict[str, Any] = self._execute(
             channel,
             "channels.list",
             lambda service: service.channels().list(part=CHANNEL_PARTS, mine=True),
+            allow_login=allow_login,
         )
         items: list[dict[str, Any]] = _items(response)
         if not items:
@@ -244,14 +250,18 @@ class YouTubePlatform:
             youtube_channel_id=_text(item, "id"),
             title=_text(snippet, "title"),
             default_language=_channel_language(item, snippet),
+            handle_raw=_optional_text(snippet, "customUrl"),
         )
         LOGGER.info(
-            'channel_described channel="%s" youtube_channel_id=%s language=%s',
+            'channel_described channel="%s" handle=%s handle_raw=%s youtube_channel_id=%s youtube_title="%s" language=%s',
             channel.account_name,
+            channel.handle,
+            info.handle_raw or LOG_MISSING,
             info.youtube_channel_id,
+            info.title,
             info.default_language or LOG_MISSING,
         )
-        self._channels[channel.account_name] = info
+        self._channels[channel.key] = info
         return info
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
@@ -275,13 +285,13 @@ class YouTubePlatform:
                 ),
             )
             items: list[dict[str, Any]] = _items(response)
-            page_broadcasts, page_notices = _broadcasts_from_page(items, channel.account_name)
+            page_broadcasts, page_notices = _broadcasts_from_page(items, channel)
             broadcasts.extend(self._with_picture(broadcast, items) for broadcast in page_broadcasts)
             self._notices.extend(page_notices)
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
-        LOGGER.info('broadcasts_listed channel="%s" count=%d', channel.account_name, len(broadcasts))
+        LOGGER.info('broadcasts_listed channel="%s" handle=%s count=%d', channel.account_name, channel.handle, len(broadcasts))
         return broadcasts
 
     def _with_picture(self, broadcast: UpcomingBroadcast, items: list[dict[str, Any]]) -> UpcomingBroadcast:
@@ -335,7 +345,7 @@ class YouTubePlatform:
             stream_name=_text(ingestion, "streamName", allow_empty=True),
             description=_text(_mapping(item, "snippet"), "description", allow_empty=True),
         )
-        _warn_on_unexpected_key(channel.account_name, stream)
+        _warn_on_unexpected_key(channel, stream)
         return stream
 
     def create_broadcast(self, channel: ChannelConfig, spec: BroadcastSpec) -> CreatedBroadcast:
@@ -349,12 +359,13 @@ class YouTubePlatform:
             ),
         )
         broadcast_id: str = _text(response, "id")
-        LOGGER.info('broadcast_inserted channel="%s" broadcast_id=%s', channel.account_name, broadcast_id)
+        LOGGER.info('broadcast_inserted channel="%s" handle=%s broadcast_id=%s', channel.account_name, channel.handle, broadcast_id)
         # обложки у нового эфира ещё нет: его картинка — заглушка канала, её отпечаток уходит в описание потока
         placeholder: str | None = self._picture_sha(_mapping(_mapping(response, "snippet"), "thumbnails"))
         LOGGER.info(
-            'thumbnail_placeholder_captured channel="%s" broadcast_id=%s sha=%s',
+            'thumbnail_placeholder_captured channel="%s" handle=%s broadcast_id=%s sha=%s',
             channel.account_name,
+            channel.handle,
             broadcast_id,
             placeholder or LOG_MISSING,
         )
@@ -393,7 +404,7 @@ class YouTubePlatform:
                 body={"id": broadcast_id, "snippet": snippet},
             ),
         )
-        LOGGER.info('broadcast_updated channel="%s" broadcast_id=%s', channel.account_name, broadcast_id)
+        LOGGER.info('broadcast_updated channel="%s" handle=%s broadcast_id=%s', channel.account_name, channel.handle, broadcast_id)
 
     def apply_video_settings(
         self,
@@ -436,9 +447,10 @@ class YouTubePlatform:
         )
         applied: AppliedVideo = _applied_video(updated)
         LOGGER.info(
-            'video_settings_applied channel="%s" broadcast_id=%s language=%s category=%s audience=%s privacy=%s'
+            'video_settings_applied channel="%s" handle=%s broadcast_id=%s language=%s category=%s audience=%s privacy=%s'
             ' applied_language=%s applied_category=%s applied_privacy=%s',
             channel.account_name,
+            channel.handle,
             broadcast_id,
             fixes.language_set,
             fixes.category_set,
@@ -475,7 +487,7 @@ class YouTubePlatform:
                 body={"id": stream_id, "snippet": snippet},
             ),
         )
-        LOGGER.info('stream_marker_set channel="%s" stream_id=%s marker=%s', channel.account_name, stream_id, marker)
+        LOGGER.info('stream_marker_set channel="%s" handle=%s stream_id=%s marker=%s', channel.account_name, channel.handle, stream_id, marker)
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         """Что по факту лежит на платформе: язык, аудитория и возраст видны только у videos."""
@@ -526,7 +538,7 @@ class YouTubePlatform:
         items: list[dict[str, Any]] = _items(response)
         if not items:
             return None
-        parsed: UpcomingBroadcast | PlatformNotice | None = _broadcast_from_item(items[0], channel.account_name)
+        parsed: UpcomingBroadcast | PlatformNotice | None = _broadcast_from_item(items[0], channel)
         return parsed if isinstance(parsed, UpcomingBroadcast) else None
 
     def _video_item(self, channel: ChannelConfig, broadcast_id: str, part: str) -> dict[str, Any]:
@@ -562,8 +574,9 @@ class YouTubePlatform:
         stream_key: str = _text(ingestion, "streamName")
         if not YOUTUBE_STREAM_KEY_PATTERN.fullmatch(stream_key):
             LOGGER.error(
-                'stream_key_rejected channel="%s" stream_id=%s stream_key=%s',
+                'stream_key_rejected channel="%s" handle=%s stream_id=%s stream_key=%s',
                 channel.account_name,
+                channel.handle,
                 stream_id,
                 mask_stream_key(stream_key),
             )
@@ -578,8 +591,9 @@ class YouTubePlatform:
             ),
         )
         LOGGER.info(
-            'stream_bound channel="%s" broadcast_id=%s stream_id=%s stream_key=%s',
+            'stream_bound channel="%s" handle=%s broadcast_id=%s stream_id=%s stream_key=%s',
             channel.account_name,
+            channel.handle,
             broadcast_id,
             stream_id,
             mask_stream_key(stream_key),
@@ -600,23 +614,25 @@ class YouTubePlatform:
             "thumbnails.set",
             lambda service: service.thumbnails().set(videoId=broadcast_id, media_body=media),
         )
-        LOGGER.info('thumbnail_set channel="%s" broadcast_id=%s', channel.account_name, broadcast_id)
+        LOGGER.info('thumbnail_set channel="%s" handle=%s broadcast_id=%s', channel.account_name, channel.handle, broadcast_id)
 
-    def _service(self, channel: ChannelConfig) -> Any:
-        cached: Any = self._services.get(channel.account_name)
+    def _service(self, channel: ChannelConfig, allow_login: bool) -> Any:
+        cached: Any = self._services.get(channel.key)
         if cached is not None:
             return cached
         try:
             credentials: Any = load_credentials(
                 self._client_secret_file,
-                token_file_for(self._secrets_dir, channel.account_name),
+                token_file_for(self._secrets_dir, channel.handle),
                 login_hint=channel.google_account,
                 on_login=self._login_callback(channel),
+                allow_login=allow_login,
             )
         except AuthError as error:
-            raise PlatformError(ERROR_AUTH, f"{error.reason.value}: {error.detail}") from error
+            code: str = ERROR_LOGIN_REQUIRED if error.reason is AuthErrorReason.LOGIN_REQUIRED else ERROR_AUTH
+            raise PlatformError(code, f"{error.reason.value}: {error.detail}") from error
         service: Any = build(API_SERVICE_NAME, API_VERSION, credentials=credentials, cache_discovery=False)
-        self._services[channel.account_name] = service
+        self._services[channel.key] = service
         return service
 
     def _login_callback(self, channel: ChannelConfig) -> Callable[[], None] | None:
@@ -625,10 +641,17 @@ class YouTubePlatform:
         on_login: Callable[[ChannelConfig], None] = self._on_login
         return lambda: on_login(channel)
 
-    def _execute(self, channel: ChannelConfig, operation: str, request_builder: Any) -> dict[str, Any]:
+    def _execute(
+        self,
+        channel: ChannelConfig,
+        operation: str,
+        request_builder: Any,
+        *,
+        allow_login: bool = True,
+    ) -> dict[str, Any]:
         """Единственная точка обращения к API: память отказов, пауза, повторы по _error_behavior."""
         self._raise_if_refused(channel, operation)
-        service: Any = self._channel_service(channel, operation)
+        service: Any = self._channel_service(channel, operation, allow_login)
         for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
             self._wait_pause()
             try:
@@ -664,25 +687,31 @@ class YouTubePlatform:
     def _mark_request_done(self) -> None:
         self._last_request_at = time.monotonic()
 
-    def _channel_service(self, channel: ChannelConfig, operation: str) -> Any:
-        """Клиент канала; отказ входа — такой же отказ, как у запроса (ERROR_AUTH → CHANNEL)."""
+    def _channel_service(self, channel: ChannelConfig, operation: str, allow_login: bool) -> Any:
+        """Клиент канала; отказ входа — такой же отказ, как у запроса (ERROR_AUTH → CHANNEL).
+
+        Запрещённый вход — не отказ YouTube: не запоминается и в лог отказов не пишется.
+        """
         try:
-            return self._service(channel)
+            return self._service(channel, allow_login)
         except PlatformError as error:
+            if error.code == ERROR_LOGIN_REQUIRED:
+                raise
             behavior: ErrorBehavior = _error_behavior(operation, None, error.code)
             raise self._refuse(channel, operation, _Failure(error, behavior, None)) from error
 
     def _raise_if_refused(self, channel: ChannelConfig, operation: str) -> None:
         """Запомненный отказ поднимается без обращения к сети и без паузы."""
-        for key in ((None, None), (channel.account_name, None), (channel.account_name, operation)):
+        for key in ((None, None), (channel.key, None), (channel.key, operation)):
             remembered: tuple[PlatformError, ErrorBehavior] | None = self._refusals.get(key)
             if remembered is None:
                 continue
             error, behavior = remembered
             LOGGER.info(
-                'request_skipped operation=%s channel="%s" reason=%s behavior=%s',
+                'request_skipped operation=%s channel="%s" handle=%s reason=%s behavior=%s',
                 operation,
                 channel.account_name,
+                channel.handle,
                 error.code,
                 behavior.value,
             )
@@ -696,15 +725,16 @@ class YouTubePlatform:
             # 5xx и сеть после всех попыток — «YouTube недоступен»; лимит частоты сохраняет свою причину
             error = PlatformError(ERROR_TRANSPORT, error.message)
         LOGGER.warning(
-            'youtube_refused operation=%s channel="%s" http_status=%s reason=%s behavior=%s message="%s"',
+            'youtube_refused operation=%s channel="%s" handle=%s http_status=%s reason=%s behavior=%s message="%s"',
             operation,
             channel.account_name,
+            channel.handle,
             failure.http_status if failure.http_status is not None else LOG_MISSING,
             error.code,
             failure.behavior.value,
             error.message,
         )
-        key: RefusalKey | None = _refusal_key(failure.behavior, channel.account_name, operation)
+        key: RefusalKey | None = _refusal_key(failure.behavior, channel.key, operation)
         if key is not None:
             self._refusals[key] = (error, failure.behavior)
         return error
@@ -714,9 +744,10 @@ class YouTubePlatform:
 def _sleep_before_retry(channel: ChannelConfig, operation: str, attempt: int, failure: _Failure) -> None:
     delay_sec: float = _retry_delay(attempt)
     LOGGER.warning(
-        'request_retry operation=%s channel="%s" attempt=%d/%d delay_sec=%.1f http_status=%s reason=%s',
+        'request_retry operation=%s channel="%s" handle=%s attempt=%d/%d delay_sec=%.1f http_status=%s reason=%s',
         operation,
         channel.account_name,
+        channel.handle,
         attempt,
         RETRY_MAX_ATTEMPTS,
         delay_sec,
@@ -794,6 +825,7 @@ def stream_description(
     parts: MarkerParts | None = split_marker(marker)
     text: str = msg.STREAM_DESCRIPTION.format(
         account_name=channel.account_name,
+        handle=channel.handle,
         date=parts.date if parts else marker,
         time=parts.time if parts else "",
         language=parts.language if parts else "",
@@ -869,13 +901,13 @@ def _channel_language(item: dict[str, Any], snippet: dict[str, Any]) -> str | No
 
 def _broadcasts_from_page(
     items: list[dict[str, Any]],
-    account_name: str,
+    channel: ChannelConfig,
 ) -> tuple[list[UpcomingBroadcast], list[PlatformNotice]]:
     """Эфиры страницы и замечания о тех, что сверять не с чем."""
     broadcasts: list[UpcomingBroadcast] = []
     notices: list[PlatformNotice] = []
     for item in items:
-        parsed: UpcomingBroadcast | PlatformNotice | None = _broadcast_from_item(item, account_name)
+        parsed: UpcomingBroadcast | PlatformNotice | None = _broadcast_from_item(item, channel)
         if isinstance(parsed, UpcomingBroadcast):
             broadcasts.append(parsed)
         elif parsed is not None:
@@ -883,7 +915,7 @@ def _broadcasts_from_page(
     return broadcasts, notices
 
 
-def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBroadcast | PlatformNotice | None:
+def _broadcast_from_item(item: dict[str, Any], channel: ChannelConfig) -> UpcomingBroadcast | PlatformNotice | None:
     """Эфир без разбираемого времени старта сверять не с чем: вместо эфира — замечание для владельца.
 
     Постоянный эфир канала (isDefaultBroadcast) владелец не удалит и не исправит: без замечания, None.
@@ -894,8 +926,9 @@ def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBro
     start_utc: datetime | None = _parse_start(start_text)
     if start_utc is None and _optional_bool(snippet, DEFAULT_BROADCAST_FLAG):
         LOGGER.info(
-            'default_broadcast_skipped channel="%s" broadcast_id=%s title=%r',
-            account_name,
+            'default_broadcast_skipped channel="%s" handle=%s broadcast_id=%s title=%r',
+            channel.account_name,
+            channel.handle,
             broadcast_id,
             snippet.get("title"),
         )
@@ -903,16 +936,18 @@ def _broadcast_from_item(item: dict[str, Any], account_name: str) -> UpcomingBro
     if start_utc is None:
         # лог — только диагностика; владельцу факт уходит данными (PlatformNotice → take_notices)
         LOGGER.info(
-            'broadcast_without_start channel="%s" broadcast_id=%s title=%r value=%r',
-            account_name,
+            'broadcast_without_start channel="%s" handle=%s broadcast_id=%s title=%r value=%r',
+            channel.account_name,
+            channel.handle,
             broadcast_id,
             snippet.get("title"),
             start_text,
         )
         return PlatformNotice(
             kind=PlatformNoticeKind.UNDATED_BROADCAST,
-            account_name=account_name,
+            account_name=channel.account_name,
             title=str(snippet.get("title") or ""),
+            handle=channel.handle,
         )
     category_id: Any = snippet.get("categoryId")
     status: dict[str, Any] = _mapping(item, "status")
@@ -949,12 +984,13 @@ def _bound_stream_id(item: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _warn_on_unexpected_key(account_name: str, stream: StreamInfo) -> None:
+def _warn_on_unexpected_key(channel: ChannelConfig, stream: StreamInfo) -> None:
     """Ключ неожиданного вида не отбрасывается — только предупреждение (маска обязательна)."""
     if stream.stream_name and not YOUTUBE_STREAM_KEY_PATTERN.fullmatch(stream.stream_name):
         LOGGER.warning(
-            'stream_key_unexpected_format channel="%s" stream_id=%s stream_key=%s',
-            account_name,
+            'stream_key_unexpected_format channel="%s" handle=%s stream_id=%s stream_key=%s',
+            channel.account_name,
+            channel.handle,
             stream.stream_id,
             mask_stream_key(stream.stream_name),
         )

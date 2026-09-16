@@ -9,6 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Final, Protocol
 
+from app.config.loader import ChannelConfig
 from app.pipeline.plan import PlannedBroadcast
 from app.ui import messages_ru as msg
 
@@ -27,9 +28,9 @@ _STEP_TEXTS: Final[dict[BroadcastStep, str]] = {
 class RunProgress(Protocol):
     def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None: ...
 
-    def channel_read_started(self, account_name: str) -> None: ...
+    def channel_read_started(self, channel: ChannelConfig) -> None: ...
 
-    def channel_read_done(self, account_name: str, upcoming: int) -> None: ...
+    def channel_read_done(self, channel: ChannelConfig, upcoming: int) -> None: ...
 
     def broadcast_step_started(self, item: PlannedBroadcast, step: BroadcastStep) -> None: ...
 
@@ -44,10 +45,10 @@ class NoProgress:
     def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None:
         return None
 
-    def channel_read_started(self, account_name: str) -> None:
+    def channel_read_started(self, channel: ChannelConfig) -> None:
         return None
 
-    def channel_read_done(self, account_name: str, upcoming: int) -> None:
+    def channel_read_done(self, channel: ChannelConfig, upcoming: int) -> None:
         return None
 
     def broadcast_step_started(self, item: PlannedBroadcast, step: BroadcastStep) -> None:
@@ -66,11 +67,15 @@ class ConsoleProgress:
     def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None:
         self._say(msg.PROGRESS_PACKAGES_READ.format(packages=packages, slots_total=slots_total, slots_mine=slots_mine))
 
-    def channel_read_started(self, account_name: str) -> None:
-        self._say(msg.PROGRESS_CHANNEL_READ_STARTED.format(account_name=account_name))
+    def channel_read_started(self, channel: ChannelConfig) -> None:
+        self._say(msg.PROGRESS_CHANNEL_READ_STARTED.format(account_name=channel.account_name, handle=channel.handle))
 
-    def channel_read_done(self, account_name: str, upcoming: int) -> None:
-        self._say(msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=account_name, count=upcoming))
+    def channel_read_done(self, channel: ChannelConfig, upcoming: int) -> None:
+        self._say(
+            msg.PROGRESS_CHANNEL_READ_DONE.format(
+                account_name=channel.account_name, handle=channel.handle, count=upcoming
+            )
+        )
 
     def broadcast_step_started(self, item: PlannedBroadcast, step: BroadcastStep) -> None:
         self._say(_STEP_TEXTS[step].format(**_broadcast_fields(item)))
@@ -87,4 +92,10 @@ class ConsoleProgress:
 
 
 def _broadcast_fields(item: PlannedBroadcast) -> dict[str, str]:
-    return {"account_name": item.account_name, "date": item.date, "time": item.time, "language": item.language}
+    return {
+        "account_name": item.account_name,
+        "handle": item.channel.handle,
+        "date": item.date,
+        "time": item.time,
+        "language": item.language,
+    }

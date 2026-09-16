@@ -31,19 +31,19 @@ TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенериров
 #   «в этом запуске в форму не отправлялся» — эфир уже стоял, ключ уходил раньше;
 #   «НЕ отправлен» — передайте ключ стримеру вручную.
 
-16-09-2026 19:00  uk  Канал UA
+16-09-2026 19:00  uk  Канал UA @КаналUA
   ключ   xxxx-xxxx-xxxx-xxxx-xxxx
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=abc123
   форма  отправлен в форму 13-09-2026 12:00
 
-16-09-2026 21:00  ru  Канал RU
+16-09-2026 21:00  ru  Канал RU @КаналRU
   ключ   yyyy-yyyy-yyyy-yyyy-yyyy
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=def456
   форма  НЕ отправлен: форма недоступна (HTTP 503) — передайте стримеру вручную
 
-17-09-2026 19:00  uk  Канал UA
+17-09-2026 19:00  uk  Канал UA @КаналUA
   ключ   zzzz-zzzz-zzzz-zzzz-zzzz
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=ghi789
@@ -55,6 +55,7 @@ def _channel(account_name: str, language: str) -> ChannelConfig:
     return ChannelConfig(
         platform=Platform.YOUTUBE,
         account_name=account_name,
+        handle="@" + account_name.replace(" ", ""),
         google_account="owner@gmail.com",
         languages=(language,),
         privacy=Privacy.PUBLIC,
@@ -158,7 +159,7 @@ def test_key_is_the_first_line_of_each_block() -> None:
     lines: list[str] = render_keys_file([key_row_from_planned(item)], "13-09-2026 12:00").splitlines()
     header: int = len(msg.KEYS_FILE_HEADER)
     assert lines[header] == ""
-    assert lines[header + 1] == "16-09-2026 19:00  uk  Канал UA"
+    assert lines[header + 1] == "16-09-2026 19:00  uk  Канал UA @КаналUA"
     assert lines[header + 2] == "  ключ   xxxx-xxxx-xxxx-xxxx-xxxx"
     assert all(len(line) <= 80 for line in lines[header + 1 :])
 

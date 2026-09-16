@@ -17,8 +17,8 @@ def _item(now: datetime) -> PlannedBroadcast:
 
 def _every_step(progress: RunProgress, item: PlannedBroadcast) -> None:
     progress.packages_read(2, 14, 10)
-    progress.channel_read_started("yt_ua")
-    progress.channel_read_done("yt_ua", 3)
+    progress.channel_read_started(item.channel)
+    progress.channel_read_done(item.channel, 3)
     progress.broadcast_step_started(item, BroadcastStep.CREATE)
     progress.broadcast_step_started(item, BroadcastStep.FIX)
     progress.key_send_started(item)
@@ -37,11 +37,11 @@ def test_console_progress_prints_one_indented_line_per_step(now: datetime, capsy
     when: str = f"{item.date} {item.time} uk"
     assert capsys.readouterr().out.splitlines() == [
         "  пакетов прочитано 2: слотов 14, из них под мои языки 10",
-        "  канал «yt_ua»: запрашиваю запланированные эфиры",
-        "  канал «yt_ua»: запланированных эфиров 3",
-        f"  канал «yt_ua»: создаю эфир {when}",
-        f"  канал «yt_ua»: исправляю эфир {when}",
-        f"  канал «yt_ua»: отправляю ключ в форму — эфир {when}",
+        "  канал «yt_ua» @yt_ua: запрашиваю запланированные эфиры",
+        "  канал «yt_ua» @yt_ua: запланированных эфиров 3",
+        f"  канал «yt_ua» @yt_ua: создаю эфир {when}",
+        f"  канал «yt_ua» @yt_ua: исправляю эфир {when}",
+        f"  канал «yt_ua» @yt_ua: отправляю ключ в форму — эфир {when}",
         "  пишу отчёт",
     ]
 
