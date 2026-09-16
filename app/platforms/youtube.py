@@ -10,6 +10,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
@@ -26,6 +27,7 @@ from app.observability.logging_setup import get_logger, mask_stream_key
 from app.pipeline.plan import BroadcastSpec
 from app.pipeline.reconciler import MarkerParts, split_marker
 from app.platforms.base import (
+    AppliedVideo,
     BroadcastFacts,
     ChannelInfo,
     CreatedBroadcast,
@@ -79,6 +81,8 @@ ERROR_TRANSPORT: Final[str] = "transportFailed"
 ERROR_BAD_RESPONSE: Final[str] = "badResponse"
 ERROR_UNEXPECTED_KEY: Final[str] = "unexpectedStreamKeyFormat"
 ERROR_UNKNOWN: Final[str] = "unknown"
+
+LOG_MISSING: Final[str] = "-"   # чего площадка не прислала: строка лога остаётся key=value
 
 RETRY_MAX_ATTEMPTS: Final[int] = 4
 RETRY_BASE_DELAY_SEC: Final[float] = 1.0
@@ -160,7 +164,7 @@ class YouTubePlatform:
             'channel_described channel="%s" youtube_channel_id=%s language=%s',
             channel.account_name,
             info.youtube_channel_id,
-            info.default_language or "-",
+            info.default_language or LOG_MISSING,
         )
         self._channels[channel.account_name] = info
         return info
@@ -297,7 +301,7 @@ class YouTubePlatform:
         snippet["categoryId"] = category_id
         status["selfDeclaredMadeForKids"] = False
         status["privacyStatus"] = privacy
-        self._execute(
+        updated: dict[str, Any] = self._execute(
             channel,
             "videos.update",
             lambda service: service.videos().update(
@@ -305,16 +309,21 @@ class YouTubePlatform:
                 body={"id": broadcast_id, "snippet": snippet, "status": status},
             ),
         )
+        applied: AppliedVideo = _applied_video(updated)
         LOGGER.info(
-            'video_settings_applied channel="%s" broadcast_id=%s language=%s category=%s audience=%s privacy=%s',
+            'video_settings_applied channel="%s" broadcast_id=%s language=%s category=%s audience=%s privacy=%s'
+            ' applied_language=%s applied_category=%s applied_privacy=%s',
             channel.account_name,
             broadcast_id,
             fixes.language_set,
             fixes.category_set,
             fixes.audience_cleared,
             fixes.privacy_set,
+            applied.language or LOG_MISSING,
+            applied.category_id or LOG_MISSING,
+            applied.privacy or LOG_MISSING,
         )
-        return fixes
+        return replace(fixes, applied=applied)
 
     def set_stream_marker(self, channel: ChannelConfig, stream_id: str, marker: str) -> None:
         """liveStreams.update(part=snippet): snippet читается целиком, меняются только название и описание."""
@@ -616,6 +625,23 @@ def _items(response: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         raise PlatformError(ERROR_BAD_RESPONSE, "items is not a list")
     return [item for item in items if isinstance(item, dict)]
+
+
+def _applied_video(response: dict[str, Any]) -> AppliedVideo:
+    """Ответ videos.update: что площадка записала на самом деле.
+
+    Пустой ответ — пустой AppliedVideo: перечитанное значение тогда остаётся как есть.
+    """
+    snippet: dict[str, Any] = _mapping(response, "snippet")
+    status: dict[str, Any] = _mapping(response, "status")
+    made_for_kids: Any = status.get("madeForKids")
+    return AppliedVideo(
+        language=_optional_text(snippet, "defaultLanguage"),
+        audio_language=_optional_text(snippet, "defaultAudioLanguage"),
+        category_id=_optional_text(snippet, "categoryId"),
+        privacy=_optional_text(status, "privacyStatus"),
+        made_for_kids=made_for_kids if isinstance(made_for_kids, bool) else None,
+    )
 
 
 def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:

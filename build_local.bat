@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
-rem Planer: LOCAL build - the same as build_release.bat, but the installer bundles secrets\client_secret.json.
+rem Planer: LOCAL build - the same as build_release.bat, but the build carries the developer data:
+rem the whole secrets\ folder (client_secret.json and the channel tokens), config\channels.json and
+rem app\state\bindings.json. The built program runs at once - no OAuth, no hand-copying.
 rem Never publish the resulting installer.
 setlocal EnableExtensions
 

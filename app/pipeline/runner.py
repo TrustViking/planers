@@ -531,8 +531,8 @@ class _Executor:
         broadcast_id: str | None = self._own_broadcast_id(item)
         if broadcast_id is None:
             return
-        self._apply_video_settings(item, broadcast_id)
-        self._read_facts(item, broadcast_id)
+        fixes: VideoFixes | None = self._apply_video_settings(item, broadcast_id)
+        self._read_facts(item, broadcast_id, fixes)
 
     @staticmethod
     def _own_broadcast_id(item: PlannedBroadcast) -> str | None:
@@ -543,8 +543,12 @@ class _Executor:
             return None
         return item.broadcast_id or (item.found.broadcast_id if item.found else None)
 
-    def _apply_video_settings(self, item: PlannedBroadcast, broadcast_id: str) -> None:
-        """Язык, категория, видимость и аудитория — одним проходом по ресурсу видео (§7.4)."""
+    def _apply_video_settings(self, item: PlannedBroadcast, broadcast_id: str) -> VideoFixes | None:
+        """Язык, категория, видимость и аудитория — одним проходом по ресурсу видео (§7.4).
+
+        Возвращает ответ площадки на запись: снимок фактов сверяется с ним, а не с перечитыванием.
+        None — записи не было, потому что вызов не удался.
+        """
         try:
             fixes: VideoFixes = self._platform.apply_video_settings(
                 item.channel,
@@ -561,17 +565,22 @@ class _Executor:
                 error.code,
             )
             item.warn(OutcomeWarning(WARNING_STEP_SETTINGS, error.code, error.message))
-            return
+            return None
         if fixes.audience_cleared:
             item.warn(OutcomeWarning(WARNING_STEP_AUDIENCE, "fixed"))
         if item.found is not None:
             # у созданного эфира категорию и видимость ставит планер; у найденного это исправление
             _mark_video_fixes(item, fixes)
+        return fixes
 
-    def _read_facts(self, item: PlannedBroadcast, broadcast_id: str) -> None:
-        """Один раз на объект: что по факту лежит на платформе (§5.6)."""
+    def _read_facts(self, item: PlannedBroadcast, broadcast_id: str, fixes: VideoFixes | None = None) -> None:
+        """Один раз на объект: что по факту лежит на платформе (§5.6).
+
+        Поля, записанные этим же запуском, берутся из ответа записи (VideoFixes.apply_to_facts):
+        перечитывание сразу после неё может отдать ещё старое значение.
+        """
         try:
-            item.facts = self._platform.read_facts(item.channel, broadcast_id)
+            facts: BroadcastFacts = self._platform.read_facts(item.channel, broadcast_id)
         except PlatformError as error:
             LOGGER.warning(
                 'facts_read_failed slot_id=%s channel="%s" code=%s',
@@ -581,6 +590,7 @@ class _Executor:
             )
             item.warn(OutcomeWarning(WARNING_STEP_FACTS, error.code, error.message))
             return
+        item.facts = facts if fixes is None else fixes.apply_to_facts(facts)
         _log_broadcast_fields(item)
         if item.facts.age_restricted:
             item.warn(OutcomeWarning(WARNING_STEP_AGE_RESTRICTED, "ytAgeRestricted", item.broadcast_url or ""))

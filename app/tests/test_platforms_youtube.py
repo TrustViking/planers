@@ -666,6 +666,92 @@ def test_video_settings_are_applied_in_one_write(
     assert body["status"]["privacyStatus"] == "unlisted"        # частичный status затёр бы его
 
 
+def test_write_response_says_what_the_platform_stored(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ответ videos.update — источник записанного: перечитывание сразу после записи отстаёт."""
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            videos=[
+                _video_item(snippet={"defaultLanguage": "ru", "defaultAudioLanguage": "ru"}),
+                {
+                    "id": "B1",
+                    "snippet": {"defaultLanguage": "uk", "defaultAudioLanguage": "uk", "categoryId": "22"},
+                    "status": {"privacyStatus": "unlisted", "madeForKids": False},
+                },
+            ]
+        ),
+    )
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22", "unlisted")
+    assert fixes.language_set is True and fixes.applied is not None
+    assert (fixes.applied.language, fixes.applied.audio_language) == ("uk", "uk")
+    assert (fixes.applied.category_id, fixes.applied.privacy) == ("22", "unlisted")
+    assert fixes.applied.made_for_kids is False
+
+
+def test_empty_write_response_leaves_the_read_value(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Площадка ничего не прислала в ответе — подставлять нечего, перечитанное остаётся как есть."""
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(videos=[_video_item(snippet={"defaultLanguage": "ru"}), {"id": "B1"}]),
+    )
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22", "unlisted")
+    assert fixes.applied is not None and fixes.applied.language is None
+    stale: BroadcastFacts = _facts(default_language="ru")
+    assert fixes.apply_to_facts(stale).default_language == "ru"
+
+
+def test_applied_fields_replace_the_reread_ones(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Записанное этим запуском берётся из ответа записи; поле, которое не писали, не трогается."""
+    _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            videos=[
+                _video_item(snippet={"defaultLanguage": "ru", "defaultAudioLanguage": "ru"}),
+                {
+                    "id": "B1",
+                    "snippet": {"defaultLanguage": "uk", "defaultAudioLanguage": "uk", "categoryId": "22"},
+                    "status": {"privacyStatus": "unlisted"},
+                },
+            ]
+        ),
+    )
+    fixes: VideoFixes = platform.apply_video_settings(CHANNEL, "B1", "uk", "22", "unlisted")
+    facts: BroadcastFacts = fixes.apply_to_facts(_facts(default_language="ru", title="Старое название"))
+    assert (facts.default_language, facts.default_audio_language) == ("uk", "uk")
+    assert facts.title == "Старое название"        # запись названия сюда не входит
+
+
+def _facts(**overrides: Any) -> BroadcastFacts:
+    """Снимок фактов эфира: минимум обязательных полей, остальное — по месту теста."""
+    fields: dict[str, Any] = {
+        "broadcast_id": "B1",
+        "title": "Эфир",
+        "description": "Описание",
+        "start_utc": None,
+        "privacy_status": "unlisted",
+        "made_for_kids": False,
+        "age_restricted": False,
+        "default_language": "uk",
+        "default_audio_language": "uk",
+        "category_id": "22",
+        "bound_stream_id": "S1",
+        "stream_marker": "17-03-2027_1900_uk",
+    }
+    return BroadcastFacts(**{**fields, **overrides})
+
+
 def test_matching_video_settings_are_not_written(
     platform: YouTubePlatform,
     monkeypatch: pytest.MonkeyPatch,

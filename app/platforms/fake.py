@@ -14,6 +14,7 @@ from typing import Final
 from app.config.loader import ChannelConfig
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
+    AppliedVideo,
     BroadcastFacts,
     ChannelInfo,
     CreatedBroadcast,
@@ -292,7 +293,17 @@ class FakePlatform:
         if current is not None:
             self._broadcasts[channel.account_name][broadcast_id] = replace(current, privacy_status=privacy)
         self.settings_writes.append(broadcast_id)
-        return fixes
+        # как настоящая площадка: ответ записи говорит, что записано (VideoFixes.apply_to_facts)
+        return replace(
+            fixes,
+            applied=AppliedVideo(
+                language=language,
+                audio_language=language,
+                category_id=category_id,
+                privacy=privacy,
+                made_for_kids=False,
+            ),
+        )
 
     def set_stream_marker(self, channel: ChannelConfig, stream_id: str, marker: str) -> None:
         if stream_id in self.fail_marker:

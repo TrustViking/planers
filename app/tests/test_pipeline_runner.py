@@ -5,6 +5,7 @@ import re
 
 import pytest
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ from app.output.console import render_console
 from app.pipeline.plan import ChangedField, Decision, PlannedBroadcast
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.form.base import FORM_CODE_NOT_CONFIRMED, FormSendResult
-from app.platforms.base import BroadcastFacts, PlatformError, UpcomingBroadcast
+from app.platforms.base import BroadcastFacts, PlatformError, UpcomingBroadcast, VideoFixes
 from app.platforms.fake import FakePlatform
 from app.output.progress import BroadcastStep
 from app.tests.conftest import FORM_SPEC, FakeFormSender, RecordingProgress
@@ -920,6 +921,46 @@ def test_created_broadcast_has_no_marker_mismatch(
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.CREATED
     assert not any("маркер потока" in line for line in outcome.report.mismatches)
+
+
+def test_language_just_written_is_taken_from_the_write_response(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """15-09: язык uk записан, перечитывание через секунду отдало ru — расхождение было ложным."""
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    real_read_facts = fake_platform.read_facts
+
+    def _facts_with_stale_language(channel: Any, broadcast_id: str) -> BroadcastFacts:
+        facts: BroadcastFacts = real_read_facts(channel, broadcast_id)
+        return BroadcastFacts(**{**facts.__dict__, "default_language": "ru", "default_audio_language": "ru"})
+
+    fake_platform.read_facts = _facts_with_stale_language  # type: ignore[method-assign]
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.CREATED
+    assert not any(msg.MISMATCH_FIELD_LANGUAGE in line for line in outcome.report.mismatches)
+
+
+def test_language_refused_by_the_platform_is_still_a_mismatch(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """Ответу записи верим, но сверяем с отправленным: вернули ru вместо uk — расхождение настоящее."""
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    real_apply = fake_platform.apply_video_settings
+
+    def _apply_refusing_language(
+        channel: Any, broadcast_id: str, language: str, category_id: str, privacy: str
+    ) -> VideoFixes:
+        fixes: VideoFixes = real_apply(channel, broadcast_id, language, category_id, privacy)
+        assert fixes.applied is not None
+        return replace(fixes, applied=replace(fixes.applied, language="ru", audio_language="ru"))
+
+    fake_platform.apply_video_settings = _apply_refusing_language  # type: ignore[method-assign]
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    [line] = [text for text in outcome.report.mismatches if msg.MISMATCH_FIELD_LANGUAGE in text]
+    assert "хотели: uk" in line and "на платформе: ru" in line
 
 
 def test_full_run_reports_progress_in_step_order(

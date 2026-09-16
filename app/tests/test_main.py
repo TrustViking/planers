@@ -135,9 +135,9 @@ def test_run_without_flags_is_the_full_cycle(
     assert run_cli([]) == 0
     out: str = capsys.readouterr().out
     lines: list[str] = out.splitlines()
-    assert re.fullmatch(rf"Планер {re.escape(APP_VERSION)} — \d{{2}}-\d{{2}}-\d{{4}} \d{{2}}:\d{{2}}", lines[0])
+    assert re.fullmatch(rf"Planer {re.escape(APP_VERSION)} — \d{{2}}-\d{{2}}-\d{{4}} \d{{2}}:\d{{2}}", lines[0])
     assert lines.count("Итог: опубликовано 1, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0") == 1
-    assert sum(1 for line in lines if line.startswith("Планер ")) == 1          # шапка одна на прогон
+    assert sum(1 for line in lines if line.startswith("Planer ")) == 1          # шапка одна на прогон
     assert f"  {UA} ({UA_GOOGLE})" in lines
     assert "    01-01-2099  19:00  uk  ****-0000  передан в форму" in lines
     assert "## " not in out                                            # markdown — только в отчёте
@@ -163,7 +163,7 @@ def test_full_run_prints_title_then_progress_then_blank_line_then_total(
     )
     assert run_cli([]) == 0
     lines: list[str] = capsys.readouterr().out.splitlines()
-    assert lines[0].startswith(f"Планер {APP_VERSION} — ") and "dry-run" not in lines[0]
+    assert lines[0].startswith(f"Planer {APP_VERSION} — ") and "dry-run" not in lines[0]
     progress: list[str] = [
         "  " + msg.PROGRESS_PACKAGES_READ.format(packages=1, slots_total=2, slots_mine=2),
         # каналы — в порядке объектов (слоты по дате, времени и языку): ru раньше uk
@@ -193,7 +193,7 @@ def test_dry_run_prints_channel_and_package_progress_but_no_actions(
     make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
     assert run_cli(["--dry-run"]) == 0
     lines: list[str] = capsys.readouterr().out.splitlines()
-    assert lines[0].startswith(f"Планер {APP_VERSION} — ") and lines[0].endswith(
+    assert lines[0].startswith(f"Planer {APP_VERSION} — ") and lines[0].endswith(
         " — dry-run: ничего не создано и в форму не отправлено"
     )
     assert "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(account_name=UA, count=0) in lines
@@ -208,7 +208,7 @@ def test_title_is_printed_before_config_is_read(planer_root: Path, capsys: pytes
     """--check без channels.json: шапка (обычная) — первой строкой, ещё до ошибки конфига."""
     assert run_cli(["--check"]) == 2
     lines: list[str] = capsys.readouterr().out.splitlines()
-    assert lines[0].startswith(f"Планер {APP_VERSION} — ") and " — " not in lines[0].split(" — ", 1)[1]
+    assert lines[0].startswith(f"Planer {APP_VERSION} — ") and " — " not in lines[0].split(" — ", 1)[1]
     assert msg.CONFIG_CHANNELS_TEMPLATE.splitlines()[0] in lines[1:]
 
 
@@ -229,7 +229,7 @@ def test_version_flag_prints_the_single_version_and_exits_0(capsys: pytest.Captu
     with pytest.raises(SystemExit) as raised:
         run_cli(["--version"])
     assert raised.value.code == 0
-    assert capsys.readouterr().out.strip() == f"Планер {APP_VERSION}"
+    assert capsys.readouterr().out.strip() == f"Planer {APP_VERSION}"
 
 
 def test_run_started_log_line_carries_the_version(planer_root: Path) -> None:
@@ -310,7 +310,7 @@ def test_missing_token_logs_in_at_first_access_and_run_continues(
     assert positions == sorted(positions)
     assert msg.AUTH_OK.format(account_name=UA, title=f"Fake {UA}", youtube_channel_id=f"UCfake{UA}") in out
     # шапка — до входа, итог — после
-    assert out.index(f"Планер {APP_VERSION} — ") < out.index(msg.AUTH_STARTING.format(account_name=UA))
+    assert out.index(f"Planer {APP_VERSION} — ") < out.index(msg.AUTH_STARTING.format(account_name=UA))
     assert out.index("Google hasn't verified this app") < out.index("Итог: ")
     assert fake_platform_in_main.logins == [UA]
     assert list(_read_bindings(planer_root)) == [UA]

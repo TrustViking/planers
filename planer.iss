@@ -41,7 +41,7 @@ WizardStyle=modern
 SetupIconFile={#SourceDir}\planers.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayName=Планер {#AppVersion}
+UninstallDisplayName=Planer {#AppVersion}
 UninstallDisplayIcon={app}\planer.exe
 CloseApplications=yes
 RestartIfNeededByRun=no
@@ -61,9 +61,14 @@ Source: "{#SourceDir}\planers.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; переустановка не трогает, удаление тоже. channels.json владелец создаёт сам по шаблону из консоли.
 Source: "{#SourceDir}\config\planer.json"; DestDir: "{app}\config"; Flags: onlyifdoesntexist uninsneveruninstall
 #if IncludeSecrets
-; build_local.bat: паспорт программы Google из secrets\ репо. В build_release.bat его нет —
-; владелец получает файл отдельно (messages_ru.CLIENT_SECRET_MISSING).
-Source: "{#RepoRoot}\secrets\client_secret.json"; DestDir: "{app}\secrets"; Flags: ignoreversion
+; build_local.bat: данные разработчика — вся папка secrets\ (паспорт программы Google и токены каналов),
+; config\channels.json и привязки app\state\bindings.json: установленная программа должна делать прогон
+; сразу, без OAuth и ручного копирования. Источник — dist\planer\, куда их положил build_release.bat.
+; В build_release.bat этого нет: владелец получает client_secret.json отдельно
+; (messages_ru.CLIENT_SECRET_MISSING), а channels.json создаёт сам по шаблону из консоли.
+Source: "{#SourceDir}\secrets\*"; DestDir: "{app}\secrets"; Flags: ignoreversion uninsneveruninstall
+Source: "{#SourceDir}\config\channels.json"; DestDir: "{app}\config"; Flags: ignoreversion uninsneveruninstall
+Source: "{#SourceDir}\app\state\bindings.json"; DestDir: "{app}\app\state"; Flags: ignoreversion uninsneveruninstall skipifsourcedoesntexist
 #endif
 
 [Icons]

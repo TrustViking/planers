@@ -1,7 +1,10 @@
 @echo off
 chcp 65001 >nul
 rem Planer: release build - exe + installer WITHOUT secrets (TZ 9, stage 5).
-rem build_local.bat calls this script with PLANER_INCLUDE_SECRETS=1; that is the only difference.
+rem build_local.bat calls this script with PLANER_INCLUDE_SECRETS=1; that is the only difference:
+rem the local build also carries the developer data - the whole secrets\ folder (client_secret.json and
+rem the channel tokens), config\channels.json and app\state\bindings.json - so the built program runs
+rem without OAuth and without hand-copying. Never publish a local installer.
 rem The only environment is .venv_planers: the app and pyinstaller live there.
 rem Exit codes: 0 - exe and installer built; 1 - build failed; 3 - exe built, Inno Setup not found.
 setlocal EnableExtensions
@@ -19,7 +22,7 @@ set "APP_ICON=%ROOT%\planers.ico"
 set "DISCOVERY_DOC=%DIST_APP%\_internal\googleapiclient\discovery_cache\documents\youtube.v3.json"
 
 if "%PLANER_INCLUDE_SECRETS%"=="1" (
-  echo [WARN] LOCAL build: installer bundles secrets\client_secret.json - do NOT publish it.
+  echo [WARN] LOCAL build: secrets\, config\channels.json and bindings.json go into the build - do NOT publish it.
 ) else (
   echo [INFO] RELEASE build: installer contains no secrets.
 )
@@ -41,14 +44,15 @@ if errorlevel 1 (
   )
 )
 
-rem --- 2. version: app\version.py is the only source ----------------------------
+rem --- 2. version: app\version.py is the only source; every build bumps patch +1 --
+rem The bumped app\version.py stays in the working tree - commit it with the build.
 set "APP_VERSION="
 set "VERSION_FILE=%TEMP%\planer_build_version.tmp"
-"%BUILD_PYTHON%" -c "from app.version import APP_VERSION; print(APP_VERSION)" > "%VERSION_FILE%"
+"%BUILD_PYTHON%" -m app.version --bump > "%VERSION_FILE%"
 if not errorlevel 1 set /p APP_VERSION=<"%VERSION_FILE%"
 if exist "%VERSION_FILE%" del /Q "%VERSION_FILE%"
 if not defined APP_VERSION (
-  echo [ERROR] Cannot read APP_VERSION from app\version.py.
+  echo [ERROR] Cannot bump APP_VERSION in app\version.py.
   call :finish 1
   exit /b 1
 )
@@ -62,6 +66,11 @@ if not exist "%APP_ICON%" (
 
 if "%PLANER_INCLUDE_SECRETS%"=="1" if not exist "%ROOT%\secrets\client_secret.json" (
   echo [ERROR] secrets\client_secret.json not found - local installer needs it.
+  call :finish 1
+  exit /b 1
+)
+if "%PLANER_INCLUDE_SECRETS%"=="1" if not exist "%ROOT%\config\channels.json" (
+  echo [ERROR] config\channels.json not found - local build needs it.
   call :finish 1
   exit /b 1
 )
@@ -92,6 +101,13 @@ if not exist "%DIST_APP%\config\planer.json" (
   call :finish 1
   exit /b 1
 )
+if "%PLANER_INCLUDE_SECRETS%"=="1" (
+  call :copy_local_data
+  if errorlevel 1 (
+    call :finish 1
+    exit /b 1
+  )
+)
 echo [OK] Portable build: %DIST_APP%
 
 rem --- 4. installer ------------------------------------------------------------
@@ -119,6 +135,27 @@ if "%PLANER_INCLUDE_SECRETS%"=="1" (
   echo [OK] Installer: dist\installer\planer-setup-%APP_VERSION%.exe
 )
 call :finish 0
+exit /b 0
+
+:copy_local_data
+rem LOCAL build only: developer data next to the exe, from there Inno Setup takes it into the installer.
+rem secrets\* is client_secret.json plus <account_name>.token.json of every channel already authorized.
+mkdir "%DIST_APP%\secrets" >nul 2>&1
+copy /Y "%ROOT%\secrets\*" "%DIST_APP%\secrets\" >nul
+if not exist "%DIST_APP%\secrets\client_secret.json" (
+  echo [ERROR] secrets\ was not copied to "%DIST_APP%\secrets".
+  exit /b 1
+)
+copy /Y "%ROOT%\config\channels.json" "%DIST_APP%\config\channels.json" >nul
+if not exist "%DIST_APP%\config\channels.json" (
+  echo [ERROR] config\channels.json was not copied to "%DIST_APP%\config".
+  exit /b 1
+)
+if exist "%ROOT%\app\state\bindings.json" (
+  mkdir "%DIST_APP%\app\state" >nul 2>&1
+  copy /Y "%ROOT%\app\state\bindings.json" "%DIST_APP%\app\state\bindings.json" >nul
+)
+echo [OK] LOCAL data: secrets\, config\channels.json, app\state\bindings.json
 exit /b 0
 
 :finish

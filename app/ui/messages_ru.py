@@ -11,7 +11,7 @@ HELP_AUTH: Final[str] = "заново авторизовать канал (accou
 HELP_STATUS: Final[str] = "сверка и отчёт без пакетов из bcast"
 HELP_DEBUG: Final[str] = "подробный лог в консоли"
 HELP_VERSION: Final[str] = "показать номер версии и выйти"
-VERSION_TEXT: Final[str] = "Планер {version}"
+VERSION_TEXT: Final[str] = "Planer {version}"
 
 # --- конфиг (ТЗ §5.2): два JSON, все поля обязательные, примеров и копирования нет
 CONFIG_ERROR: Final[str] = "Ошибка в конфиге {path}: {key} — {problem}"
@@ -258,7 +258,7 @@ ORPHAN_LINE: Final[str] = "{date} {time} {language} -> {account_name} — {url} 
 SCHEDULED_LINE: Final[str] = "{prefix} — {url}"
 
 # --- отчёт logs\{дата}_{время}_report.md (ТЗ §5.6): подробности, можно переслать оператору
-REPORT_TITLE: Final[str] = "# Планер {version} — отчёт {generated_at}"
+REPORT_TITLE: Final[str] = "# Planer {version} — отчёт {generated_at}"
 REPORT_TITLE_DRY_RUN: Final[str] = " (dry-run)"
 REPORT_NOTICE: Final[str] = "Внимание: {notice}"
 REPORT_ITEM: Final[str] = "- {text}"
@@ -283,11 +283,11 @@ REPORT_STATUS_TOTAL: Final[str] = "Итог: запланировано {schedul
 REPORT_TOTAL_KEYS_FILE: Final[str] = " Файл ключей: {path}"
 
 # --- консоль (ТЗ §5.6): блоки сверху вниз, без markdown и значков
-CONSOLE_TITLE: Final[str] = "Планер {version} — {generated_at}"
+CONSOLE_TITLE: Final[str] = "Planer {version} — {generated_at}"
 CONSOLE_TITLE_DRY_RUN: Final[str] = (
-    "Планер {version} — {generated_at} — dry-run: ничего не создано и в форму не отправлено"
+    "Planer {version} — {generated_at} — dry-run: ничего не создано и в форму не отправлено"
 )
-CONSOLE_TITLE_STATUS: Final[str] = "Планер {version} — {generated_at} — --status: эфиры планера на каналах"
+CONSOLE_TITLE_STATUS: Final[str] = "Planer {version} — {generated_at} — --status: эфиры планера на каналах"
 CONSOLE_TOTAL: Final[str] = (
     "Итог: опубликовано {created}, исправлено {fixed}, уже стояло {matched}, не публиковали {skipped}, ошибок {errors}"
 )

@@ -5,7 +5,7 @@ Protocol называется BroadcastPlatform: имя Platform занято en
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Final, Protocol
@@ -109,6 +109,20 @@ class BroadcastFacts:
 
 
 @dataclass(frozen=True)
+class AppliedVideo:
+    """Что вернул ответ записи ресурса видео: записанные значения глазами самой площадки.
+
+    None в поле — площадка его в ответе не прислала; сравнивать тогда не с чем.
+    """
+
+    language: str | None = None
+    audio_language: str | None = None
+    category_id: str | None = None
+    privacy: str | None = None
+    made_for_kids: bool | None = None
+
+
+@dataclass(frozen=True)
 class VideoFixes:
     """Что пришлось поправить у ресурса видео: владелец должен знать о расхождении."""
 
@@ -116,10 +130,34 @@ class VideoFixes:
     category_set: bool = False
     audience_cleared: bool = False
     privacy_set: bool = False
+    applied: AppliedVideo | None = None   # ответ записи; None — записи не было
 
     @property
     def any_fix(self) -> bool:
         return self.language_set or self.category_set or self.audience_cleared or self.privacy_set
+
+    def apply_to_facts(self, facts: BroadcastFacts) -> BroadcastFacts:
+        """Поле, записанное этим запуском, — из ответа записи; остальные остаются перечитанными.
+
+        Перечитывание сразу после записи может вернуть ещё старое значение: реплика площадки
+        изменения не увидела (15-09-2026: язык uk записан, videos.list через секунду отдал ru).
+        Ответ записи приходит от узла, который её принял, — сравнивать надо с ним. Независимое
+        чтение никуда не девается: следующий запуск сверяет то же поле уже без гонки.
+        """
+        if self.applied is None:
+            return facts
+        changes: dict[str, str | bool] = {}
+        if self.language_set and self.applied.language is not None:
+            changes["default_language"] = self.applied.language
+        if self.language_set and self.applied.audio_language is not None:
+            changes["default_audio_language"] = self.applied.audio_language
+        if self.category_set and self.applied.category_id is not None:
+            changes["category_id"] = self.applied.category_id
+        if self.privacy_set and self.applied.privacy is not None:
+            changes["privacy_status"] = self.applied.privacy
+        if self.audience_cleared and self.applied.made_for_kids is not None:
+            changes["made_for_kids"] = self.applied.made_for_kids
+        return replace(facts, **changes) if changes else facts
 
 
 @dataclass(frozen=True)

@@ -145,7 +145,7 @@ def test_console_has_no_title_it_is_printed_by_main_at_start() -> None:
     for mode in RunMode:
         text: str = _render(_sample_report(mode=mode))
         assert text.splitlines()[0].startswith("Итог: ")
-        assert "Планер " not in text
+        assert "Planer " not in text
 
 
 def test_blocks_keep_their_order_and_rules_their_width() -> None:
