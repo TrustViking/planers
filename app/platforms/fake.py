@@ -52,6 +52,10 @@ FAKE_LATENCY_PREFERENCE: Final[str] = "normal"
 SEED_PRIVACY: Final[str] = "public"
 SEED_AUTO_START: Final[bool] = True
 SEED_CATEGORY_ID: Final[str] = "22"
+# Эфир «уже на канале» создан давно — раньше любой памяти планера в тестах.
+SEED_PUBLISHED_UTC: Final[datetime] = datetime(2026, 1, 1, tzinfo=timezone.utc)
+# Отказы загрузки обложки, после которых площадка до конца запуска обложки канала не грузит (как YouTube).
+THUMBNAIL_CHANNEL_REFUSALS: Final[frozenset[str]] = frozenset({"uploadRateLimitExceeded", "forbidden"})
 
 
 def fake_key(name: str) -> str:
@@ -111,6 +115,10 @@ class FakePlatform:
         self._fresh: set[str] = set()                      # после drop_login: следующий describe — вход
         self._new_logins: dict[str, ChannelInfo] = {}      # вход был, токен ещё не записан
         self.pictures: dict[str, str] = {}   # broadcast_id → отпечаток текущей картинки эфира
+        self.thumbnail_refusals: dict[str, PlatformError] = {}   # channel.key → запомненный отказ обложек
+        self.thumbnail_attempts: list[str] = []   # broadcast_id каждого вызова set_thumbnail
+        self.picture_lags: bool = False           # True — картинка после set_thumbnail ещё прежняя
+        self.published_utc: datetime | None = SEED_PUBLISHED_UTC   # snippet.publishedAt эфиров из create_broadcast
 
     def seed_broadcast(
         self,
@@ -128,6 +136,7 @@ class FakePlatform:
         category_id: str = SEED_CATEGORY_ID,
         picture: str | None = None,
         stream_description: str = "",
+        published_utc: datetime | None = SEED_PUBLISHED_UTC,
     ) -> UpcomingBroadcast:
         """Эфир «уже на канале» channel_id (ник или ключ). marker — название потока; без marker — эфир без потока.
 
@@ -156,6 +165,7 @@ class FakePlatform:
             auto_start=auto_start,
             auto_stop=auto_stop,
             latency_preference=latency_preference,
+            published_utc=published_utc,
         )
         self._broadcasts.setdefault(fake_key(channel_id), {})[broadcast.broadcast_id] = broadcast
         self.categories[broadcast.broadcast_id] = category_id
@@ -288,6 +298,7 @@ class FakePlatform:
             auto_start=spec.auto_start,
             auto_stop=spec.auto_stop,
             latency_preference=spec.latency_preference,
+            published_utc=self.published_utc,
         )
         self._streams.setdefault(channel.key, {})[stream.stream_id] = stream
         self._broadcasts.setdefault(channel.key, {})[broadcast.broadcast_id] = broadcast
@@ -397,10 +408,21 @@ class FakePlatform:
         self.markers_set.append(FakeCall(channel.key, stream_id, marker, None))
 
     def set_thumbnail(self, channel: ChannelConfig, broadcast_id: str, preview: bytes) -> None:
+        self.thumbnail_attempts.append(broadcast_id)
+        refused: PlatformError | None = self.thumbnail_refusals.get(channel.key)
+        if refused is not None:
+            raise refused
         if broadcast_id in self.fail_thumbnail:
-            raise self.fail_thumbnail[broadcast_id]
-        self.pictures[broadcast_id] = picture_sha(preview)
+            error: PlatformError = self.fail_thumbnail[broadcast_id]
+            if error.code in THUMBNAIL_CHANNEL_REFUSALS:
+                self.thumbnail_refusals[channel.key] = error
+            raise error
+        if not self.picture_lags:
+            self.pictures[broadcast_id] = picture_sha(preview)
         self.thumbnails.append(FakeCall(channel.key, broadcast_id, "", preview))
+
+    def thumbnail_refusal(self, channel: ChannelConfig) -> PlatformError | None:
+        return self.thumbnail_refusals.get(channel.key)
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         self.facts_calls.append(broadcast_id)

@@ -86,6 +86,7 @@ class UpcomingBroadcast:
     auto_stop: bool | None = None           # contentDetails.enableAutoStop
     latency_preference: str | None = None   # contentDetails.latencyPreference
     thumbnail_sha: str | None = None        # отпечаток картинки размера default; None — не скачали
+    published_utc: datetime | None = None   # snippet.publishedAt — когда эфир создан на площадке (aware UTC)
 
 
 class PlatformNoticeKind(str, Enum):
@@ -299,6 +300,10 @@ class BroadcastPlatform(Protocol):
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         """Что лежит на платформе: для разбора расхождений (§5.6)."""
+        ...
+
+    def thumbnail_refusal(self, channel: ChannelConfig) -> PlatformError | None:
+        """Запомненный за этот запуск отказ загрузки обложек по каналу или по проекту; без обращения к сети."""
         ...
 
     def take_notices(self) -> tuple[PlatformNotice, ...]:

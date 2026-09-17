@@ -177,6 +177,7 @@ class PairOutcome:
     handle: str = ""                       # ник канала; пусто — строка не о канале (файл ключей)
     admission_texts: tuple[str, ...] = ()  # NOT_ADMITTED: короткие причины недопуска
     is_channel_ready: bool = True          # NOT_ADMITTED: False — канал не подтверждён, эфиры не проверялись
+    unfixed_fields: tuple[str, ...] = ()   # значения ChangedField: надо было исправить, не удалось
 
 
 @dataclass(frozen=True)
@@ -289,6 +290,9 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
     kind: OutcomeKind = OutcomeKind.ERROR if item.error is not None else _DECISION_KINDS[item.decision]
     if item.stream_attached and item.error is None:
         kind = OutcomeKind.STREAM_ATTACHED
+    applied: tuple[ChangedField, ...] = _applied_fields(item, is_dry_run=is_dry_run)
+    if kind is OutcomeKind.FIXED and not applied:
+        kind = OutcomeKind.MATCHED      # исправить ничего не удалось: эфир стоит, ключ и ссылка прежние
     return PairOutcome(
         kind=kind,
         account_name=item.account_name,
@@ -297,17 +301,25 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
         time=item.time,
         language=item.language,
         broadcast_url=item.broadcast_url or item.found_url,
-        changed_fields=tuple(changed.value for changed in item.changed_fields),
+        changed_fields=tuple(changed.value for changed in applied),
         form=_form_state(item, is_dry_run=is_dry_run),
         form_error=item.last_error if item.should_send_key else None,
         error=item.error,
         title=item.expected.title,
         google_account=item.channel.google_account,
         stream_key=item.stream_key,
-        field_changes=_field_changes(item),
+        field_changes=tuple(_field_change(item, name) for name in applied),
         admission_texts=admission_texts(item.admission_reasons),
         is_channel_ready=not any(reason.kind is AdmissionKind.CHANNEL for reason in item.admission_reasons),
+        unfixed_fields=tuple(name.value for name in item.unfixed_fields) if not is_dry_run else (),
     )
+
+
+def _applied_fields(item: PlannedBroadcast, *, is_dry_run: bool) -> tuple[ChangedField, ...]:
+    """Что исправлено по факту; в dry-run действий нет — что было бы исправлено."""
+    if is_dry_run:
+        return item.changed_fields
+    return item.fixed_fields
 
 
 def admission_texts(reasons: Sequence[AdmissionReason]) -> tuple[str, ...]:
@@ -323,12 +335,8 @@ def _admission_text(reason: AdmissionReason) -> str:
     return template.format(text=reason.text)
 
 
-def _field_changes(item: PlannedBroadcast) -> tuple[FieldChange, ...]:
-    """Было — как в спеке с площадки, стало — как в спеке из пакета; значения теми же словами, что в отчёте."""
-    return tuple(_field_change(item, name) for name in item.changed_fields)
-
-
 def _field_change(item: PlannedBroadcast, name: ChangedField) -> FieldChange:
+    """Было — как в спеке с площадки, стало — как в спеке из пакета; значения теми же словами, что в отчёте."""
     if name is ChangedField.THUMBNAIL:
         # у обложки «да/нет» владельцу ничего не скажет: была заглушка канала, стала картинка из пакета
         return FieldChange(name=name.value, before=msg.THUMBNAIL_BEFORE, after=msg.THUMBNAIL_AFTER)
@@ -732,9 +740,9 @@ def _outcome_body(outcome: PairOutcome, *, is_dry_run: bool) -> str:
     if outcome.kind is OutcomeKind.CREATED:
         return _created_text(outcome, prefix, is_dry_run=is_dry_run)
     if outcome.kind is OutcomeKind.FIXED:
-        return _fixed_text(outcome, prefix, is_dry_run=is_dry_run)
+        return _fixed_text(outcome, prefix, is_dry_run=is_dry_run) + unfixed_text(outcome)
     if outcome.kind is OutcomeKind.MATCHED:
-        return _matched_text(outcome, prefix)
+        return _matched_text(outcome, prefix) + unfixed_text(outcome)
     if outcome.kind is OutcomeKind.AMBIGUOUS:
         return msg.OUTCOME_AMBIGUOUS.format(prefix=prefix)
     if outcome.kind is OutcomeKind.NO_STREAM:
@@ -782,6 +790,16 @@ def _created_text(outcome: PairOutcome, prefix: str, *, is_dry_run: bool) -> str
     if is_dry_run:
         return msg.OUTCOME_CREATE_PLANNED.format(prefix=prefix)
     return msg.OUTCOME_CREATED.format(prefix=prefix, form=form_mark(outcome.form, outcome.form_error))
+
+
+def unfixed_text(outcome: PairOutcome) -> str:
+    """Хвост «обложка не поставлена»; нечего сказать — пусто. Одинаково для отчёта и консоли."""
+    if not outcome.unfixed_fields:
+        return ""
+    what: str = msg.CHANGED_FIELDS_JOINER.join(
+        msg.UNFIXED_FIELD_TEXT.get(name, msg.CHANGED_FIELD_TEXT[name]) for name in outcome.unfixed_fields
+    )
+    return msg.OUTCOME_UNFIXED.format(what=what)
 
 
 def changed_fields_text(outcome: PairOutcome) -> str:

@@ -101,6 +101,12 @@ class VerifiedPlatform:
         self.require_ready(channel)
         self._platform.set_thumbnail(channel, broadcast_id, preview)
 
+    def thumbnail_refusal(self, channel: ChannelConfig) -> PlatformError | None:
+        """Канал не READY — к площадке по нему не ходим вовсе, отказа обложек знать неоткуда."""
+        if self._book.channel(channel).access_error() is not None:
+            return None
+        return self._platform.thumbnail_refusal(channel)
+
     def take_notices(self) -> tuple[PlatformNotice, ...]:
         """Замечания обёрнутой площадки и предупреждения каналов, накопленные по ходу запуска (входы)."""
         channel_notices: tuple[PlatformNotice, ...] = tuple(

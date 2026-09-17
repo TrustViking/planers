@@ -1,7 +1,9 @@
 """Хранилище памяти планера — SQLite (stdlib sqlite3), файл secrets\\planer.sqlite3 (PlanerPaths.records_file).
 
 Таблица slots: одна строка на (slot_id, youtube_channel_id), колонки поиска и record_json (SlotRecord).
-Таблица meta: schema_version. Сбой базы не валит запуск: не открылась — файл переименовывается
+Таблица meta: schema_version и created_utc — когда память появилась (ISO-8601 UTC): эфиры с меткой планера,
+созданные на площадке раньше, считаются уже переданными стримеру (PlannedBroadcast.bootstrap_confirmation).
+У базы без created_utc строка пишется при первом открытии на запись — текущим временем. Сбой базы не валит запуск: не открылась — файл переименовывается
 в planer.sqlite3.broken-<DD-MM-YYYY_HHMMSS> (не удаляется) и создаётся новая; не записалось — WARNING
 и одна строка предупреждения за запуск, объект работает дальше. read_only (--dry-run, --status) —
 на диск ничего не пишется: файла нет — пустая база в памяти.
@@ -10,7 +12,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
@@ -47,6 +49,9 @@ UPSERT_SQL: Final[str] = (
 )
 DELETE_SQL: Final[str] = "DELETE FROM slots WHERE slot_start_utc < ?"
 HAS_SLOTS_SQL: Final[str] = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'slots'"
+META_CREATED_UTC: Final[str] = "created_utc"
+SELECT_META_SQL: Final[str] = "SELECT value FROM meta WHERE key = ?"
+INSERT_META_SQL: Final[str] = "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)"
 
 
 class RecordStore:
@@ -59,30 +64,42 @@ class RecordStore:
         *,
         is_new: bool,
         read_only: bool,
+        created_utc: datetime,
         warnings: list[str] | None = None,
     ) -> None:
         self._connection: sqlite3.Connection = connection
         self._path: Path | None = path
         self._is_new: bool = is_new
+        self._created_utc: datetime = created_utc
         self._read_only: bool = read_only
         self._warnings: list[str] = list(warnings or [])
         self._is_write_failure_reported: bool = False
         self._is_closed: bool = False
 
     @classmethod
-    def memory(cls, *, is_new: bool = True, path: Path | None = None, read_only: bool = False) -> RecordStore:
-        """Пустая база в памяти: для тестов и для read_only без файла."""
+    def memory(
+        cls,
+        *,
+        is_new: bool = True,
+        path: Path | None = None,
+        read_only: bool = False,
+        created_utc: datetime | None = None,
+    ) -> RecordStore:
+        """Пустая база в памяти: для тестов и для read_only без файла. created_utc по умолчанию — сейчас."""
         connection: sqlite3.Connection = sqlite3.connect(MEMORY_DATABASE)
         _create_schema(connection)
-        return cls(connection, path, is_new=is_new, read_only=read_only)
+        moment: datetime = created_utc if created_utc is not None else datetime.now(timezone.utc)
+        return cls(connection, path, is_new=is_new, read_only=read_only, created_utc=moment)
 
     @classmethod
     def open(cls, path: Path, *, read_only: bool, now_local: datetime) -> RecordStore:
+        now_utc: datetime = now_local.astimezone(timezone.utc)
         if read_only:
-            return cls._open_read_only(path)
+            return cls._open_read_only(path, now_utc)
         is_new: bool = not path.exists()
         try:
-            return cls(_connect_writable(path), path, is_new=is_new, read_only=False)
+            connection, created_utc = _connect_writable(path, now_utc, is_new=is_new)
+            return cls(connection, path, is_new=is_new, read_only=False, created_utc=created_utc)
         except sqlite3.DatabaseError as error:
             renamed: Path = path.with_name(path.name + BROKEN_SUFFIX.format(stamp=now_local.strftime(FILE_STAMP_FORMAT)))
             LOGGER.warning("records_broken path=%s renamed=%s error=%s", path, renamed.name, error)
@@ -91,29 +108,31 @@ class RecordStore:
             except OSError as rename_error:
                 # файл занят или защищён: запуск идёт без записи, как в read_only
                 LOGGER.warning("records_rename_failed path=%s reason=%s", path, rename_error)
-                store: RecordStore = cls.memory(is_new=True, path=path, read_only=True)
+                store: RecordStore = cls.memory(is_new=True, path=path, read_only=True, created_utc=now_utc)
                 store._warnings.append(msg.WARNING_RECORDS_BROKEN_READ_ONLY.format(path=path))
                 return store
             warning: str = msg.WARNING_RECORDS_BROKEN.format(path=path, renamed=renamed.name)
-            return cls(_connect_writable(path), path, is_new=True, read_only=False, warnings=[warning])
+            connection, created_utc = _connect_writable(path, now_utc, is_new=True)
+            return cls(connection, path, is_new=True, read_only=False, created_utc=created_utc, warnings=[warning])
 
     @classmethod
-    def _open_read_only(cls, path: Path) -> RecordStore:
-        """Ничего не пишет на диск: файла нет или в нём нет таблицы — пустая база в памяти."""
+    def _open_read_only(cls, path: Path, now_utc: datetime) -> RecordStore:
+        """Ничего не пишет на диск: файла нет или в нём нет таблицы — пустая база в памяти; нет created_utc — сейчас."""
         if not path.exists():
-            return cls.memory(is_new=True, path=path, read_only=True)
+            return cls.memory(is_new=True, path=path, read_only=True, created_utc=now_utc)
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(READ_ONLY_URI.format(path=path.as_posix()), uri=True)
             if connection.execute(HAS_SLOTS_SQL).fetchone() is None:
                 connection.close()
-                return cls.memory(is_new=True, path=path, read_only=True)
-            return cls(connection, path, is_new=False, read_only=True)
+                return cls.memory(is_new=True, path=path, read_only=True, created_utc=now_utc)
+            created_utc: datetime = _read_created_utc(connection) or now_utc
+            return cls(connection, path, is_new=False, read_only=True, created_utc=created_utc)
         except sqlite3.DatabaseError as error:
             if connection is not None:
                 connection.close()
             LOGGER.warning("records_broken path=%s renamed=- error=%s", path, error)
-            store: RecordStore = cls.memory(is_new=True, path=path, read_only=True)
+            store: RecordStore = cls.memory(is_new=True, path=path, read_only=True, created_utc=now_utc)
             store._warnings.append(msg.WARNING_RECORDS_BROKEN_READ_ONLY.format(path=path))
             return store
 
@@ -124,6 +143,11 @@ class RecordStore:
     @property
     def is_new(self) -> bool:
         return self._is_new
+
+    @property
+    def created_utc(self) -> datetime:
+        """Когда появилась память (aware UTC)."""
+        return self._created_utc
 
     @property
     def is_read_only(self) -> bool:
@@ -212,16 +236,38 @@ class RecordStore:
         self._warnings.append(msg.WARNING_RECORDS_WRITE_FAILED.format(path=self._path or MEMORY_DATABASE, error=error))
 
 
-def _connect_writable(path: Path) -> sqlite3.Connection:
-    """Открыть и проверить: не база — sqlite3.DatabaseError (соединение закрыто, файл можно переименовать)."""
+def _connect_writable(path: Path, now_utc: datetime, *, is_new: bool) -> tuple[sqlite3.Connection, datetime]:
+    """Открыть и проверить: не база — sqlite3.DatabaseError (соединение закрыто, файл можно переименовать).
+
+    Нет created_utc — записать now_utc (у существующей базы — строкой лога).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     connection: sqlite3.Connection = sqlite3.connect(path)
     try:
         _create_schema(connection)
+        created_utc: datetime | None = _read_created_utc(connection)
+        if created_utc is None:
+            created_utc = now_utc
+            with connection:
+                connection.execute(INSERT_META_SQL, (META_CREATED_UTC, now_utc.isoformat()))
+            if not is_new:
+                LOGGER.info("records_created_utc_initialized value=%s", now_utc.isoformat())
     except sqlite3.DatabaseError:
         connection.close()
         raise
-    return connection
+    return connection, created_utc
+
+
+def _read_created_utc(connection: sqlite3.Connection) -> datetime | None:
+    """created_utc из meta; нет строки или она не разбирается — None."""
+    row: tuple[str] | None = connection.execute(SELECT_META_SQL, (META_CREATED_UTC,)).fetchone()
+    if row is None:
+        return None
+    try:
+        parsed: datetime = datetime.fromisoformat(row[0])
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:

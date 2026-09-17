@@ -10,7 +10,9 @@
 (ручной эфир) считается эфиром без маркера; найденный такой эфир планер усыновляет —
 расхождение по MARKER исправимо, как и прочие поля FIXABLE_FIELDS.
 Обложка сверяется по заглушкам канала (_channel_placeholders): картинка эфира совпала с заглушкой —
-своей обложки нет, это расхождение по THUMBNAIL.
+своей обложки нет, это расхождение по THUMBNAIL. Память планера главнее картинки: обложку этому же эфиру
+ставил планер (PlannedBroadcast.apply_recorded_thumbnail) — обложка своя, картинка просто ещё не обновилась.
+Известные слоты (slot_ids) — будущие и прошедшие: эфир прошедшего, ещё не начавшегося слота — не сирота.
 """
 from __future__ import annotations
 
@@ -280,6 +282,8 @@ class Reconciler:
         item.found = pick.broadcast
         item.found_stream = pick.stream
         item.actual = BroadcastSpec.from_platform(pick.broadcast, pick.stream, self._platform.limits, placeholders)
+        if item.apply_recorded_thumbnail():
+            self._log_thumbnail_from_memory(item)
         changed: tuple[ChangedField, ...] = item.actual.diff(item.expected)
         self._log_not_compared(item)
         if pick.stream is None:
@@ -301,6 +305,18 @@ class Reconciler:
         item.found = pick.broadcast
         item.found_stream = pick.stream
         item.take_found_key()
+
+    @staticmethod
+    def _log_thumbnail_from_memory(item: PlannedBroadcast) -> None:
+        set_at: str | None = item.record.results.thumbnail_set_at if item.record is not None else None
+        LOGGER.info(
+            'thumbnail_from_memory slot_id=%s channel="%s" handle=%s broadcast_id=%s set_at="%s"',
+            item.slot_id,
+            item.channel.account_name,
+            item.channel.handle,
+            item.found.broadcast_id if item.found is not None else "-",
+            set_at or "-",
+        )
 
     @staticmethod
     def _log_not_compared(item: PlannedBroadcast) -> None:

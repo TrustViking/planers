@@ -176,7 +176,8 @@ WARNING_TOKEN_SAVE_FAILED: Final[str] = (
 )
 # Память планера (app/records/record_store.py).
 WARNING_RECORDS_CREATED: Final[str] = (
-    "Создана память планера ({path}): {count} эфиров с меткой планера записаны как уже переданные стримеру"
+    "{count} эфиров с меткой планера, созданных до появления памяти планера, "
+    "записаны как уже переданные стримеру"
 )
 WARNING_RECORDS_BROKEN: Final[str] = (
     "память планера {path} не читалась — файл переименован в {renamed}, создана новая; "
@@ -260,6 +261,9 @@ OUTCOME_FIXED_FORM: Final[str] = ", {mark}"
 OUTCOME_FIX_PLANNED: Final[str] = "{prefix} — на YouTube отличается: {what}; будет исправлено, ключ уйдёт в форму"
 OUTCOME_MATCHED: Final[str] = "{prefix} — {url}"
 OUTCOME_MATCHED_FORM: Final[str] = "; {mark}"
+# Поле надо было исправить, а не удалось (PlannedBroadcast.unfixed_fields); причина — в предупреждении.
+UNFIXED_FIELD_TEXT: Final[dict[str, str]] = {"thumbnail": "обложка не поставлена"}
+OUTCOME_UNFIXED: Final[str] = "; {what}"
 OUTCOME_NO_STREAM: Final[str] = (
     "{prefix} — эфир на канале есть ({url}), но к нему не привязан поток: ключ взять неоткуда. "
     "Привяжите поток в YouTube Studio или удалите эфир — планер создаст его заново"

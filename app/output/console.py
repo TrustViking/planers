@@ -39,6 +39,7 @@ from app.output.report import (
     form_reason_text,
     outcome_prefix,
     package_problem_texts,
+    unfixed_text,
 )
 from app.pipeline.plan import ChangedField
 from app.ui import messages_ru as msg
@@ -114,7 +115,7 @@ def _broadcast_blocks(
     """Блоки эфиров в порядке вывода; --status — только УЖЕ СТОЯЛО, dry-run — без ключей."""
     matched: tuple[str, list[str]] = (
         _rule(msg.CONSOLE_BLOCK_MATCHED, totals.matched),
-        _channel_lines(_of_kinds(report, frozenset({OutcomeKind.MATCHED})), channel_order, _broadcast_line),
+        _channel_lines(_of_kinds(report, frozenset({OutcomeKind.MATCHED})), channel_order, _matched_line),
     )
     if report.mode is RunMode.STATUS:
         return [matched]
@@ -193,8 +194,14 @@ def _broadcast_line(outcome: PairOutcome) -> str:
     )
 
 
+def _matched_line(outcome: PairOutcome) -> str:
+    """Уже стояло; не удалось исправить (обложка) — хвостом, причина — во ВНИМАНИЕ."""
+    return _broadcast_line(outcome) + unfixed_text(outcome)
+
+
 def _fixed_line(outcome: PairOutcome) -> str:
-    return _content_fix_line(outcome, msg.CONSOLE_FIXED_LINE)
+    """ИСПРАВИЛИ — только то, что исправлено по факту (PairOutcome.changed_fields = fixed_fields)."""
+    return _content_fix_line(outcome, msg.CONSOLE_FIXED_LINE) + unfixed_text(outcome)
 
 
 def _fix_planned_line(outcome: PairOutcome) -> str:

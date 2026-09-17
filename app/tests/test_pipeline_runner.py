@@ -89,7 +89,7 @@ def _run(
 
 def _memory_without_confirmations() -> RecordStore:
     """Память есть, но подтверждений в ней нет: стоящие эфиры не считаются переданными стримеру."""
-    return RecordStore.memory(is_new=False)
+    return RecordStore.memory(is_new=False, created_utc=datetime(2025, 1, 1, tzinfo=timezone.utc))
 
 
 def _report_text(outcome: RunOutcome) -> str:
@@ -1951,3 +1951,157 @@ def test_unchanged_record_is_not_written_again(
     assert saved and saved[0].endswith("stage=key_confirmed requested=admitted")
     after: SlotRecord | None = _stored(planer_paths, UK_SLOT)
     assert after is not None and after.updated_at == _clock_text(later)
+
+
+# --- 5m-E: итог исправления по факту, отказ обложек, обложка в памяти, эфиры до памяти, прошедшие слоты
+
+LIMIT_ERROR: PlatformError = PlatformError("uploadRateLimitExceeded", "HTTP 429: limit")
+
+
+def _slot_start(spec: dict[str, Any]) -> datetime:
+    return datetime.fromisoformat(spec["start"])
+
+
+def _seed_spec(fake_platform: FakePlatform, spec: dict[str, Any], key: str, **overrides: Any) -> UpcomingBroadcast:
+    """Эфир планера на yt_ua по слоту spec; по умолчанию картинка — заглушка канала (обложки нет)."""
+    placeholder: str = FakePlatform.placeholder_of("yt_ua")
+    values: dict[str, Any] = {
+        "marker": spec["slot_id"],
+        "stream_key": key,
+        "picture": placeholder,
+        "stream_description": PLACEHOLDER_TOKEN.format(sha=placeholder),
+    }
+    values.update(overrides)
+    title: str = values.pop("title", spec["title"])
+    return fake_platform.seed_broadcast("yt_ua", _slot_start(spec), title, spec["description"], **values)
+
+
+def test_thumbnail_refused_on_fix_is_matched_not_fixed(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """а) Обложка не поставилась (429): эфир «уже стоял» с хвостом «обложка не поставлена», ИСПРАВИЛИ пуст."""
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[spec])
+    found: UpcomingBroadcast = _seed_spec(fake_platform, spec, PLATFORM_KEY)
+    fake_platform.fail_thumbnail[found.broadcast_id] = LIMIT_ERROR
+    outcome: RunOutcome = _run(
+        RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
+    )
+    assert outcome.report is not None
+    [pair] = outcome.report.outcomes
+    assert (pair.kind, pair.changed_fields, pair.unfixed_fields) == (OutcomeKind.MATCHED, (), ("thumbnail",))
+    assert pair.field_changes == ()
+    console: str = render_console(outcome.report, root=planer_paths.root)
+    assert msg.CONSOLE_BLOCK_FIXED not in console
+    assert msg.UNFIXED_FIELD_TEXT["thumbnail"] in console
+    report_text: str = _report_text(outcome)
+    assert "исправлено, ключ и ссылка прежние" not in report_text
+    assert msg.OUTCOME_UNFIXED.format(what=msg.UNFIXED_FIELD_TEXT["thumbnail"]) in report_text
+    assert any(msg.THUMBNAIL_REASON_TEXT["uploadRateLimitExceeded"] in line for line in outcome.report.warnings)
+
+
+def test_refused_thumbnails_skip_empty_resends(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """б) После отказа обложек: только обложка — ни update, ни загрузки; ещё и название — update без загрузки."""
+    caplog.set_level(logging.INFO, logger="planer")
+    first, second, third = (make_slot(date, "19:00", "uk") for date in ("17-03-2027", "18-03-2027", "19-03-2027"))
+    make_package(planer_paths.bcast_dir, slots=[first, second, third])
+    refused: UpcomingBroadcast = _seed_spec(fake_platform, first, "aaaa-aaaa-aaaa-aaaa-aaaa")
+    only_cover: UpcomingBroadcast = _seed_spec(fake_platform, second, "bbbb-bbbb-bbbb-bbbb-bbbb")
+    with_title: UpcomingBroadcast = _seed_spec(
+        fake_platform, third, "cccc-cccc-cccc-cccc-cccc", title="Старое название"
+    )
+    fake_platform.fail_thumbnail[refused.broadcast_id] = LIMIT_ERROR
+    outcome: RunOutcome = _run(
+        RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
+    )
+    assert [call.broadcast_id for call in fake_platform.updated] == [refused.broadcast_id, with_title.broadcast_id]
+    assert fake_platform.thumbnail_attempts == [refused.broadcast_id]
+    skipped: list[str] = _record_lines(caplog, "broadcast_fix_skipped")
+    assert len(skipped) == 1
+    assert only_cover.broadcast_id in skipped[0] and "reason=uploadRateLimitExceeded" in skipped[0]
+    assert outcome.report is not None
+    kinds: dict[str | None, tuple[OutcomeKind, tuple[str, ...], tuple[str, ...]]] = {
+        pair.date: (pair.kind, pair.changed_fields, pair.unfixed_fields) for pair in outcome.report.outcomes
+    }
+    assert kinds["18-03-2027"] == (OutcomeKind.MATCHED, (), ("thumbnail",))
+    assert kinds["19-03-2027"] == (OutcomeKind.FIXED, ("title",), ("thumbnail",))
+    console: str = render_console(outcome.report, root=planer_paths.root)
+    assert f"обновлено: название; {msg.UNFIXED_FIELD_TEXT['thumbnail']}" in console
+    assert "обновлено: название, обложка" not in console
+
+
+def test_thumbnail_set_by_planer_is_remembered_over_a_stale_picture(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """в) Картинка на площадке ещё заглушка, но обложку этому эфиру ставил планер — MATCH, повторной загрузки нет."""
+    caplog.set_level(logging.INFO, logger="planer")
+    spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[spec])
+    fake_platform.picture_lags = True
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    [created] = fake_platform.created
+    record: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert record is not None and record.results.thumbnail_broadcast_id == created.broadcast_id
+    assert record.results.thumbnail_set_at == format_datetime_text(now.astimezone())
+    second: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.MATCHED
+    assert fake_platform.updated == [] and len(fake_platform.thumbnail_attempts) == 1
+    assert any(created.broadcast_id in line for line in _record_lines(caplog, "thumbnail_from_memory"))
+    # владелец удалил эфир и завёл новый с той же меткой: память — про другой эфир, сверка по картинке
+    fake_platform.remove_broadcast("yt_ua", created.broadcast_id)
+    renewed: UpcomingBroadcast = _seed_spec(fake_platform, spec, PLATFORM_KEY)
+    third: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert third.report is not None
+    assert [call.broadcast_id for call in fake_platform.updated] == [renewed.broadcast_id]
+    assert fake_platform.thumbnail_attempts[-1] == renewed.broadcast_id
+    stored: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert stored is not None and stored.results.thumbnail_broadcast_id == renewed.broadcast_id
+
+
+def test_broadcasts_older_than_memory_are_bootstrapped_in_any_run(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """г) Память уже была; эфир с меткой старше памяти — подтверждение без POST; эфир моложе памяти — POST."""
+    _open_store(planer_paths).close()               # память создана прошлым запуском, created_utc = FIXED_NOW
+    older: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    newer: dict[str, Any] = make_slot("18-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[older, newer])
+    _seed_spec(
+        fake_platform, older, "aaaa-aaaa-aaaa-aaaa-aaaa", picture="aaaaaaaaaaaa",
+        published_utc=FIXED_NOW - timedelta(days=1),
+    )
+    _seed_spec(
+        fake_platform, newer, "bbbb-bbbb-bbbb-bbbb-bbbb", picture="aaaaaaaaaaaa",
+        published_utc=FIXED_NOW + timedelta(hours=1),
+    )
+    outcome: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert [call.stream_key for call in form_sender.calls] == ["bbbb-bbbb-bbbb-bbbb-bbbb"]
+    bootstrapped: SlotRecord | None = _stored(planer_paths, older["slot_id"])
+    assert bootstrapped is not None and bootstrapped.results.is_bootstrap
+    assert outcome.report is not None
+    assert msg.WARNING_RECORDS_CREATED.format(count=1) in outcome.report.warnings
+    assert msg.KEY_FORM_BOOTSTRAP in planer_paths.keys_file.read_text(encoding="utf-8")
+
+
+def test_broadcast_of_a_past_slot_is_not_an_orphan(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+) -> None:
+    """е) Слот уже прошёл, эфир ещё не начался: «пропущено — уже прошло», но не «перенесён или отменён»."""
+    past: dict[str, Any] = make_slot("16-03-2027", "11:00", "uk")
+    future: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    make_package(planer_paths.bcast_dir, slots=[past, future])
+    _seed_spec(fake_platform, past, "aaaa-aaaa-aaaa-aaaa-aaaa")
+    _seed_spec(fake_platform, make_slot("16-03-2027", "09:00", "uk"), "bbbb-bbbb-bbbb-bbbb-bbbb")
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    assert [(orphan.date, orphan.time) for orphan in outcome.report.orphans] == [("16-03-2027", "09:00")]
+    assert any(line.kind is SkipKind.PAST for line in outcome.report.skipped)

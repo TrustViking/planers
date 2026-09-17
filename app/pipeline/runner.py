@@ -102,6 +102,8 @@ ERROR_CODE_KEYS_WRITE: Final[str] = "keysWriteFailed"
 MISSING_FIELD: Final[str] = "-"
 DESCRIPTION_HEAD_CHARS: Final[int] = 80
 # Ключи строк broadcast_expected и broadcast_actual — один набор на обе.
+# liveBroadcasts.update переносит всё исправимое, кроме метки (set_stream_marker) и обложки (thumbnails.set).
+_UPDATE_EXCLUDED: Final[frozenset[ChangedField]] = frozenset({ChangedField.THUMBNAIL, ChangedField.MARKER})
 SPEC_LOG_KEYS: Final[tuple[str, ...]] = (
     "start",
     "marker",
@@ -235,9 +237,11 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     _log_in(context, [item.channel for item in selection.planned])
     _admit_all(context, selection.planned)
     _load_records(context, selection.planned)
+    # известные слоты — будущие и прошедшие: эфир прошедшего слота, который ещё не начался, не сирота
+    known_slot_ids: frozenset[str] = frozenset(scan.slot_map) | frozenset(slot.slot_id for slot in scan.past_slots)
     orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
         selection.planned,
-        frozenset(scan.slot_map),
+        known_slot_ids,
     )
     memory_warnings: list[str] = _bootstrap_records(context, selection.planned)
     # замечания площадки (эфир без времени старта) — данными, в отчёт и консоль одним путём
@@ -308,26 +312,27 @@ def _load_records(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> 
 
 
 def _bootstrap_records(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[str]:
-    """Первый запуск с памятью: стоящие эфиры с меткой планера записываются как уже переданные стримеру."""
-    if not context.store.is_new:
-        return []
+    """Каждый запуск: эфиры с меткой планера, созданные на площадке раньше памяти и без записи, — уже переданные."""
     count: int = 0
     for item in planned:
-        if not item.bootstrap_confirmation(context.clock()):
+        if not item.bootstrap_confirmation(context.clock(), context.store.created_utc):
             continue
         count += 1
         LOGGER.info(
-            'record_bootstrap slot_id=%s channel="%s" handle=%s broadcast_id=%s stream_key=%s',
+            'record_bootstrap slot_id=%s channel="%s" handle=%s broadcast_id=%s stream_key=%s published_utc=%s '
+            "memory_created_utc=%s",
             item.slot_id,
             item.channel.account_name,
             item.channel.handle,
             item.broadcast_id,
             mask_stream_key(item.stream_key),
+            item.found.published_utc.isoformat() if item.found and item.found.published_utc else MISSING_FIELD,
+            context.store.created_utc.isoformat(),
         )
         _save_record(context, item, SlotStage.KEY_CONFIRMED)
-    if count == 0 or context.store.path is None:
+    if count == 0:
         return []
-    return [msg.WARNING_RECORDS_CREATED.format(path=context.store.path, count=count)]
+    return [msg.WARNING_RECORDS_CREATED.format(count=count)]
 
 
 def _decide_without_actions(planned: Sequence[PlannedBroadcast]) -> None:
@@ -597,6 +602,7 @@ def _mark_video_fixes(item: PlannedBroadcast, fixes: VideoFixes) -> None:
         fixed.append(ChangedField.CATEGORY)
     if fixes.privacy_set:
         fixed.append(ChangedField.PRIVACY)
+    item.mark_fixed(tuple(fixed))
     added: list[ChangedField] = [name for name in fixed if name not in item.changed_fields]
     if not added:
         return
@@ -744,8 +750,23 @@ class _Executor:
             self._fix(item)
 
     def _fix(self, item: PlannedBroadcast) -> None:
-        """Исправляемый эфир переотправляется целиком: тексты, время и категория, метка, обложка; видимость — в _finish."""
+        """Исправляемый эфир переотправляется целиком: тексты, время и категория, метка, обложка; видимость — в _finish.
+
+        Отличается только обложка, а загрузку обложек канал в этом запуске уже отказал — переотправлять нечего.
+        """
         broadcast_id: str = item.found.broadcast_id if item.found else ""
+        refusal: PlatformError | None = self._platform.thumbnail_refusal(item.channel)
+        if item.changed_fields == (ChangedField.THUMBNAIL,) and refusal is not None:
+            LOGGER.info(
+                'broadcast_fix_skipped slot_id=%s channel="%s" handle=%s broadcast_id=%s reason=%s',
+                item.slot_id,
+                item.channel.account_name,
+                item.channel.handle,
+                broadcast_id,
+                refusal.code,
+            )
+            self._thumbnail_failed(item, refusal)
+            return
         self._resend(item, broadcast_id, with_marker=True)
 
     def _resend(self, item: PlannedBroadcast, broadcast_id: str, *, with_marker: bool) -> None:
@@ -753,9 +774,11 @@ class _Executor:
         self._resent.add((item.slot_id, item.channel.key))
         self._context.progress.broadcast_step_started(item, BroadcastStep.FIX)
         self._platform.update_broadcast(item.channel, broadcast_id, item.expected)
+        item.mark_fixed(tuple(name for name in item.changed_fields if name not in _UPDATE_EXCLUDED))
         if with_marker and ChangedField.MARKER in item.changed_fields and item.found_stream is not None:
             # ручной эфир усыновлён: со следующего запуска видно, что ключ уходил стримеру
             self._platform.set_stream_marker(item.channel, item.found_stream.stream_id, item.expected.marker)
+            item.mark_fixed((ChangedField.MARKER,))
         self._set_thumbnail(item, broadcast_id)
         LOGGER.info(
             'broadcast_updated slot_id=%s channel="%s" handle=%s broadcast_id=%s fields=%s',
@@ -844,21 +867,38 @@ class _Executor:
             item.warn(OutcomeWarning(WARNING_STEP_AGE_RESTRICTED, "ytAgeRestricted", item.broadcast_url or ""))
 
     def _set_thumbnail(self, item: PlannedBroadcast, broadcast_id: str) -> None:
-        """Превью не критично (ТЗ §7.4 п.4): эфир и ключ остаются в силе."""
+        """Превью не критично (ТЗ §7.4 п.4): эфир и ключ остаются в силе.
+
+        Поставлена — факт в объект (память); канал уже отказал в загрузке обложек — без обращения.
+        """
         preview: bytes | None = self._preview(item)
         if preview is None:
+            return
+        refusal: PlatformError | None = self._platform.thumbnail_refusal(item.channel)
+        if refusal is not None:
+            self._thumbnail_failed(item, refusal)
             return
         try:
             self._platform.set_thumbnail(item.channel, broadcast_id, preview)
         except PlatformError as error:
-            LOGGER.warning(
-                'thumbnail_failed slot_id=%s channel="%s" handle=%s code=%s',
-                item.slot_id,
-                item.channel.account_name,
-                item.channel.handle,
-                error.code,
-            )
-            item.warn(OutcomeWarning(WARNING_STEP_THUMBNAIL, error.code, error.message))
+            self._thumbnail_failed(item, error)
+            return
+        item.remember_thumbnail(broadcast_id, self._context.clock())
+        if ChangedField.THUMBNAIL in item.changed_fields:
+            item.mark_fixed((ChangedField.THUMBNAIL,))
+
+    @staticmethod
+    def _thumbnail_failed(item: PlannedBroadcast, error: PlatformError) -> None:
+        LOGGER.warning(
+            'thumbnail_failed slot_id=%s channel="%s" handle=%s code=%s',
+            item.slot_id,
+            item.channel.account_name,
+            item.channel.handle,
+            error.code,
+        )
+        item.warn(OutcomeWarning(WARNING_STEP_THUMBNAIL, error.code, error.message))
+        if ChangedField.THUMBNAIL in item.changed_fields:
+            item.mark_unfixed(ChangedField.THUMBNAIL)
 
     def _preview(self, item: PlannedBroadcast) -> bytes | None:
         """Случайное превью слота (§5.1) — если planer.json велит ставить превью и в слоте они есть."""

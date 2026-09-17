@@ -1476,3 +1476,32 @@ def test_refusals_of_channels_with_one_title_do_not_mix(
         platform.list_upcoming(CHANNEL)
     assert platform.list_upcoming(twin) == []
     assert len(service.calls) == 2
+
+
+def test_list_upcoming_reads_published_at(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    """snippet.publishedAt уже приходит в part=snippet: время создания эфира без нового вызова."""
+    item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    item["snippet"]["publishedAt"] = "2026-09-16T12:34:56Z"
+    bare: dict[str, Any] = _broadcast_item("B2", "2027-03-18T17:00:00Z")
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item, bare]}]))
+    first, second = platform.list_upcoming(CHANNEL)
+    assert first.published_utc == datetime(2026, 9, 16, 12, 34, 56, tzinfo=timezone.utc)
+    assert second.published_utc is None
+    assert len(service.calls) == 1
+
+
+def test_thumbnail_refusal_is_remembered_without_network(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(thumbnails=[_http_error(429, "uploadRateLimitExceeded", "лимит")])
+    )
+    assert platform.thumbnail_refusal(CHANNEL) is None
+    with pytest.raises(PlatformError):
+        platform.set_thumbnail(CHANNEL, "B1", b"jpg")
+    refusal: PlatformError | None = platform.thumbnail_refusal(CHANNEL)
+    assert refusal is not None and refusal.code == "uploadRateLimitExceeded"
+    assert platform.thumbnail_refusal(OTHER_CHANNEL) is None
+    assert len(service.calls) == 1                            # вопрос об отказе к сети не ходит

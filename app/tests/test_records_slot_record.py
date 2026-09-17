@@ -96,3 +96,15 @@ def test_confirms_key_is_about_the_key_only() -> None:
 
 def test_stage_rank_order() -> None:
     assert [stage.rank for stage in SlotStage] == [0, 1, 2]
+
+
+def test_thumbnail_fact_round_trips_and_old_records_read_without_it() -> None:
+    results: RecordResults = RecordResults(
+        broadcast_id="B1", stream_key=KEY, thumbnail_broadcast_id="B1", thumbnail_set_at="17-09-2026 17:36"
+    )
+    restored: SlotRecord = _row(_record(results))
+    assert (restored.results.thumbnail_broadcast_id, restored.results.thumbnail_set_at) == ("B1", "17-09-2026 17:36")
+    old_json: str = json.dumps({"schema": 1, "snapshot": {}, "results": {"broadcast_id": "B1", "stream_key": KEY}})
+    old: SlotRecord = _row(_record(RecordResults()), old_json)
+    assert (old.results.thumbnail_broadcast_id, old.results.thumbnail_set_at) == (None, None)
+    assert old.results.stream_key == KEY

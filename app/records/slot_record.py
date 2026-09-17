@@ -66,7 +66,9 @@ class RecordResults:
     confirmed_form_url: str | None = None      # formResponse формы, которая подтвердила
     confirmed_answers: tuple[ConfirmedAnswer, ...] = ()
     confirmed_at: str | None = None            # DD-MM-YYYY HH:MM
-    is_bootstrap: bool = False                 # подтверждение записал первый запуск с памятью, без отправки
+    is_bootstrap: bool = False                 # эфир старше памяти: подтверждение записано без отправки
+    thumbnail_broadcast_id: str | None = None  # эфир, которому планер поставил обложку
+    thumbnail_set_at: str | None = None        # DD-MM-YYYY HH:MM — когда
 
     def has_confirmed(self, stream_key: str, form_url: str, answers: Sequence[ConfirmedAnswer]) -> bool:
         """Единственное сравнение «эта тройка уже подтверждена»: ключ, адрес формы и ответы (entry_id → значение)."""

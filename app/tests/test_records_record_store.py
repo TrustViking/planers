@@ -167,3 +167,45 @@ def test_record_read_back_has_same_content_except_updated_at(tmp_path: Path) -> 
     assert not replace(later, stage=SlotStage.KEY_CONFIRMED).has_same_content(found)
     changed: SlotRecord = replace(later, results=RecordResults(stream_key="bcde-bcde-bcde-bcde-bcde"))
     assert not changed.has_same_content(found)
+
+
+def test_created_utc_is_written_with_a_new_base_and_kept(tmp_path: Path) -> None:
+    path: Path = tmp_path / "planer.sqlite3"
+    store: RecordStore = RecordStore.open(path, read_only=False, now_local=NOW)
+    assert store.created_utc == NOW.astimezone(timezone.utc)
+    store.close()
+    later: datetime = NOW + timedelta(days=2)
+    again: RecordStore = RecordStore.open(path, read_only=False, now_local=later)
+    assert again.created_utc == NOW.astimezone(timezone.utc)
+    again.close()
+    reader: RecordStore = RecordStore.open(path, read_only=True, now_local=later)
+    assert reader.created_utc == NOW.astimezone(timezone.utc)
+    reader.close()
+
+
+def test_base_without_created_utc_gets_the_current_time(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """д) База из сборки до 5m-E: строки created_utc нет — при первом открытии на запись пишется «сейчас»."""
+    caplog.set_level("INFO", logger="planer")
+    path: Path = tmp_path / "planer.sqlite3"
+    RecordStore.open(path, read_only=False, now_local=NOW).close()
+    connection: sqlite3.Connection = sqlite3.connect(path)
+    with connection:
+        connection.execute("DELETE FROM meta WHERE key = 'created_utc'")
+    connection.close()
+    later: datetime = NOW + timedelta(days=2)
+    reader: RecordStore = RecordStore.open(path, read_only=True, now_local=later)
+    assert reader.created_utc == later.astimezone(timezone.utc)          # только чтение: в базу не пишет
+    reader.close()
+    store: RecordStore = RecordStore.open(path, read_only=False, now_local=later)
+    assert store.created_utc == later.astimezone(timezone.utc) and not store.is_new
+    store.close()
+    lines: list[str] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("records_created_utc")]
+    assert lines == [f"records_created_utc_initialized value={later.astimezone(timezone.utc).isoformat()}"]
+    value: str = sqlite3.connect(path).execute("SELECT value FROM meta WHERE key = 'created_utc'").fetchone()[0]
+    assert value == later.astimezone(timezone.utc).isoformat()
+
+
+def test_memory_without_file_uses_the_given_or_current_time() -> None:
+    moment: datetime = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert RecordStore.memory(created_utc=moment).created_utc == moment
+    assert RecordStore.memory().created_utc.tzinfo is not None

@@ -513,3 +513,21 @@ def test_not_admitted_section_goes_right_after_not_delivered_and_before_errors()
     ) in lines
     assert "- 17-03-2027 19:00 uk -> Test UA — форма не прочиталась: нет скрипта; эфира на канале нет" in lines
     assert sum(1 for line in lines if "полный текст отказа" in line) == 1
+
+
+def test_matched_outcome_names_what_could_not_be_fixed() -> None:
+    """Исправление не удалось (обложка): исход «уже запланировано» с хвостом, а не «исправлено»."""
+    report: RunReport = RunReport(
+        RunMode.FULL,
+        "17-09-2026 18:01",
+        outcomes=[
+            _slot_outcome(OutcomeKind.MATCHED, broadcast_url="u1", unfixed_fields=("thumbnail",)),
+            _slot_outcome(
+                OutcomeKind.FIXED, date="18-03-2027", changed_fields=("title",), unfixed_fields=("thumbnail",)
+            ),
+        ],
+    )
+    text: str = render_report(report)
+    assert "17-03-2027 19:00 uk -> Test UA — u1; обложка не поставлена" in text
+    assert "на YouTube отличалось: название; исправлено, ключ и ссылка прежние; обложка не поставлена" in text
+    assert "название, обложка" not in text

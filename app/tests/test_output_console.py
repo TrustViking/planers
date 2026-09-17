@@ -383,3 +383,26 @@ def test_not_admitted_objects_are_attention_lines_only() -> None:
         "  не допущено: 19-03-2027 20:00 en -> Nick Moss @NickMoss85 — форма не прочиталась: нет скрипта; эфира нет",
     ]
     assert msg.CONSOLE_BLOCK_ATTENTION in lines[2] and "→" not in "\n".join(lines)
+
+
+def test_console_fixed_names_only_what_was_fixed_and_matched_names_the_unfixed_cover() -> None:
+    report: RunReport = RunReport(
+        mode=RunMode.FULL,
+        generated_at_text="17-09-2026 18:01",
+        outcomes=[
+            PairOutcome(
+                OutcomeKind.MATCHED, **OSVALD, date="19-09-2026", time="19:00", language="ru",
+                title="Эфир 19", unfixed_fields=("thumbnail",),
+            ),
+            PairOutcome(
+                OutcomeKind.FIXED, **OSVALD, date="20-09-2026", time="19:00", language="ru",
+                title="Эфир 20", changed_fields=("title",), unfixed_fields=("thumbnail",),
+            ),
+        ],
+    )
+    lines: list[str] = render_console(report, root=Path("root")).splitlines()
+    fixed: list[str] = [line for line in lines if "20-09-2026" in line]
+    matched: list[str] = [line for line in lines if "19-09-2026" in line]
+    assert len(fixed) == 1 and fixed[0].endswith("обновлено: название; обложка не поставлена")
+    assert len(matched) == 1 and matched[0].endswith("Эфир 19; обложка не поставлена")
+    assert lines.index(fixed[0]) < lines.index(matched[0])        # ИСПРАВИЛИ выше УЖЕ СТОЯЛО

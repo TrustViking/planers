@@ -143,9 +143,10 @@ REASON_BEHAVIORS: Final[dict[str, ErrorBehavior]] = {
     ERROR_UNEXPECTED_KEY: ErrorBehavior.CALL,
     ERROR_CHANNEL_NOT_FOUND: ErrorBehavior.CALL,   # совпадает с причиной Google channelNotFound
 }
+THUMBNAIL_OPERATION: Final[str] = "thumbnails.set"   # операция загрузки обложки: отказ по ней помнится за запуск
 # Пара (операция, причина) главнее причины: forbidden у обложки — канал не подтверждён, у прочих — разовый отказ.
 OPERATION_REASON_BEHAVIORS: Final[dict[tuple[str, str], ErrorBehavior]] = {
-    ("thumbnails.set", "forbidden"): ErrorBehavior.OPERATION,
+    (THUMBNAIL_OPERATION, "forbidden"): ErrorBehavior.OPERATION,
 }
 # Ключ памяти отказов: (ключ канала, операция); None — «любой».
 RefusalKey = tuple[str | None, str | None]
@@ -610,7 +611,7 @@ class YouTubePlatform:
         media: MediaInMemoryUpload = MediaInMemoryUpload(preview, mimetype=THUMBNAIL_MIME_TYPE)
         self._execute(
             channel,
-            "thumbnails.set",
+            THUMBNAIL_OPERATION,
             lambda service: service.thumbnails().set(videoId=broadcast_id, media_body=media),
         )
         LOGGER.info('thumbnail_set channel="%s" handle=%s broadcast_id=%s', channel.account_name, channel.handle, broadcast_id)
@@ -726,12 +727,22 @@ class YouTubePlatform:
             behavior: ErrorBehavior = _error_behavior(operation, None, error.code)
             raise self._refuse(channel, operation, _Failure(error, behavior, None)) from error
 
-    def _raise_if_refused(self, channel: ChannelConfig, operation: str) -> None:
-        """Запомненный отказ поднимается без обращения к сети и без паузы."""
+    def thumbnail_refusal(self, channel: ChannelConfig) -> PlatformError | None:
+        """Отказ thumbnails.set, запомненный в этом запуске (канал, операция или весь проект); сети нет."""
+        remembered: tuple[PlatformError, ErrorBehavior] | None = self._remembered_refusal(channel, THUMBNAIL_OPERATION)
+        return remembered[0] if remembered is not None else None
+
+    def _remembered_refusal(self, channel: ChannelConfig, operation: str) -> tuple[PlatformError, ErrorBehavior] | None:
         for key in ((None, None), (channel.key, None), (channel.key, operation)):
             remembered: tuple[PlatformError, ErrorBehavior] | None = self._refusals.get(key)
-            if remembered is None:
-                continue
+            if remembered is not None:
+                return remembered
+        return None
+
+    def _raise_if_refused(self, channel: ChannelConfig, operation: str) -> None:
+        """Запомненный отказ поднимается без обращения к сети и без паузы."""
+        remembered: tuple[PlatformError, ErrorBehavior] | None = self._remembered_refusal(channel, operation)
+        if remembered is not None:
             error, behavior = remembered
             LOGGER.info(
                 'request_skipped operation=%s channel="%s" handle=%s reason=%s behavior=%s',
@@ -988,6 +999,7 @@ def _broadcast_from_item(item: dict[str, Any], channel: ChannelConfig) -> Upcomi
         auto_start=_optional_bool(details, "enableAutoStart"),
         auto_stop=_optional_bool(details, "enableAutoStop"),
         latency_preference=_optional_text(details, "latencyPreference"),
+        published_utc=_parse_start(snippet.get("publishedAt")),
     )
 
 

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from app.config.loader import ChannelConfig, PlanerConfig
+from app.core.dates import format_datetime_text
 from app.package.model import Slot
 from app.pipeline.plan import (
     FIXABLE_FIELDS,
@@ -440,6 +441,8 @@ def test_object_built_directly_is_admitted_without_form() -> None:
 # --- память планера: одно правило отправки ключа (decide_key_delivery)
 
 MEMORY_NOW: datetime = datetime(2026, 9, 13, 12, 0, tzinfo=timezone(timedelta(hours=3)))
+MEMORY_CREATED: datetime = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
+BEFORE_MEMORY: datetime = MEMORY_CREATED - timedelta(days=1)
 FOUND_KEY: str = "fkey-fkey-fkey-fkey-fkey"
 
 
@@ -448,7 +451,7 @@ def _memory_item(tmp_path: Path, *, found: bool = True, decision: Decision = Dec
     item: PlannedBroadcast = _admission_item()
     item.admit(None, training_key_form(tmp_path), None)
     if found:
-        item.found = UpcomingBroadcast("fbc", item.slot.start, item.slot.title, "", "fs")
+        item.found = UpcomingBroadcast("fbc", item.slot.start, item.slot.title, "", "fs", published_utc=BEFORE_MEMORY)
         item.found_stream = StreamInfo("fs", item.slot_id, "rtmp://a.rtmp.youtube.com/live2", FOUND_KEY)
         item.take_found_key()
         item.decision = decision
@@ -543,7 +546,7 @@ def test_incomplete_answers_still_mean_the_key_must_go(tmp_path: Path) -> None:
 
 def test_bootstrap_confirms_marked_broadcast_without_sending(tmp_path: Path) -> None:
     item: PlannedBroadcast = _memory_item(tmp_path, decision=Decision.UPDATE)
-    assert item.bootstrap_confirmation(MEMORY_NOW)
+    assert item.bootstrap_confirmation(MEMORY_NOW, MEMORY_CREATED)
     assert item.is_bootstrap_confirmed and item.results.is_bootstrap
     assert not _decided(item)
     assert item.to_record(MEMORY_NOW, SlotStage.ADMITTED).stage is SlotStage.KEY_CONFIRMED
@@ -552,16 +555,16 @@ def test_bootstrap_confirms_marked_broadcast_without_sending(tmp_path: Path) -> 
 def test_bootstrap_skips_unmarked_created_known_and_blocked(tmp_path: Path) -> None:
     unmarked: PlannedBroadcast = _memory_item(tmp_path)
     unmarked.found_stream = replace(unmarked.found_stream, title="ручной ключ")
-    assert not unmarked.bootstrap_confirmation(MEMORY_NOW) and _decided(unmarked)
+    assert not unmarked.bootstrap_confirmation(MEMORY_NOW, MEMORY_CREATED) and _decided(unmarked)
     created: PlannedBroadcast = _memory_item(tmp_path, found=False)
     created.take_new_key(CREATED)
-    assert not created.bootstrap_confirmation(MEMORY_NOW)
+    assert not created.bootstrap_confirmation(MEMORY_NOW, MEMORY_CREATED)
     known: PlannedBroadcast = _memory_item(tmp_path)
     known.record = replace(_remember(_memory_item(tmp_path)).record)
-    assert not known.bootstrap_confirmation(MEMORY_NOW)
+    assert not known.bootstrap_confirmation(MEMORY_NOW, MEMORY_CREATED)
     late: PlannedBroadcast = _memory_item(tmp_path)
     late.is_too_late = True
-    assert not late.bootstrap_confirmation(MEMORY_NOW)
+    assert not late.bootstrap_confirmation(MEMORY_NOW, MEMORY_CREATED)
 
 
 def test_record_carries_results_and_keeps_the_confirmation(tmp_path: Path) -> None:
@@ -587,3 +590,59 @@ def test_record_needs_a_ready_channel(tmp_path: Path) -> None:
     assert item.record_channel_id is None
     with pytest.raises(ValueError):
         item.to_record(MEMORY_NOW, SlotStage.ADMITTED)
+
+
+def test_fixed_and_unfixed_fields_change_only_through_their_methods(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _memory_item(tmp_path, decision=Decision.UPDATE)
+    item.mark_unfixed(ChangedField.THUMBNAIL)
+    item.mark_fixed((ChangedField.TITLE,))
+    item.mark_unfixed(ChangedField.TITLE)                 # уже исправлено — «не удалось» не ставится
+    assert (item.fixed_fields, item.unfixed_fields) == ((ChangedField.TITLE,), (ChangedField.THUMBNAIL,))
+    item.mark_fixed((ChangedField.THUMBNAIL, ChangedField.CATEGORY))   # порядок — как в ChangedField
+    assert item.fixed_fields == (ChangedField.TITLE, ChangedField.CATEGORY, ChangedField.THUMBNAIL)
+    assert item.unfixed_fields == ()
+
+
+def test_recorded_thumbnail_overrides_the_placeholder_only_for_the_same_broadcast(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _memory_item(tmp_path)
+    assert item.found is not None
+    item.actual = replace(item.expected, has_own_thumbnail=False)
+    assert not item.apply_recorded_thumbnail()            # записи нет — решает картинка
+    item.remember_thumbnail(item.found.broadcast_id, MEMORY_NOW)
+    item.record = item.to_record(MEMORY_NOW, SlotStage.PUBLISHED)
+    assert (item.record.results.thumbnail_broadcast_id, item.record.results.thumbnail_set_at) == (
+        "fbc", format_datetime_text(MEMORY_NOW.astimezone())
+    )
+    assert item.apply_recorded_thumbnail() and item.actual.has_own_thumbnail is True
+    assert not item.apply_recorded_thumbnail()            # уже своя — переопределять нечего
+    other: PlannedBroadcast = _memory_item(tmp_path)
+    other.found = replace(other.found, broadcast_id="new")
+    other.record = item.record
+    other.actual = replace(other.expected, has_own_thumbnail=False)
+    assert not other.apply_recorded_thumbnail() and other.actual.has_own_thumbnail is False
+
+
+def test_thumbnail_fact_is_carried_while_the_broadcast_is_the_same(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _memory_item(tmp_path)
+    item.remember_thumbnail("fbc", MEMORY_NOW)
+    item.record = item.to_record(MEMORY_NOW, SlotStage.PUBLISHED)
+    later: PlannedBroadcast = _memory_item(tmp_path)
+    later.record = item.record
+    assert later.to_record(MEMORY_NOW, SlotStage.PUBLISHED).results.thumbnail_broadcast_id == "fbc"
+    renewed: PlannedBroadcast = _memory_item(tmp_path, found=False)
+    renewed.record = item.record
+    renewed.take_new_key(CREATED)                          # эфир создан заново — прежний факт не про него
+    assert renewed.to_record(MEMORY_NOW, SlotStage.PUBLISHED).results.thumbnail_broadcast_id is None
+
+
+def test_bootstrap_only_for_broadcasts_older_than_memory(tmp_path: Path) -> None:
+    older: PlannedBroadcast = _memory_item(tmp_path)
+    assert older.bootstrap_confirmation(MEMORY_NOW, MEMORY_CREATED)
+    newer: PlannedBroadcast = _memory_item(tmp_path)
+    assert newer.found is not None
+    newer.found = replace(newer.found, published_utc=MEMORY_CREATED + timedelta(minutes=1))
+    assert not newer.bootstrap_confirmation(MEMORY_NOW, MEMORY_CREATED)
+    unknown: PlannedBroadcast = _memory_item(tmp_path)
+    assert unknown.found is not None
+    unknown.found = replace(unknown.found, published_utc=None)
+    assert not unknown.bootstrap_confirmation(MEMORY_NOW, MEMORY_CREATED) and _decided(unknown)

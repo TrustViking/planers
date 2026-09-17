@@ -284,6 +284,9 @@ class PlannedBroadcast:
     changed_fields: tuple[ChangedField, ...] = ()     # исправимые (FIXABLE_FIELDS)
     reported_fields: tuple[ChangedField, ...] = ()    # только сообщаем (REPORTED_FIELDS)
     ambiguous_urls: tuple[str, ...] = ()              # AMBIGUOUS: ссылки на все эфиры-кандидаты
+    # итог исправления по факту (mark_fixed / mark_unfixed): что этот запуск исправил и что не смог
+    fixed_fields: tuple[ChangedField, ...] = ()
+    unfixed_fields: tuple[ChangedField, ...] = ()
     is_too_late: bool = False      # слот внутри min_lead_minutes: только чтение площадки, ключ храним
     stream_attached: bool = False  # эфир был без потока, поток привязан этим запуском
 
@@ -298,7 +301,10 @@ class PlannedBroadcast:
     # --- память планера: запись прошлых запусков (из неё читаются только результаты)
     record: SlotRecord | None = None   # последняя записанная: прочитанная из памяти или записанная этим запуском
     confirmed_results: RecordResults | None = None   # подтверждение этого запуска (confirm_key); иначе — из записи
-    is_bootstrap_confirmed: bool = False             # первый запуск с памятью записал подтверждение без отправки
+    is_bootstrap_confirmed: bool = False             # эфир старше памяти: подтверждение записано без отправки
+    # обложка, поставленная этим запуском (remember_thumbnail): id эфира и момент — в память
+    thumbnail_set_broadcast_id: str | None = None
+    thumbnail_set_at: str | None = None
 
     # --- объекты запуска и допуск (admit). channel_object в production передаётся всегда;
     # None — только тесты без ChannelBook. key_form None — отправитель формы не проверяет (тесты, Noop).
@@ -466,14 +472,18 @@ class PlannedBroadcast:
             and not self.results.has_confirmed(self.stream_key or "", self.form_response_url, self.answers_record)
         )
 
-    def bootstrap_confirmation(self, now: datetime) -> bool:
-        """Первый запуск с памятью: эфир с меткой планера этого слота уже стоял — ключ считается переданным.
+    def bootstrap_confirmation(self, now: datetime, memory_created_utc: datetime) -> bool:
+        """Эфир с меткой планера этого слота создан на площадке раньше памяти, записи нет — ключ считается переданным.
 
-        Только MATCH и UPDATE с найденным потоком, чьё название — slot_id; ручной эфир без метки
-        и созданные этим запуском идут по общему правилу. Ответы должны быть полными: их и запоминаем.
+        Только MATCH и UPDATE с найденным потоком, чьё название — slot_id; ручной эфир без метки,
+        эфир без времени создания и эфиры, созданные после памяти, идут по общему правилу.
+        Ответы должны быть полными: их и запоминаем.
         """
         is_marked: bool = self.found_stream is not None and self.found_stream.title == self.slot_id
         if not (self.is_admitted and not self.is_too_late and self.record is None and is_marked):
+            return False
+        published: datetime | None = self.found.published_utc if self.found is not None else None
+        if published is None or published >= memory_created_utc:
             return False
         if self.decision not in (Decision.MATCH, Decision.UPDATE) or not self.stream_key or not self.stream_url:
             return False
@@ -500,7 +510,7 @@ class PlannedBroadcast:
         channel_id: str | None = self.record_channel_id
         if channel_id is None:
             raise ValueError(f"no YouTube channel id for {self.slot_id}")
-        results: RecordResults = self._published_results(now)
+        results: RecordResults = self._thumbnail_results(self._published_results(now))
         reached: list[SlotStage] = [stage]
         if results.stream_key:
             reached.append(SlotStage.PUBLISHED)
@@ -515,6 +525,39 @@ class PlannedBroadcast:
             results=results,
             snapshot=self._snapshot(),
         )
+
+    def mark_fixed(self, fields: tuple[ChangedField, ...]) -> None:
+        """Поля, которые этот запуск на площадке действительно исправил; единственное место изменения."""
+        done: set[ChangedField] = {*self.fixed_fields, *fields}
+        self.fixed_fields = tuple(name for name in ChangedField if name in done)
+        self.unfixed_fields = tuple(name for name in self.unfixed_fields if name not in done)
+
+    def mark_unfixed(self, name: ChangedField) -> None:
+        """Поле надо было исправить, а не удалось; единственное место изменения."""
+        if name in self.fixed_fields or name in self.unfixed_fields:
+            return
+        failed: set[ChangedField] = {*self.unfixed_fields, name}
+        self.unfixed_fields = tuple(candidate for candidate in ChangedField if candidate in failed)
+
+    def remember_thumbnail(self, broadcast_id: str, now: datetime) -> None:
+        """Обложка эфира поставлена: факт уйдёт в память и переживёт задержку картинки на площадке."""
+        self.thumbnail_set_broadcast_id = broadcast_id
+        self.thumbnail_set_at = format_datetime_text(now.astimezone())
+
+    def apply_recorded_thumbnail(self) -> bool:
+        """Память знает, что обложку этому же эфиру ставил планер, — своя обложка, картинка-заглушка не решает.
+
+        True — память переопределила то, что показала картинка. Эфир другой (удалён и создан заново)
+        или записи нет — всё по картинке.
+        """
+        if self.actual is None or self.found is None or self.record is None:
+            return False
+        if self.record.results.thumbnail_broadcast_id != self.found.broadcast_id:
+            return False
+        if self.actual.has_own_thumbnail is True:
+            return False
+        self.actual = replace(self.actual, has_own_thumbnail=True)
+        return True
 
     def record_to_save(self, now: datetime, stage: SlotStage) -> SlotRecord | None:
         """Новая запись объекта на момент now; None — она не отличается от последней записанной (кроме updated_at)."""
@@ -543,6 +586,19 @@ class PlannedBroadcast:
             stream_key=self.stream_key,
             published_at=results.published_at if is_same_key else format_datetime_text(now.astimezone()),
         )
+
+    def _thumbnail_results(self, results: RecordResults) -> RecordResults:
+        """Обложка этого запуска — в запись; прежняя переносится, пока эфир тот же."""
+        if self.thumbnail_set_broadcast_id is not None:
+            return replace(
+                results,
+                thumbnail_broadcast_id=self.thumbnail_set_broadcast_id,
+                thumbnail_set_at=self.thumbnail_set_at,
+            )
+        current: str | None = self.broadcast_id or (self.found.broadcast_id if self.found is not None else None)
+        if current is not None and results.thumbnail_broadcast_id not in (None, current):
+            return replace(results, thumbnail_broadcast_id=None, thumbnail_set_at=None)
+        return results
 
     def _snapshot(self) -> RecordSnapshot:
         return RecordSnapshot(
