@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
-APP_VERSION: Final[str] = "0.1.2"
+APP_VERSION: Final[str] = "0.1.3"
 
 BUMP_FLAG: Final[str] = "--bump"
 VERSION_FORMAT: Final[re.Pattern[str]] = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
