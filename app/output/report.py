@@ -17,7 +17,7 @@ from typing import Final
 from app.config.loader import ChannelConfig, Platform, PlanerConfig
 from app.core.dates import FILE_STAMP_FORMAT
 from app.core.text import normalize_title
-from app.form.base import FORM_CODE_NOT_CONFIRMED
+from app.form.base import FORM_CODE_MISSING_OPTION, FORM_CODE_NOT_CONFIRMED, FORM_CODE_REQUIRED_MISSING
 from app.package.bcast import AcceptedPackage, BcastScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
@@ -26,6 +26,8 @@ from app.pipeline.plan import (
     WARNING_STEP_AMBIGUOUS,
     WARNING_STEP_REPORTED_FIELD,
     WARNING_STEP_THUMBNAIL,
+    AdmissionKind,
+    AdmissionReason,
     BroadcastSpec,
     ChangedField,
     Decision,
@@ -78,6 +80,7 @@ class OutcomeKind(str, Enum):
     STREAM_ATTACHED = "stream_attached"   # эфир был без потока, поток привязан этим запуском
     ERROR = "error"
     AMBIGUOUS = "ambiguous"
+    NOT_ADMITTED = "not_admitted"   # не допущен к публикации: на площадке ничего не делали, в форму не слали
 
 
 # Требуют внимания владельца и дают код выхода 1.
@@ -120,6 +123,15 @@ _REPORT_TOTALS: Final[dict[RunMode, str]] = {
     RunMode.DRY_RUN: msg.REPORT_TOTAL_DRY_RUN,
     RunMode.STATUS: msg.REPORT_STATUS_TOTAL,
 }
+# Короткая причина недопуска для владельца: FORM_FIELD — по коду, прочие — по виду.
+_ADMISSION_FIELD_TEMPLATES: Final[dict[str, str]] = {
+    FORM_CODE_MISSING_OPTION: msg.ADMISSION_MISSING_OPTION,
+    FORM_CODE_REQUIRED_MISSING: msg.ADMISSION_REQUIRED_MISSING,
+}
+_ADMISSION_KIND_TEMPLATES: Final[dict[AdmissionKind, str]] = {
+    AdmissionKind.FORM_UNREADABLE: msg.ADMISSION_FORM_UNREADABLE,
+    AdmissionKind.CHANNEL: "{text}",
+}
 _FORM_MARKS: Final[dict[FormState, str]] = {
     FormState.SENT: msg.FORM_MARK_SENT,
     FormState.FAILED: msg.FORM_MARK_FAILED,
@@ -161,6 +173,8 @@ class PairOutcome:
     stream_key: str | None = None          # полный ключ; маскирует консоль
     field_changes: tuple[FieldChange, ...] = ()   # было и стало по исправленным полям
     handle: str = ""                       # ник канала; пусто — строка не о канале (файл ключей)
+    admission_texts: tuple[str, ...] = ()  # NOT_ADMITTED: короткие причины недопуска
+    is_channel_ready: bool = True          # NOT_ADMITTED: False — канал не подтверждён, эфиры не проверялись
 
 
 @dataclass(frozen=True)
@@ -224,6 +238,7 @@ class RunTotals:
     orphans: int
     skipped: int
     errors: int
+    not_admitted: int     # не допущены к публикации: код выхода 1, но не «ошибки»
 
 
 def build_totals(report: RunReport) -> RunTotals:
@@ -249,6 +264,7 @@ def build_totals(report: RunReport) -> RunTotals:
         orphans=len(report.orphans),
         skipped=len(report.skipped),
         errors=sum(1 for kind in kinds if kind in ERROR_OUTCOME_KINDS),
+        not_admitted=kinds.count(OutcomeKind.NOT_ADMITTED),
     )
 
 
@@ -262,6 +278,7 @@ _DECISION_KINDS: Final[dict[Decision, OutcomeKind]] = {
     Decision.TOO_LATE: OutcomeKind.MATCHED,   # в исходы не попадает: раздел «пропущено»
     Decision.AMBIGUOUS: OutcomeKind.AMBIGUOUS,
     Decision.ERROR: OutcomeKind.ERROR,
+    Decision.NOT_ADMITTED: OutcomeKind.NOT_ADMITTED,
 }
 
 
@@ -286,7 +303,22 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
         google_account=item.channel.google_account,
         stream_key=item.stream_key,
         field_changes=_field_changes(item),
+        admission_texts=admission_texts(item.admission_reasons),
+        is_channel_ready=not any(reason.kind is AdmissionKind.CHANNEL for reason in item.admission_reasons),
     )
+
+
+def admission_texts(reasons: Sequence[AdmissionReason]) -> tuple[str, ...]:
+    """Причины недопуска словами владельца — одинаково для отчёта, консоли и keys.txt."""
+    return tuple(_admission_text(reason) for reason in reasons)
+
+
+def _admission_text(reason: AdmissionReason) -> str:
+    if reason.kind is AdmissionKind.FORM_FIELD:
+        template: str = _ADMISSION_FIELD_TEMPLATES.get(reason.code, msg.ADMISSION_MISSING_OPTION)
+    else:
+        template = _ADMISSION_KIND_TEMPLATES[reason.kind]
+    return template.format(text=reason.text)
 
 
 def _field_changes(item: PlannedBroadcast) -> tuple[FieldChange, ...]:
@@ -588,6 +620,9 @@ def _append_run_body(lines: list[str], report: RunReport, totals: RunTotals) -> 
     }
     lines.extend(_total_lines(report, totals))
     _append_section(lines, msg.REPORT_SECTION_NOT_DELIVERED, not_delivered_texts(report))
+    _append_section(
+        lines, msg.REPORT_SECTION_NOT_ADMITTED.format(count=totals.not_admitted), texts[OutcomeKind.NOT_ADMITTED]
+    )
     _append_section(lines, msg.REPORT_SECTION_ERRORS, [
         _outcome_text(outcome, is_dry_run=is_dry_run) for outcome in report.outcomes if outcome.kind in ERROR_OUTCOME_KINDS
     ])
@@ -627,6 +662,7 @@ def _total_lines(report: RunReport, totals: RunTotals) -> list[str]:
         matched=totals.matched,
         skipped=totals.skipped,
         errors=totals.errors,
+        not_admitted=totals.not_admitted,
         keys_file=_keys_file_part(report),
     )
     return [total, ""]
@@ -682,6 +718,8 @@ def outcome_prefix(outcome: PairOutcome) -> str:
 
 def _outcome_text(outcome: PairOutcome, *, is_dry_run: bool) -> str:
     body: str = _outcome_body(outcome, is_dry_run=is_dry_run)
+    if outcome.kind is OutcomeKind.NOT_ADMITTED:
+        return body     # не допущенный и в dry-run не выполнялся бы — хвост «не выполнено» лишний
     return body + msg.OUTCOME_DRY_RUN_SUFFIX if is_dry_run else body
 
 
@@ -697,9 +735,26 @@ def _outcome_body(outcome: PairOutcome, *, is_dry_run: bool) -> str:
         return msg.OUTCOME_AMBIGUOUS.format(prefix=prefix)
     if outcome.kind is OutcomeKind.NO_STREAM:
         return msg.OUTCOME_NO_STREAM.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE)
+    if outcome.kind is OutcomeKind.NOT_ADMITTED:
+        return msg.NOT_ADMITTED_LINE.format(
+            prefix=prefix, reasons=admission_reasons_text(outcome), tail=_not_admitted_tail(outcome)
+        )
     if outcome.kind is OutcomeKind.STREAM_ATTACHED:
         return msg.OUTCOME_STREAM_ATTACHED.format(prefix=prefix, form=form_mark(outcome.form, outcome.form_error))
     return _error_text(outcome, prefix)
+
+
+def admission_reasons_text(outcome: PairOutcome) -> str:
+    return msg.NOT_ADMITTED_REASON_JOINER.join(outcome.admission_texts)
+
+
+def _not_admitted_tail(outcome: PairOutcome) -> str:
+    """Что с эфиром на канале: канал не подтверждён — не проверялся; иначе — ссылка или «эфира нет»."""
+    if not outcome.is_channel_ready:
+        return msg.NOT_ADMITTED_TAIL_CHANNEL
+    if outcome.broadcast_url:
+        return msg.NOT_ADMITTED_TAIL_BROADCAST.format(url=outcome.broadcast_url)
+    return msg.NOT_ADMITTED_TAIL_NO_BROADCAST
 
 
 def form_mark(form: FormState | None, error: str | None = None) -> str:

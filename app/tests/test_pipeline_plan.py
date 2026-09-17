@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,10 +19,17 @@ from app.pipeline.plan import (
     Decision,
     OutcomeError,
     PlannedBroadcast,
+    AdmissionKind,
+    AdmissionReason,
 )
+from app.form.base import FormError
+from app.form.key_form import KeyForm
+from app.platforms.channel import Channel, ChannelStatus
+from app.tests.test_form_key_form import training_key_form
+from app.ui import messages_ru as msg
 from app.platforms.base import BroadcastFacts, CreatedBroadcast, PlatformLimits, StreamInfo, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
-from app.tests.conftest import build_config, build_planned
+from app.tests.conftest import build_config, build_planned, build_slot
 
 ConfigFactory = Callable[..., PlanerConfig]
 SlotFactory = Callable[..., Slot]
@@ -330,3 +338,108 @@ def test_package_fields_survive_platform_data(
     assert item.channel is channel
     assert item.expected is expected
     assert item.source_package.package_id == "pkg-test"
+
+
+# --- допуск к публикации (PlannedBroadcast.admit)
+
+TRAINING_DAY: datetime = datetime(2026, 9, 13, 19, 0, tzinfo=timezone(timedelta(hours=3)))
+
+
+def _admission_item(language: str = "uk", start: datetime = TRAINING_DAY) -> PlannedBroadcast:
+    config: PlanerConfig = build_config(channels=(("yt_all", ["uk", "ru", "en", "hu"]),))
+    return build_planned(build_slot(start, language), config.channels[0])
+
+
+def _channel_object(item: PlannedBroadcast, status: ChannelStatus) -> Channel:
+    return Channel(config=item.channel, token_file=Path("t.json"), status=status)
+
+
+def test_ready_channel_and_complete_form_admit_the_object(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _admission_item()
+    item.admit(_channel_object(item, ChannelStatus.READY), training_key_form(tmp_path), None)
+    assert item.is_admitted and item.decision is Decision.CREATE
+    assert item.form_answers is not None and item.form_answers.missing == ()
+    assert item.form_answers.pending == ("You Tube Stream Key", "Stream-URL (YT)")   # ключ и адрес — не причина
+
+
+@pytest.mark.parametrize("status", [ChannelStatus.REFUSED, ChannelStatus.FAILED, ChannelStatus.NEEDS_LOGIN])
+def test_channel_not_ready_is_a_reason(tmp_path: Path, status: ChannelStatus) -> None:
+    item: PlannedBroadcast = _admission_item()
+    item.admit(_channel_object(item, status), training_key_form(tmp_path), None)
+    assert item.decision is Decision.NOT_ADMITTED and not item.is_admitted
+    assert item.admission_reasons == (
+        AdmissionReason(AdmissionKind.CHANNEL, status.value, None, msg.ADMISSION_CHANNEL_TEXT[status.value]),
+    )
+
+
+def test_unreadable_form_is_a_reason() -> None:
+    item: PlannedBroadcast = _admission_item()
+    item.admit(None, None, FormError("structureUnreadable", "FB_PUBLIC_LOAD_DATA_ not found"))
+    assert item.admission_reasons == (
+        AdmissionReason(AdmissionKind.FORM_UNREADABLE, "structureUnreadable", None, "FB_PUBLIC_LOAD_DATA_ not found"),
+    )
+    assert item.decision is Decision.NOT_ADMITTED
+
+
+def test_date_without_option_is_a_form_field_reason(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _admission_item("en", datetime(2027, 3, 18, 20, 0, tzinfo=timezone(timedelta(hours=2))))
+    item.admit(_channel_object(item, ChannelStatus.READY), training_key_form(tmp_path), None)
+    assert item.admission_reasons == (
+        AdmissionReason(AdmissionKind.FORM_FIELD, "missingOption", "date", "Время стрима ( Stream time ): 18.03.2027"),
+    )
+    assert item.decision is Decision.NOT_ADMITTED
+
+
+def test_language_without_option_is_a_form_field_reason(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _admission_item("hu")
+    item.admit(None, training_key_form(tmp_path), None)
+    assert [(reason.kind, reason.code, reason.field) for reason in item.admission_reasons] == [
+        (AdmissionKind.FORM_FIELD, "missingOption", "language")
+    ]
+
+
+def test_reasons_keep_their_order(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _admission_item("hu", datetime(2027, 3, 18, 20, 0, tzinfo=timezone(timedelta(hours=2))))
+    item.admit(_channel_object(item, ChannelStatus.FAILED), training_key_form(tmp_path), None)
+    assert [reason.kind for reason in item.admission_reasons] == [
+        AdmissionKind.CHANNEL, AdmissionKind.FORM_FIELD, AdmissionKind.FORM_FIELD
+    ]
+
+
+def test_too_late_object_gets_fields_but_no_reasons(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _admission_item("en", datetime(2027, 3, 18, 20, 0, tzinfo=timezone(timedelta(hours=2))))
+    item.is_too_late = True
+    item.decision = Decision.TOO_LATE
+    form: KeyForm = training_key_form(tmp_path)
+    item.admit(_channel_object(item, ChannelStatus.REFUSED), form, None)
+    assert item.is_admitted and item.decision is Decision.TOO_LATE
+    assert item.key_form is form and item.channel_object is not None
+
+
+def test_refreshed_answers_with_key_and_url_are_complete(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _admission_item()
+    item.admit(None, training_key_form(tmp_path), None)
+    item.take_new_key(CREATED)
+    assert not item.is_key_ready_to_send                  # ответы ещё без ключа и адреса
+    answers = item.refresh_form_answers()
+    assert answers is not None and answers.is_complete and item.form_answers is answers
+    assert item.is_key_ready_to_send
+    item.is_form_sent = True
+    assert not item.is_key_ready_to_send
+
+
+def test_stream_url_not_in_options_makes_answers_incomplete(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _admission_item()
+    item.admit(None, training_key_form(tmp_path), None)
+    item.take_new_key(replace(CREATED, stream_url="rtmp://b.rtmp.youtube.com/live2"))
+    answers = item.refresh_form_answers()
+    assert answers is not None and not answers.is_complete
+    assert [missing.field for missing in answers.missing] == ["stream_url"]
+    assert not item.is_key_ready_to_send
+    assert item.is_admitted                               # допуск уже решён; адрес — забота отправки
+
+
+def test_object_built_directly_is_admitted_without_form() -> None:
+    item: PlannedBroadcast = _admission_item()
+    item.take_new_key(CREATED)
+    assert item.is_admitted and item.form_answers is None and item.is_key_ready_to_send

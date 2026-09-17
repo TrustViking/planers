@@ -21,8 +21,11 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from app.config.loader import ChannelConfig, ConfigError, PlanerConfig, load_planer_config
-from app.google.auth import AuthError, load_credentials, token_file_for
+from app.google.auth import AuthError, load_credentials, save_token, token_file_for
+from app.observability.logging_setup import get_logger
 from app.paths import PlanerPaths, build_paths, resolve_root
+
+LOGGER = get_logger("tools.broadcast_probe")
 
 EXIT_OK: Final[int] = 0
 EXIT_REFUSED: Final[int] = 2
@@ -100,12 +103,28 @@ def _channel(paths: PlanerPaths, handle: str) -> ChannelConfig:
 
 
 def _service(paths: PlanerPaths, channel: ChannelConfig) -> Any:
+    credentials: Any = _credentials(paths, channel)
+    return build(API_SERVICE_NAME, API_VERSION, credentials=credentials, cache_discovery=False)
+
+
+def _credentials(paths: PlanerPaths, channel: ChannelConfig) -> Any:
+    """Токен канала; новый вход в браузере файл сам не пишет (задача 5m-A) — пробник сохраняет его здесь.
+
+    Пробник канал не проверяет: выберите в браузере нужный канал.
+    """
+    token_file: Path = token_file_for(paths.secrets_dir, channel.handle)
+    logged_in: list[bool] = []
     credentials: Any = load_credentials(
         paths.client_secret_file,
-        token_file_for(paths.secrets_dir, channel.handle),
+        token_file,
         login_hint=channel.google_account,
+        on_login=lambda: logged_in.append(True),
     )
-    return build(API_SERVICE_NAME, API_VERSION, credentials=credentials, cache_discovery=False)
+    if logged_in:
+        save_token(credentials, token_file)
+        LOGGER.info('probe_token_saved channel="%s" handle=%s file=%s', channel.account_name, channel.handle, token_file.name)
+        print(f"токен записан: {token_file}")
+    return credentials
 
 
 def _list_broadcasts(service: Any) -> list[BroadcastRow]:

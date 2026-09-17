@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -17,8 +18,10 @@ from app.pipeline.plan import (
 )
 from app.pipeline.reconciler import MarkerParts, OrphanBroadcast, Reconciler, split_marker
 from app.platforms.base import PLACEHOLDER_TOKEN, PlatformError, UpcomingBroadcast
+from app.form.base import FormError
+from app.platforms.channel import Channel, ChannelStatus
 from app.platforms.fake import FakePlatform
-from app.tests.conftest import RecordingProgress, build_config, build_planned
+from app.tests.conftest import FIXED_NOW, RecordingProgress, build_config, build_planned
 
 ConfigFactory = Callable[..., PlanerConfig]
 SlotFactory = Callable[..., Slot]
@@ -195,6 +198,7 @@ def test_decisions_have_no_recreate_branch() -> None:
         "no_stream",
         "too_late",
         "ambiguous",
+        "not_admitted",
         "error",
     }
 
@@ -573,3 +577,64 @@ def test_same_picture_on_different_channels_is_not_a_placeholder(
         ("yt_ua", Decision.MATCH),
         ("yt_ua2", Decision.MATCH),
     ]
+
+
+# --- не допущенные объекты
+
+START: datetime = FIXED_NOW + timedelta(days=1)
+
+
+def _not_admitted_by_channel(item: PlannedBroadcast, status: ChannelStatus) -> PlannedBroadcast:
+    item.admit(Channel(config=item.channel, token_file=Path("t.json"), status=status), None, None)
+    return item
+
+
+def test_channel_not_ready_is_never_asked(
+    make_config: ConfigFactory, make_slot_object: SlotFactory, fake_platform: FakePlatform
+) -> None:
+    """Канал не READY: ни list_upcoming, ни get_stream; его объекты — NOT_ADMITTED, другой канал сверен."""
+    config: PlanerConfig = make_config()
+    ua_slot: Slot = make_slot_object(START, "uk")
+    ru_slot: Slot = make_slot_object(START, "ru")
+    fake_platform.seed_broadcast("yt_ua", START, ua_slot.title, ua_slot.description, marker=ua_slot.slot_id)
+    ua, ru = _objects(config, ua_slot, ru_slot)
+    _not_admitted_by_channel(ua, ChannelStatus.REFUSED)
+    _not_admitted_by_channel(ru, ChannelStatus.READY)
+    _reconcile(fake_platform, config, ua, ru)
+    assert fake_platform.list_calls == ["yt_ru"]
+    assert all(call[0] != "yt_ua" for call in fake_platform.stream_calls)
+    assert (ua.decision, ua.error, ua.stream_key) == (Decision.NOT_ADMITTED, None, None)
+    assert ru.decision is Decision.CREATE
+
+
+def test_object_not_admitted_by_form_only_reads_its_key(
+    make_config: ConfigFactory, make_slot_object: SlotFactory, fake_platform: FakePlatform
+) -> None:
+    """Канал READY, форма объект не принимает: эфир опознан, ключ и ссылка взяты, решение NOT_ADMITTED."""
+    config: PlanerConfig = make_config()
+    slot: Slot = make_slot_object(START, "uk")
+    fake_platform.seed_broadcast("yt_ua", START, "Старое название", slot.description, marker=slot.slot_id)
+    [item] = _objects(config, slot)
+    item.admit(
+        Channel(config=item.channel, token_file=Path("t.json"), status=ChannelStatus.READY),
+        None,
+        FormError("structureUnreadable", "нет скрипта"),
+    )
+    _reconcile(fake_platform, config, item)
+    assert item.decision is Decision.NOT_ADMITTED
+    assert item.stream_key is not None and item.broadcast_url is not None
+    assert item.changed_fields == () and item.warnings == []
+    assert fake_platform.created == [] and fake_platform.updated == []
+
+
+def test_not_admitted_object_does_not_become_ambiguous(
+    make_config: ConfigFactory, make_slot_object: SlotFactory, fake_platform: FakePlatform
+) -> None:
+    config: PlanerConfig = make_config()
+    slot: Slot = make_slot_object(START, "uk")
+    for title in ("Ручной 1", "Ручной 2"):
+        fake_platform.seed_broadcast("yt_ua", START, title, "", marker="ручной ключ")
+    [item] = _objects(config, slot)
+    item.admit(None, None, FormError("structureUnreadable", "нет скрипта"))
+    _reconcile(fake_platform, config, item)
+    assert item.decision is Decision.NOT_ADMITTED and item.ambiguous_urls == () and item.stream_key is None

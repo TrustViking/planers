@@ -1,7 +1,8 @@
 """Отправка ключа в Google-форму (ТЗ §7.5 п.3–5).
 
 Формы читаются в начале запуска (prepare) — один раз на форму; правила ответа — у объекта-формы
-(app/form/key_form.py::KeyForm). Здесь — только POST и подтверждение.
+(app/form/key_form.py::KeyForm), готовые ответы и решение «полные ли» — у объекта-слота
+(PlannedBroadcast.form_answers). Здесь — только тело запроса, POST и подтверждение.
 Железное правило: значение, которого нет среди вариантов вопроса, не отправляется вовсе.
 """
 from __future__ import annotations
@@ -19,6 +20,7 @@ from urllib.parse import urlencode
 from app.core.retry import RetryPolicy
 from app.form.base import (
     FORM_CODE_NOT_CONFIRMED,
+    FORM_CODE_STRUCTURE_UNREADABLE,
     FORM_CODE_TRANSPORT_FAILED,
     FormError,
     FormSendResult,
@@ -113,19 +115,23 @@ class GoogleFormSender:
             form.log_ready()
             self._forms[spec.url] = form
 
+    def form_for(self, spec: FormSpec) -> KeyForm:
+        """Готовая форма; другой пакет с той же ссылкой — та же структура, свои названия и варианты.
+
+        Не прочиталась — та же FormError, что при чтении; второго чтения нет.
+        """
+        if spec.url not in self._forms and spec.url not in self._failures:
+            self.prepare([spec])
+        failure: FormError | None = self._failures.get(spec.url)
+        if failure is not None:
+            raise failure
+        form: KeyForm = self._forms[spec.url]
+        return form if form.spec == spec else KeyForm.build(spec, form.structure)
+
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
+        """Ответы не строятся здесь: берутся готовые у объекта (key_form, form_answers)."""
         try:
-            form: KeyForm = self._form_for(planned.form)
-            answers: FormAnswers = form.answers(
-                language=planned.language,
-                start=planned.slot.start,
-                account_name=planned.account_name,
-                stream_key=planned.stream_key,
-                stream_url=planned.stream_url,
-            )
-            error: FormError | None = answers.error()
-            if error is not None:
-                raise error
+            form, answers = _ready_answers(planned)
             return self._post(planned, form.structure, answers)
         except FormError as error:
             LOGGER.warning(
@@ -137,19 +143,9 @@ class GoogleFormSender:
             )
             return error.as_result()
 
-    def _form_for(self, spec: FormSpec) -> KeyForm:
-        """Готовая форма; другой пакет с той же ссылкой — та же структура, свои названия и варианты."""
-        if spec.url not in self._forms and spec.url not in self._failures:
-            self.prepare([spec])
-        failure: FormError | None = self._failures.get(spec.url)
-        if failure is not None:
-            raise failure
-        form: KeyForm = self._forms[spec.url]
-        return form if form.spec == spec else KeyForm.build(spec, form.structure)
-
     def _post(self, planned: PlannedBroadcast, structure: FormStructure, answers: FormAnswers) -> FormSendResult:
-        body: dict[str, list[str]] = _build_body(structure, answers)
-        url: str = _with_response_language(structure.response_url)
+        body: dict[str, list[str]] = build_body(structure, answers)
+        url: str = with_response_language(structure.response_url)
         LOGGER.info(
             "form_post url=%s slot_id=%s pages=%s fields=%d stream_key=%s",
             url,
@@ -176,7 +172,7 @@ class GoogleFormSender:
             planned.channel.account_name,
             planned.channel.handle,
             confirmation.log_fields(),
-            _page_title(response.text),
+            page_title(response.text),
             path,
         )
         raise FormError(FORM_CODE_NOT_CONFIRMED, f"HTTP {response.status_code}", path)
@@ -212,7 +208,18 @@ class GoogleFormSender:
             time.sleep(delay_sec)   # через модуль time: тесты подменяют
 
 
-def _build_body(structure: FormStructure, answers: FormAnswers) -> dict[str, list[str]]:
+def _ready_answers(planned: PlannedBroadcast) -> tuple[KeyForm, FormAnswers]:
+    """Защита: в штатном пути объект сюда приходит с полными ответами (PlannedBroadcast.is_key_ready_to_send)."""
+    if planned.key_form is None or planned.form_answers is None:
+        raise planned.form_failure or FormError(FORM_CODE_STRUCTURE_UNREADABLE, planned.form.url)
+    error: FormError | None = planned.form_answers.error()
+    if error is not None:
+        raise error
+    return planned.key_form, planned.form_answers
+
+
+def build_body(structure: FormStructure, answers: FormAnswers) -> dict[str, list[str]]:
+    """Тело POST formResponse: ответы пройденных разделов, fvv, pageHistory, fbzx."""
     body: dict[str, list[str]] = {answer.question.entry_id: [answer.value] for answer in answers.answers}
     body[FIELD_FVV] = [FVV_VALUE]
     body[FIELD_PAGE_HISTORY] = [PAGE_SEPARATOR.join(str(page) for page in answers.pages)]
@@ -221,7 +228,7 @@ def _build_body(structure: FormStructure, answers: FormAnswers) -> dict[str, lis
     return body
 
 
-def _with_response_language(url: str) -> str:
+def with_response_language(url: str) -> str:
     """hl=en в строке запроса — вместе с Accept-Language просит английскую страницу ответа; гарантии нет (§7.5 п.5)."""
     separator: str = QUERY_JOINER if QUERY_SEPARATOR in url else QUERY_SEPARATOR
     return url + separator + urlencode({QUERY_LANGUAGE: RESPONSE_LANGUAGE})
@@ -243,7 +250,7 @@ def read_confirmation(http_status: int, body: str) -> Confirmation:
     )
 
 
-def _page_title(body: str) -> str:
+def page_title(body: str) -> str:
     """Заголовок страницы ответа — в лог, чтобы разбор не требовал открывать сохранённый файл."""
     match: re.Match[str] | None = TITLE_PATTERN.search(body)
     if match is None:

@@ -1,10 +1,13 @@
-"""Оркестрация запуска (ТЗ §4): bcast → формы → объекты → входы → сверка → действия → форма → keys.txt → отчёт.
+"""Оркестрация запуска (ТЗ §4): bcast → формы → объекты → входы → допуск → сверка → по объекту: действия и форма
+→ keys.txt → отчёт.
 
 main.py только разбирает флаги, строит зависимости и печатает результат.
 Рабочая единица — PlannedBroadcast: один эфир одного слота на одном канале.
 Формы читаются сразу после пакетов, до входов и до обращений к площадке (FormSender.prepare).
 Фаза входов (ChannelLogins) — между отбором объектов и сверкой: после неё браузер не открывается.
-Отправка в форму — отдельным финальным проходом: ключи, которые в этом запуске должны дойти до стримера (§7.5).
+Допуск — после входов: каждый объект получает объект своего канала и своей формы и сам решает (PlannedBroadcast.admit).
+Не допущенный объект на площадке ничего не создаёт и в форму ничего не шлёт, но остаётся в отчёте и keys.txt.
+Ключ уходит в форму сразу после действий по своему объекту — обрыв запуска не теряет уже созданные ключи (§7.5).
 Истина об эфирах — на площадке: планер не держит своей памяти о прошлых запусках.
 """
 from __future__ import annotations
@@ -20,7 +23,8 @@ from typing import Final, Protocol
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import format_datetime_text
 from app.core.retention import cleanup_expired
-from app.form.base import FormSender, FormSendResult
+from app.form.base import FormError, FormSender, FormSendResult
+from app.form.key_form import FormAnswers, KeyForm
 from app.observability.logging_setup import get_logger, mask_stream_key
 from app.output.keys_file import (
     KeyRow,
@@ -51,7 +55,7 @@ from app.output.report import (
     render_report,
     write_report,
 )
-from app.package.model import PackageError, read_preview
+from app.package.model import FormSpec, PackageError, read_preview
 from app.package.bcast import BcastScan, scan_bcast
 from app.paths import PlanerPaths
 from app.pipeline.plan import (
@@ -68,6 +72,7 @@ from app.pipeline.plan import (
     OutcomeWarning,
     PlannedBroadcast,
 )
+from app.platforms.channel import Channel
 from app.pipeline.reconciler import MarkedScan, OrphanBroadcast, Reconciler, split_marker
 from app.pipeline.selection import Selection, build_planned
 from app.platforms.base import (
@@ -109,6 +114,10 @@ class ChannelLogins(Protocol):
     """Фаза входов (app/platforms/channel.py::ChannelBook): каналы без входа входят подряд, один за другим."""
 
     def log_in_needed(self, channels: Sequence[ChannelConfig]) -> None:
+        ...
+
+    def channel(self, config: ChannelConfig) -> Channel:
+        """Объект канала после фазы входов: для допуска объектов."""
         ...
 
 
@@ -207,6 +216,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     )
     # к площадке обращаемся только по каналам, у которых есть объекты (и too_late): входы — все до сверки
     _log_in(context, [item.channel for item in selection.planned])
+    _admit_all(context, selection.planned)
     orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
         selection.planned,
         frozenset(scan.slot_map),
@@ -222,6 +232,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         for item in selection.planned
         if not item.is_too_late      # они в разделе «пропущено», не в исходах
     ]
+    outcomes.extend(_channel_refusal_outcomes(selection.planned))
     outcomes.extend(extra_outcomes)
     report: RunReport = RunReport(
         mode=context.mode,
@@ -239,13 +250,70 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     )
     # ключ, который должен был дойти до стримера и не дошёл, — это код выхода 1 (§7.5)
     form_pending: bool = context.is_full and any(item.is_key_undelivered for item in selection.planned)
-    has_errors: bool = _has_error_outcomes(report.outcomes) or bool(scan.problems) or form_pending
+    # не допущенный объект — тоже код 1: ключ этого эфира стримеру не передан
+    has_errors: bool = (
+        _has_error_outcomes(report.outcomes)
+        or bool(scan.problems)
+        or form_pending
+        or build_totals(report).not_admitted > 0
+    )
     return _complete(context, report, has_errors=has_errors)
 
 
 def _log_in(context: _RunContext, channels: Sequence[ChannelConfig]) -> None:
     if context.logins is not None:
         context.logins.log_in_needed(channels)
+
+
+def _admit_all(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> None:
+    """Допуск: у каждого объекта — объект канала и объект формы; решает сам объект (PlannedBroadcast.admit)."""
+    for item in planned:
+        channel_object: Channel | None = context.logins.channel(item.channel) if context.logins is not None else None
+        key_form, failure = _form_for(context, item.form)
+        item.admit(channel_object, key_form, failure)
+        if not item.is_too_late:
+            _log_admission(item)
+
+
+def _form_for(context: _RunContext, spec: FormSpec) -> tuple[KeyForm | None, FormError | None]:
+    try:
+        return context.form_sender.form_for(spec), None
+    except FormError as error:
+        return None, error
+
+
+def _log_admission(item: PlannedBroadcast) -> None:
+    identity: str = f'slot_id={item.slot_id} channel="{item.channel.account_name}" handle={item.channel.handle}'
+    if item.is_admitted:
+        LOGGER.info("slot_admitted %s form_url=%s", identity, item.form.url)
+        return
+    LOGGER.warning(
+        "slot_not_admitted %s reasons=%s",
+        identity,
+        ",".join(f"{reason.kind.value}:{reason.code}:{reason.field or MISSING_FIELD}" for reason in item.admission_reasons),
+    )
+    for reason in item.admission_reasons:
+        LOGGER.warning(
+            "slot_not_admitted_reason %s kind=%s code=%s field=%s text=%s",
+            identity,
+            reason.kind.value,
+            reason.code,
+            reason.field or MISSING_FIELD,
+            _quoted(reason.text),
+        )
+
+
+def _channel_refusal_outcomes(planned: Sequence[PlannedBroadcast]) -> list[PairOutcome]:
+    """Полный текст отказа или сбоя канала — один раз на канал; его объекты — в «Не допущено» коротко."""
+    outcomes: dict[str, PairOutcome] = {}
+    for item in planned:
+        channel_object: Channel | None = item.channel_object
+        if item.is_admitted or channel_object is None or item.channel.key in outcomes:
+            continue
+        error: PlatformError | None = channel_object.access_error()
+        if error is not None:
+            outcomes[item.channel.key] = platform_error_outcome(item.channel, error)
+    return list(outcomes.values())
 
 
 def _progress_packages(context: _RunContext, packages: list[ReportPackageLine]) -> None:
@@ -260,14 +328,13 @@ def _execute_full(
     context: _RunContext,
     selection: Selection,
 ) -> tuple[Path | None, list[PairOutcome]]:
-    """Действия → форма → keys.txt (§4, §7.5)."""
+    """По объекту: действия → его ключ в форму; затем keys.txt (§4, §7.5)."""
     executor: _Executor = _Executor(context)
     for item in selection.planned:
         executor.execute(item)
-    context.form_diagnostics.extend(_send_forms(context, selection.planned))
     keys_path, outcomes = _write_keys(
         context,
-        # все будущие эфиры с ключом, включая слоты внутри min_lead_minutes (§5.5)
+        # все будущие эфиры с ключом, включая слоты внутри min_lead_minutes и не допущенные (§5.5)
         [key_row_from_planned(item) for item in selection.planned if item.stream_key],
     )
     return keys_path, outcomes
@@ -337,38 +404,6 @@ def _write_keys(context: _RunContext, rows: list[KeyRow]) -> tuple[Path | None, 
     except OSError as error:
         LOGGER.error("keys_write_failed path=%s reason=%s", context.paths.keys_file, error)
         return None, [planer_error_outcome(context.paths.keys_file.name, ERROR_CODE_KEYS_WRITE, str(error))]
-
-
-def _send_forms(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[str]:
-    """Финальный проход (§7.5): ключи с should_send_key — создан, привязан поток, исправлен, усыновлён.
-
-    Совпавший эфир с меткой планера ключ не шлёт. Задвоение строки у стримера допустимо:
-    он берёт последнюю по дате, каналу и языку.
-    Возвращает пути сохранённых диагностических файлов формы — они идут в отчёт.
-    """
-    diagnostics: list[str] = []
-    for item in planned:
-        if not item.is_key_undelivered:
-            continue
-        context.progress.key_send_started(item)
-        result: FormSendResult = context.form_sender.send(item)
-        if result.confirmed:
-            item.is_form_sent = True
-            item.form_sent_at = context.now_naive
-            item.last_error = None
-        else:
-            item.last_error = _form_error_text(result)
-        if result.diagnostic_path is not None:
-            diagnostics.append(str(result.diagnostic_path))
-        LOGGER.info(
-            'form_send slot_id=%s channel="%s" handle=%s confirmed=%s stream_key=%s',
-            item.slot_id,
-            item.channel.account_name,
-            item.channel.handle,
-            result.confirmed,
-            mask_stream_key(item.stream_key),
-        )
-    return diagnostics
 
 
 def _describe_spec(spec: BroadcastSpec | None) -> dict[str, object]:
@@ -480,6 +515,7 @@ class _Executor:
         self._resent: set[tuple[str, str]] = set()   # (slot_id, channel.key): эфир уже переотправлен в этом запуске
 
     def execute(self, item: PlannedBroadcast) -> None:
+        """Действия по объекту и сразу его ключ в форму; объект с ошибкой ключ не отправляет."""
         try:
             self._dispatch(item)
             self._finish(item)
@@ -493,10 +529,52 @@ class _Executor:
             item.error = OutcomeError(origin=ERROR_ORIGIN_PACKAGE, code=error.reason.value, message=error.detail)
             item.last_error = error.detail
             item.decision = Decision.ERROR
+        else:
+            self._send_key(item)
+
+    def _send_key(self, item: PlannedBroadcast) -> None:
+        """Ключ этого объекта — в форму сейчас, если он должен дойти до стримера (should_send_key, §7.5).
+
+        Ответы достраивает сам объект (ключ и адрес потока); неполные — без POST, причина в last_error.
+        """
+        if not item.should_send_key or not item.stream_key or item.is_form_sent:
+            return
+        answers: FormAnswers | None = item.refresh_form_answers()
+        if not item.is_key_ready_to_send:
+            error: FormError | None = answers.error() if answers is not None else None
+            if error is not None:
+                item.last_error = f"{error.code}: {error.message}"
+                LOGGER.warning(
+                    'form_send_skipped slot_id=%s channel="%s" handle=%s code=%s text=%s',
+                    item.slot_id,
+                    item.channel.account_name,
+                    item.channel.handle,
+                    error.code,
+                    _quoted(error.message),
+                )
+            return
+        self._context.progress.key_send_started(item)
+        result: FormSendResult = self._context.form_sender.send(item)
+        if result.confirmed:
+            item.is_form_sent = True
+            item.form_sent_at = self._context.now_naive
+            item.last_error = None
+        else:
+            item.last_error = _form_error_text(result)
+        if result.diagnostic_path is not None:
+            self._context.form_diagnostics.append(str(result.diagnostic_path))
+        LOGGER.info(
+            'form_send slot_id=%s channel="%s" handle=%s confirmed=%s stream_key=%s',
+            item.slot_id,
+            item.channel.account_name,
+            item.channel.handle,
+            result.confirmed,
+            mask_stream_key(item.stream_key),
+        )
 
     def _dispatch(self, item: PlannedBroadcast) -> None:
-        if item.is_too_late:
-            return      # до старта меньше min_lead_minutes: ключ храним, эфир не трогаем
+        if item.is_too_late or not item.is_admitted:
+            return      # too_late: ключ храним, эфир не трогаем; не допущен: на площадке ничего не делаем
         if item.decision is Decision.NO_STREAM:
             self._attach_stream(item)
             return
@@ -586,7 +664,7 @@ class _Executor:
     @staticmethod
     def _own_broadcast_id(item: PlannedBroadcast) -> str | None:
         """Эфир планера: создан, привязан, исправлен или подтверждён. Прочие — не наше дело."""
-        if item.error is not None or item.is_too_late:
+        if item.error is not None or item.is_too_late or not item.is_admitted:
             return None
         if item.decision not in (Decision.CREATE, Decision.UPDATE, Decision.MATCH):
             return None

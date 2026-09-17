@@ -46,7 +46,7 @@ RESTORED_WARNING: str = (
 )
 
 # Макет задачи 5e: блоки сверху вниз, пустой блок не печатается, каналы — в порядке channels.json.
-SAMPLE_CONSOLE: str = f"""Итог: опубликовано 2, исправлено 1, уже стояло 1, не публиковали 2, ошибок 0
+SAMPLE_CONSOLE: str = f"""Итог: опубликовано 2, исправлено 1, уже стояло 1, не допущено 0, не публиковали 2, ошибок 0
 
 ======================= ВНИМАНИЕ =======================
   ключ не дошёл до стримера: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — форма недоступна (HTTP 503)
@@ -165,7 +165,7 @@ def test_empty_blocks_are_not_printed_at_all() -> None:
     """Нули видны в «Итоге»; пустого раздела нет."""
     text: str = _render(_sample_report(outcomes=[], skipped=[], warnings=[]))
     lines: list[str] = text.splitlines()
-    assert lines[0] == "Итог: опубликовано 0, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0"
+    assert lines[0] == "Итог: опубликовано 0, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0"
     assert _block_titles(text) == []
 
 
@@ -210,7 +210,7 @@ def test_settings_only_fix_has_no_tail_in_fixed_and_is_named_in_attention() -> N
     lines: list[str] = text.splitlines()
     fixed: list[str] = text.split("ИСПРАВИЛИ (1)")[1].split("\n\n")[0].splitlines()[1:]
     assert fixed == ["  Osvald.X @Osvald.X (trustviorel@gmail.com)", "    18-03-2027  20:00  ru  Второй эфир"]
-    assert lines[0] == "Итог: опубликовано 0, исправлено 1, уже стояло 0, не публиковали 0, ошибок 0"
+    assert lines[0] == "Итог: опубликовано 0, исправлено 1, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0"
     assert "  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — видимость: было private, стало unlisted" in lines
     assert text.count("видимость") == 1
 
@@ -265,7 +265,7 @@ def test_dry_run_speaks_of_intent_and_has_no_keys_block() -> None:
     )
     text: str = _render(report)
     lines: list[str] = text.splitlines()
-    assert lines[0] == "Итог: опубликуем 1, исправим 1, уже стояло 0, не публиковали 2, ошибок 0"
+    assert lines[0] == "Итог: опубликуем 1, исправим 1, уже стояло 0, не допущено 0, не публиковали 2, ошибок 0"
     assert _block_titles(text) == ["ВНИМАНИЕ", "ОПУБЛИКУЕМ (1)", "ИСПРАВИМ (1)", "НЕ ПУБЛИКОВАЛИ (2)"]
     assert "    18-03-2027  20:00  ru  Второй эфир — будет обновлено: описание" in lines
     assert "  вернём к пакету: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — видимость: сейчас private, будет unlisted" in lines
@@ -345,7 +345,8 @@ def test_console_and_report_use_the_same_totals(
     console: str = render_console(outcome.report, root=planer_paths.root, report_path=outcome.report_path)
     report_text: str = outcome.report_path.read_text(encoding="utf-8")
     console_total: str = msg.CONSOLE_TOTAL.format(
-        created=totals.created, fixed=totals.fixed, matched=totals.matched, skipped=totals.skipped, errors=totals.errors
+        created=totals.created, fixed=totals.fixed, matched=totals.matched, skipped=totals.skipped, errors=totals.errors,
+        not_admitted=totals.not_admitted,
     )
     assert console.splitlines()[0] == console_total
     # в отчёте — те же слова и числа, плюс файл ключей
@@ -353,3 +354,32 @@ def test_console_and_report_use_the_same_totals(
     assert (totals.created, totals.skipped, totals.errors) == (1, 1, 1)
     assert "    17-03-2027  19:00  uk  Эфир 17-03-2027_1900_uk" in console.splitlines()
     assert f"  отчёт   {Path('logs') / outcome.report_path.name}" in console
+
+
+def test_not_admitted_objects_are_attention_lines_only() -> None:
+    report: RunReport = RunReport(
+        mode=RunMode.FULL,
+        generated_at_text="17-09-2026 01:18",
+        outcomes=[
+            PairOutcome(
+                OutcomeKind.NOT_ADMITTED, account_name="Nick Moss", handle="@NickMoss85",
+                date="18-03-2027", time="20:00", language="en", stream_key="abcd-abcd-abcd-abcd-wxyz",
+                admission_texts=("в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» — нужен владельцу формы",),
+            ),
+            PairOutcome(
+                OutcomeKind.NOT_ADMITTED, account_name="Nick Moss", handle="@NickMoss85",
+                date="19-03-2027", time="20:00", language="en",
+                admission_texts=("форма не прочиталась: нет скрипта",),
+            ),
+        ],
+    )
+    lines: list[str] = render_console(report, root=Path("root")).splitlines()
+    assert lines[0].startswith("Итог: опубликовано 0, исправлено 0, уже стояло 0, не допущено 2,")
+    assert lines[1:] == [
+        "",
+        lines[2],
+        "  не допущено: 18-03-2027 20:00 en -> Nick Moss @NickMoss85 — в форме нет варианта «Время стрима "
+        "( Stream time ): 18.03.2027» — нужен владельцу формы; эфир на канале есть — ключ стримеру не передан",
+        "  не допущено: 19-03-2027 20:00 en -> Nick Moss @NickMoss85 — форма не прочиталась: нет скрипта; эфира нет",
+    ]
+    assert msg.CONSOLE_BLOCK_ATTENTION in lines[2] and "→" not in "\n".join(lines)

@@ -4,10 +4,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 from app.package.model import FormSpec
-from app.pipeline.plan import PlannedBroadcast
+
+if TYPE_CHECKING:   # объект-слот и объект-форма сами импортируют этот модуль: здесь — только аннотации
+    from app.form.key_form import KeyForm
+    from app.pipeline.plan import PlannedBroadcast
 
 # Коды исходов отправки; тексты для владельца — в messages_ru по этим же ключам.
 FORM_CODE_STRUCTURE_UNREADABLE: Final[str] = "structureUnreadable"
@@ -49,8 +52,12 @@ class FormSender(Protocol):
         """Прочитать формы запуска — в начале, один раз на форму; send потом берёт готовую."""
         ...
 
+    def form_for(self, spec: FormSpec) -> KeyForm | None:
+        """Готовая форма для допуска объекта; не прочиталась — FormError. None — отправитель форму не проверяет."""
+        ...
+
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
-        """Всё нужное — внутри объекта: ключ, канал, слот и форма его пакета (§7.5)."""
+        """Всё нужное — внутри объекта: ключ, канал, слот, форма его пакета и готовые ответы (§7.5)."""
         ...
 
 
@@ -59,6 +66,10 @@ class NoopFormSender:
 
     def prepare(self, forms: Sequence[FormSpec]) -> None:
         """Читать нечего."""
+
+    def form_for(self, spec: FormSpec) -> KeyForm | None:
+        """Форма не проверяется: объекты допускаются без неё."""
+        return None
 
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         return FormSendResult(confirmed=False)

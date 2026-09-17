@@ -3,6 +3,8 @@
 Одна рабочая единица = один эфир одного слота на одном канале. Объект рождается из
 пакета и канала и ничего не знает о прошлых запусках: ключ и ссылка приходят только
 с площадки — из найденного эфира или из ответа на создание и привязку потока.
+После фазы входов объект получает объект своего канала и объект своей формы и сам решает,
+допущен ли он к публикации (admit) — единственное место этого правила.
 Сравнение идёт между двумя BroadcastSpec — «как должно быть» и «как есть», — поэтому
 нормализация и обрезка применяются к обеим сторонам по построению. Сверяется всё, что планер
 диктует площадке; какие расхождения планер исправляет, а о каких только сообщает, — FIXABLE_FIELDS
@@ -13,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from app.config.loader import ChannelConfig, PlanerSettings
 from app.core.text import normalize_description, normalize_title, safe_trim
@@ -26,6 +28,13 @@ from app.platforms.base import (
     UpcomingBroadcast,
     broadcast_url_for,
 )
+from app.platforms.channel import ChannelStatus
+from app.ui import messages_ru as msg
+
+if TYPE_CHECKING:   # форма и канал нужны объекту только для аннотаций: их строит runner
+    from app.form.base import FormError
+    from app.form.key_form import FormAnswers, KeyForm
+    from app.platforms.channel import Channel
 
 EMPTY_MARKER: Final[str] = ""
 # Шаги, сбой которых не отменяет эфир (ТЗ §7.4 п.4); тексты — в messages_ru.
@@ -95,6 +104,27 @@ class Decision(str, Enum):
     TOO_LATE = "too_late"      # до старта меньше min_lead_minutes — эфир не трогаем
     AMBIGUOUS = "ambiguous"    # несколько эфиров без маркера на эту минуту
     ERROR = "error"            # площадка не ответила по каналу
+    NOT_ADMITTED = "not_admitted"   # не допущен к публикации: канал не подтверждён или форма его не примет
+
+
+class AdmissionKind(str, Enum):
+    CHANNEL = "channel"                  # канал не READY
+    FORM_UNREADABLE = "form_unreadable"  # форма не прочиталась
+    FORM_FIELD = "form_field"            # в форме нет варианта или обязательный вопрос без ответа
+
+
+@dataclass(frozen=True)
+class AdmissionReason:
+    """Почему объект не допущен к публикации. text — для владельца, без оформления (его делает отчёт):
+
+    FORM_FIELD — «вопрос: значение» (MissingAnswer.text); FORM_UNREADABLE — сообщение FormError;
+    CHANNEL — короткая причина по статусу; полный текст отказа канала остаётся в объекте Channel.
+    """
+
+    kind: AdmissionKind
+    code: str            # статус канала / код FormError / missingOption / requiredMissing
+    field: str | None    # поле пакета (form.fields) или None
+    text: str
 
 
 @dataclass(frozen=True)
@@ -260,6 +290,14 @@ class PlannedBroadcast:
     stream_key: str | None = None
     should_send_key: bool = False  # ключ должен дойти до стримера в этом запуске (require_key_delivery)
 
+    # --- объекты запуска и допуск (admit). channel_object в production передаётся всегда;
+    # None — только тесты без ChannelBook. key_form None — отправитель формы не проверяет (тесты, Noop).
+    channel_object: Channel | None = None
+    key_form: KeyForm | None = None
+    form_failure: FormError | None = None
+    form_answers: FormAnswers | None = None            # текущие ответы формы этого объекта
+    admission_reasons: tuple[AdmissionReason, ...] = ()
+
     # --- форма и сбои этого запуска
     is_form_sent: bool = False
     form_sent_at: datetime | None = None
@@ -297,6 +335,67 @@ class PlannedBroadcast:
         if self.found is None:
             return None
         return broadcast_url_for(self.channel, self.found.broadcast_id)
+
+    @property
+    def is_admitted(self) -> bool:
+        """Объект, построенный напрямую (тесты), допущен: причины появляются только в admit."""
+        return not self.admission_reasons
+
+    def admit(self, channel_object: Channel | None, key_form: KeyForm | None, form_failure: FormError | None) -> None:
+        """Единственное место правила допуска: канал → форма не прочиталась → незаполненные поля формы.
+
+        Ключ и адрес потока до публикации неизвестны — «ожидаются», причиной не считаются.
+        too_late допуск не проходит (у него свой путь только на чтение): поля заполняются, причин нет.
+        """
+        self.channel_object = channel_object
+        self.key_form = key_form
+        self.form_failure = form_failure
+        self.form_answers = self._answers(stream_key=None, stream_url=None)
+        if self.is_too_late:
+            self.admission_reasons = ()
+            return
+        reasons: list[AdmissionReason] = []
+        if channel_object is not None and channel_object.status is not ChannelStatus.READY:
+            status: str = channel_object.status.value
+            reasons.append(AdmissionReason(AdmissionKind.CHANNEL, status, None, msg.ADMISSION_CHANNEL_TEXT[status]))
+        if form_failure is not None:
+            reasons.append(AdmissionReason(AdmissionKind.FORM_UNREADABLE, form_failure.code, None, form_failure.message))
+        if self.form_answers is not None:
+            reasons.extend(
+                AdmissionReason(AdmissionKind.FORM_FIELD, missing.code, missing.field or None, missing.text)
+                for missing in self.form_answers.missing
+            )
+        self.admission_reasons = tuple(reasons)
+        if reasons:
+            self.decision = Decision.NOT_ADMITTED
+
+    def refresh_form_answers(self) -> FormAnswers | None:
+        """Ответы формы с ключом и адресом, которые объект уже взял с площадки."""
+        self.form_answers = self._answers(stream_key=self.stream_key, stream_url=self.stream_url)
+        return self.form_answers
+
+    def _answers(self, *, stream_key: str | None, stream_url: str | None) -> FormAnswers | None:
+        if self.key_form is None:
+            return None
+        return self.key_form.answers(
+            language=self.language,
+            start=self.slot.start,
+            account_name=self.account_name,
+            stream_key=stream_key,
+            stream_url=stream_url,
+        )
+
+    @property
+    def is_key_ready_to_send(self) -> bool:
+        """Ключ должен уйти, он есть, форма его ещё не подтвердила и ответы полные.
+
+        Без объекта формы (тестовые отправители) полноту ответа решает сам отправитель.
+        """
+        if not self.should_send_key or not self.stream_key or self.is_form_sent:
+            return False
+        if self.key_form is None:
+            return True
+        return self.form_answers is not None and self.form_answers.is_complete
 
     def take_new_key(self, created: CreatedBroadcast) -> None:
         """Ключ получен в этом запуске: эфир создан или поток привязан — стример этого ключа не видел."""

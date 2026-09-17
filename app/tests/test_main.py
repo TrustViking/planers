@@ -100,7 +100,7 @@ def test_run_without_flags_is_the_full_cycle(
     out: str = capsys.readouterr().out
     lines: list[str] = out.splitlines()
     assert re.fullmatch(rf"Planer {re.escape(APP_VERSION)} — \d{{2}}-\d{{2}}-\d{{4}} \d{{2}}:\d{{2}}", lines[0])
-    assert lines.count("Итог: опубликовано 1, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0") == 1
+    assert lines.count("Итог: опубликовано 1, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0") == 1
     assert sum(1 for line in lines if line.startswith("Planer ")) == 1          # шапка одна на прогон
     assert f"  {UA} {UA_HANDLE} ({UA_GOOGLE})" in lines
     assert "    01-01-2099  19:00  uk  ****-0000  передан в форму" in lines
@@ -135,14 +135,15 @@ def test_full_run_prints_title_then_progress_then_blank_line_then_total(
         "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(**RU_NAMES, count=0),
         "  " + msg.PROGRESS_CHANNEL_READ_STARTED.format(**UA_NAMES),
         "  " + msg.PROGRESS_CHANNEL_READ_DONE.format(**UA_NAMES, count=0),
+        # по объекту: создан — и сразу его ключ в форму, затем следующий объект
         "  " + msg.PROGRESS_BROADCAST_CREATE.format(**RU_NAMES, date="01-01-2099", time="19:00", language="ru"),
-        "  " + msg.PROGRESS_BROADCAST_CREATE.format(**UA_NAMES, date="01-01-2099", time="19:00", language="uk"),
         "  " + msg.PROGRESS_KEY_SEND.format(**RU_NAMES, date="01-01-2099", time="19:00", language="ru"),
+        "  " + msg.PROGRESS_BROADCAST_CREATE.format(**UA_NAMES, date="01-01-2099", time="19:00", language="uk"),
         "  " + msg.PROGRESS_KEY_SEND.format(**UA_NAMES, date="01-01-2099", time="19:00", language="uk"),
         "  " + msg.PROGRESS_REPORT,
     ]
     assert lines[1 : 1 + len(progress)] == progress
-    total: int = lines.index("Итог: опубликовано 2, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0")
+    total: int = lines.index("Итог: опубликовано 2, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0")
     assert total == len(progress) + 2 and lines[total - 1] == ""
 
 
@@ -164,7 +165,7 @@ def test_dry_run_prints_channel_and_package_progress_but_no_actions(
     assert "  " + msg.PROGRESS_PACKAGES_READ.format(packages=1, slots_total=1, slots_mine=1) in lines
     assert not [line for line in lines if "создаю эфир" in line or "исправляю эфир" in line or "отправляю ключ" in line]
     assert lines.index("  " + msg.PROGRESS_REPORT) < lines.index(
-        "Итог: опубликуем 1, исправим 0, уже стояло 0, не публиковали 0, ошибок 0"
+        "Итог: опубликуем 1, исправим 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0"
     )
 
 
@@ -327,7 +328,10 @@ def test_channel_handle_mismatch_fails_only_that_channel(
     assert not (planer_root / "secrets" / f"{UA_HANDLE}.token.json").exists()   # чужой токен удалён при старте
     assert fake_platform_in_main.logins == [UA_KEY, UA_KEY]
     assert f"  {RU} {RU_HANDLE} ({RU_GOOGLE})" in lines
-    assert "  ошибка: 01-01-2099 19:00 uk -> Канал UA @KanalUA — YouTube: channelHandleMismatch (" in out
+    # полный текст отказа — один раз на канал; объект канала — коротко во «Внимание»
+    assert sum(1 for line in lines if line.startswith("  ошибка: Канал UA @KanalUA — YouTube: channelHandleMismatch (")) == 1
+    assert "  не допущено: 01-01-2099 19:00 uk -> Канал UA @KanalUA — не тот канал; " + msg.NOT_ADMITTED_TAIL_CHANNEL in lines
+    assert "не допущено 1" in lines[lines.index(next(line for line in lines if line.startswith("Итог: ")))]
     assert [call.channel_id for call in fake_platform_in_main.created] == [RU_KEY]
     assert not (planer_root / "app").exists()                          # файлов привязок больше нет
 
@@ -347,7 +351,7 @@ def test_dry_run_on_valid_package(
     assert run_cli(["--dry-run"]) == 0
     captured = capsys.readouterr()
     assert "dry-run" in captured.out.splitlines()[0]
-    assert "Итог: опубликуем 2, исправим 0, уже стояло 0, не публиковали 0, ошибок 0" in captured.out
+    assert "Итог: опубликуем 2, исправим 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0" in captured.out
     assert "ОПУБЛИКУЕМ (2)" in captured.out and "КЛЮЧИ СТРИМЕРУ" not in captured.out
     # каналы — в порядке channels.json: сначала UA, потом RU
     assert captured.out.index(f"  {UA} {UA_HANDLE} ({UA_GOOGLE})") < captured.out.index(

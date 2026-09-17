@@ -13,7 +13,7 @@ from app.output.keys_file import (
     write_keys_file,
 )
 from app.paths import PlanerPaths
-from app.pipeline.plan import PlannedBroadcast
+from app.pipeline.plan import AdmissionKind, AdmissionReason, PlannedBroadcast
 from app.pipeline.reconciler import MarkedBroadcast, MarkerParts
 from app.platforms.base import CreatedBroadcast, StreamInfo, UpcomingBroadcast
 from app.tests.conftest import build_planned, build_slot
@@ -29,7 +29,8 @@ TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенериров
 # Строка «форма»:
 #   «отправлен в форму» — ключ у стримера;
 #   «в этом запуске в форму не отправлялся» — эфир уже стоял, ключ уходил раньше;
-#   «НЕ отправлен» — передайте ключ стримеру вручную.
+#   «НЕ отправлен» — передайте ключ стримеру вручную;
+#   «НЕ отправлен: не допущено» — форма этот эфир не принимает (нет даты или варианта) или канал не подтверждён: эфир стоит, ключ стримеру не передан — передайте вручную.
 
 16-09-2026 19:00  uk  Канал UA @КаналUA
   ключ   xxxx-xxxx-xxxx-xxxx-xxxx
@@ -164,19 +165,40 @@ def test_key_is_the_first_line_of_each_block() -> None:
     assert all(len(line) <= 80 for line in lines[header + 1 :])
 
 
+def _not_admitted(day: int, hour: int, language: str, channel: ChannelConfig, broadcast_id: str, key: str) -> PlannedBroadcast:
+    """Эфир стоит на канале, но форма его не принимает: нет варианта даты."""
+    item: PlannedBroadcast = _found_key(day, hour, language, channel, broadcast_id, key)
+    item.admission_reasons = (
+        AdmissionReason(AdmissionKind.FORM_FIELD, "missingOption", "date", "Время стрима ( Stream time ): 18.09.2026"),
+    )
+    return item
+
+
+def test_not_admitted_key_says_why_it_was_not_sent() -> None:
+    item: PlannedBroadcast = _not_admitted(18, 20, "en", UA, "qJjIZCbP89s", "wwww-wwww-wwww-wwww-wwww")
+    assert form_status_text(item) == (
+        "НЕ отправлен: не допущено — в форме нет варианта «Время стрима ( Stream time ): 18.09.2026» "
+        "— нужен владельцу формы"
+    )
+    row = key_row_from_planned(item)
+    assert (row.stream_key, row.broadcast_url) == ("wwww-wwww-wwww-wwww-wwww", "https://www.youtube.com/watch?v=qJjIZCbP89s")
+
+
 def test_header_quotes_the_real_form_lines() -> None:
-    """Тексты в кавычках шапки — ровно начала строк «форма», которые пишет файл, во всех трёх состояниях."""
+    """Тексты в кавычках шапки — ровно начала строк «форма», которые пишет файл, во всех четырёх состояниях."""
     sent: PlannedBroadcast = _new_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
     sent.is_form_sent = True
     sent.form_sent_at = datetime(2026, 9, 13, 12, 0)
     failed: PlannedBroadcast = _new_key(16, 21, "ru", RU, "def456", "yyyy-yyyy-yyyy-yyyy-yyyy")
     failed.last_error = "transportFailed: HTTP 503"
     kept: PlannedBroadcast = _found_key(17, 19, "uk", UA, "ghi789", "zzzz-zzzz-zzzz-zzzz-zzzz")
-    text: str = render_keys_file([key_row_from_planned(item) for item in (sent, kept, failed)], "13-09-2026 12:00")
+    blocked: PlannedBroadcast = _not_admitted(18, 20, "en", UA, "jkl012", "wwww-wwww-wwww-wwww-wwww")
+    items = (sent, kept, failed, blocked)
+    text: str = render_keys_file([key_row_from_planned(item) for item in items], "13-09-2026 12:00")
     lines: list[str] = text.splitlines()
     quoted: list[str] = [line.split("«")[1].split("»")[0] for line in lines[: len(msg.KEYS_FILE_HEADER)][3:]]
     form_values: list[str] = [line.removeprefix("  форма  ") for line in lines if line.startswith("  форма  ")]
-    assert len(quoted) == len(form_values) == 3
-    # блоки идут по дате, шапка — по состояниям: каждой цитате ровно одна строка и наоборот
-    assert sorted(lead for lead in quoted for value in form_values if value.startswith(lead)) == sorted(quoted)
-    assert all(any(value.startswith(lead) for lead in quoted) for value in form_values)
+    assert len(quoted) == len(form_values) == 4
+    # каждой строке «форма» — ровно одна цитата шапки (самая длинная подходящая) и наоборот
+    matched: list[str] = [max((lead for lead in quoted if value.startswith(lead)), key=len) for value in form_values]
+    assert sorted(matched) == sorted(quoted)

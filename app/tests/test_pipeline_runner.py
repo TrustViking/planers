@@ -18,6 +18,8 @@ from app.output.console import render_console
 from app.pipeline.plan import ChangedField, Decision, PlannedBroadcast
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.form.base import FORM_CODE_NOT_CONFIRMED, FormSendResult
+from app.form.discovery import FormDiscovery, FormStructure
+from app.form.key_form import KeyForm
 from app.platforms.base import (
     PLACEHOLDER_TOKEN,
     BroadcastFacts,
@@ -26,9 +28,11 @@ from app.platforms.base import (
     VideoFixes,
     picture_sha,
 )
+from app.platforms.channel import Channel, ChannelStatus
 from app.platforms.fake import FakePlatform
 from app.output.progress import BroadcastStep
-from app.tests.conftest import FORM_SPEC, FakeFormSender, RecordingProgress
+from app.tests.conftest import FORM_SPEC, FakeFormSender, RecordingProgress, build_form_spec
+from app.tests.test_form_discovery import _FakeResponse, _FakeSession, build_html, build_payload, default_items
 from app.ui import messages_ru as msg
 
 PackageFactory = Callable[..., Path]
@@ -48,6 +52,10 @@ class _PartialFormSender:
 
     def prepare(self, forms: Sequence[FormSpec]) -> None:
         """Формы в этом тесте не читаются."""
+
+    def form_for(self, spec: FormSpec) -> None:
+        """Форма не проверяется: объекты допускаются без неё."""
+        return None
 
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         self.calls.append(planned.slot_id)
@@ -999,7 +1007,7 @@ def test_full_run_reports_progress_in_step_order(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    """Пакеты → чтение каналов → создание и исправление → ключи в форму → отчёт; числа — как в «Пакетах» отчёта."""
+    """Пакеты → чтение каналов → по объекту: действие и сразу его ключ → отчёт; числа — как в «Пакетах» отчёта."""
     ru_spec: dict[str, Any] = make_slot("18-03-2027", "19:00", "ru")
     make_package(
         planer_paths.bcast_dir,
@@ -1021,8 +1029,8 @@ def test_full_run_reports_progress_in_step_order(
         ("channel_read_started", "yt_ru"),
         ("channel_read_done", "yt_ru", 1),
         ("broadcast_step_started", UK_SLOT, "yt_ua", BroadcastStep.CREATE),
-        ("broadcast_step_started", "18-03-2027_1900_ru", "yt_ru", BroadcastStep.FIX),
         ("key_send_started", UK_SLOT, "yt_ua"),
+        ("broadcast_step_started", "18-03-2027_1900_ru", "yt_ru", BroadcastStep.FIX),
         ("key_send_started", "18-03-2027_1900_ru", "yt_ru"),
         ("report_started",),
     ]
@@ -1223,6 +1231,15 @@ class _LoginPhase:
                 self._platform.describe_channel(channel, allow_login=True)
                 self._platform.keep_login(channel)
 
+    def channel(self, config: ChannelConfig) -> Channel:
+        return _channel_object(config, ChannelStatus.READY)
+
+
+def _channel_object(config: ChannelConfig, status: ChannelStatus, error: PlatformError | None = None) -> Channel:
+    channel: Channel = Channel(config=config, token_file=Path(f"{config.handle}.token.json"), status=status)
+    channel.error = error
+    return channel
+
 
 def test_logins_happen_before_any_channel_is_listed(
     planer_paths: PlanerPaths,
@@ -1266,6 +1283,8 @@ def test_channel_without_login_after_the_phase_is_an_error_not_a_browser(
     fake_platform.tokens_missing = {"yt_ua"}
     fake_platform.fail_login["yt_ua"] = PlatformError("authFailed", "flow_failed: browser closed")
 
+    failure: PlatformError = PlatformError("authFailed", "flow_failed: browser closed")
+
     class _FailingPhase:
         def log_in_needed(self, channels: Sequence[ChannelConfig]) -> None:
             for channel in channels:
@@ -1274,13 +1293,25 @@ def test_channel_without_login_after_the_phase_is_an_error_not_a_browser(
                     with pytest.raises(PlatformError):
                         fake_platform.describe_channel(channel, allow_login=True)
 
+        def channel(self, config: ChannelConfig) -> Channel:
+            if config.key in fake_platform.tokens_missing:
+                return _channel_object(config, ChannelStatus.FAILED, failure)
+            return _channel_object(config, ChannelStatus.READY)
+
     outcome: RunOutcome = run(
         RunMode.FULL, make_config(), planer_paths, fake_platform, FakeFormSender(), now, rng, logins=_FailingPhase()
     )
     assert fake_platform.logins == ["yt_ua"]                      # один вход — в фазе, не в сверке
-    assert outcome.report is not None
+    assert fake_platform.list_calls == ["yt_ru"]                  # к каналу без входа площадка не спрашивается
+    assert outcome.report is not None and outcome.exit_code == ExitCode.ERRORS
     errors = [item for item in outcome.report.outcomes if item.kind is OutcomeKind.ERROR]
-    assert [item.account_name for item in errors] == ["yt_ua"]
+    assert [(item.account_name, item.date, item.error.code if item.error else None) for item in errors] == [
+        ("yt_ua", None, "authFailed")                             # полный текст — один раз на канал
+    ]
+    not_admitted = [item for item in outcome.report.outcomes if item.kind is OutcomeKind.NOT_ADMITTED]
+    assert [(item.account_name, item.admission_texts) for item in not_admitted] == [
+        ("yt_ua", (msg.ADMISSION_CHANNEL_TEXT["failed"],))
+    ]
     assert [call.channel_id for call in fake_platform.created] == ["yt_ru"]
 
 
@@ -1315,3 +1346,187 @@ def test_status_logs_in_every_channel_first(
     run(RunMode.STATUS, make_config(), planer_paths, fake_platform, sender, now, rng, logins=logins)
     assert logins.phases == [(["yt_ua", "yt_ru"], 0)]
     assert sender.prepared == []                                   # в --status форм нет
+
+
+# --- допуск к публикации и ключ сразу после действий (живой прогон 17-09-2026 01:08)
+
+NICK_KEY: str = "nick"
+NICK_CONFIG_CHANNELS: tuple[tuple[str, list[str]], ...] = ((NICK_KEY, ["en"]),)
+
+
+def _form_with_dates(tmp_path: Path, *dates: str) -> KeyForm:
+    """Тренировочная форма в разметке FB_PUBLIC_LOAD_DATA_, в «Время стрима» — только эти даты."""
+    items: list[Any] = default_items()
+    items[2][4][0][1] = [[f"{date} Дата стрима (время стрима указано в объявлении)"] for date in dates]
+    session: _FakeSession = _FakeSession(_FakeResponse(build_html(build_payload(items))))
+    structure: FormStructure = FormDiscovery(session, tmp_path / "form", datetime(2027, 3, 16, 12, 0)).structure(
+        FORM_SPEC["url"]
+    )
+    return KeyForm.build(build_form_spec(), structure)
+
+
+def _nick_slots(make_slot: SlotFactory) -> list[dict[str, Any]]:
+    return [
+        make_slot("17-03-2027", "19:00", "en"),
+        make_slot("18-03-2027", "20:00", "en"),
+        make_slot("17-03-2027", "21:00", "en"),
+    ]
+
+
+def test_slot_without_date_in_form_is_not_published_and_keys_go_right_after_actions(
+    tmp_path: Path,
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    make_package(planer_paths.bcast_dir, slots=_nick_slots(make_slot))
+    sender: FakeFormSender = FakeFormSender(platform=fake_platform, key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(NICK_CONFIG_CHANNELS), planer_paths, fake_platform, sender, now, rng
+    )
+    assert [call.marker for call in fake_platform.created] == ["17-03-2027_1900_en", "17-03-2027_2100_en"]
+    assert [call.slot_id for call in sender.calls] == ["17-03-2027_1900_en", "17-03-2027_2100_en"]
+    assert sender.sent_after_created == [1, 2]      # ключ каждого — до действий по следующему объекту
+    assert outcome.exit_code == ExitCode.ERRORS
+    assert outcome.report is not None
+    [blocked] = [item for item in outcome.report.outcomes if item.kind is OutcomeKind.NOT_ADMITTED]
+    assert (blocked.date, blocked.time, blocked.form) == ("18-03-2027", "20:00", None)
+    text: str = _report_text(outcome)
+    assert "## Не допущено к публикации (1)" in text
+    assert (
+        "- 18-03-2027 20:00 en -> nick @nick — в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» "
+        "— нужен владельцу формы; эфира на канале нет"
+    ) in text.splitlines()
+    assert text.index("## Не допущено к публикации") < text.index("## Создано")
+    assert "## Ошибки" not in text
+    assert "18-03-2027" not in planer_paths.keys_file.read_text(encoding="utf-8")   # эфира нет — и ключа нет
+
+
+def test_existing_broadcast_of_a_not_admitted_slot_keeps_its_key_out_of_the_form(
+    tmp_path: Path,
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    """Запуск 01:18: эфир 18-03 уже стоит — ключ в keys.txt с причиной, в форму ничего, ничего не правится."""
+    make_package(planer_paths.bcast_dir, slots=_nick_slots(make_slot))
+    fake_platform.seed_broadcast(
+        NICK_KEY, datetime.fromisoformat("2027-03-18T20:00:00+02:00"), "Другое название", "",
+        marker="18-03-2027_2000_en", stream_key=PLATFORM_KEY,
+    )
+    sender: FakeFormSender = FakeFormSender(platform=fake_platform, key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(NICK_CONFIG_CHANNELS), planer_paths, fake_platform, sender, now, rng
+    )
+    assert "18-03-2027_2000_en" not in [call.slot_id for call in sender.calls]
+    assert fake_platform.updated == [] and "fakebc00001" not in fake_platform.settings_calls
+    assert "fakebc00001" not in fake_platform.facts_calls
+    keys: str = planer_paths.keys_file.read_text(encoding="utf-8")
+    block: str = keys.split("18-03-2027 20:00  en  nick @nick\n", 1)[1].split("\n\n", 1)[0]
+    assert f"  ключ   {PLATFORM_KEY}" in block
+    assert (
+        "  форма  НЕ отправлен: не допущено — в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» "
+        "— нужен владельцу формы"
+    ) in block
+    assert "эфир на канале: https://www.youtube.com/watch?v=fakebc00001" in _report_text(outcome)
+    assert outcome.report is not None
+    console: str = render_console(outcome.report, root=planer_paths.root)
+    assert (
+        "  не допущено: 18-03-2027 20:00 en -> nick @nick — в форме нет варианта «Время стрима ( Stream time ): "
+        "18.03.2027» — нужен владельцу формы; эфир на канале есть — ключ стримеру не передан"
+    ) in console.splitlines()
+    assert "не допущено 1" in console.splitlines()[0]
+
+
+def test_failed_send_of_one_object_does_not_stop_the_next(
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    make_package(
+        planer_paths.bcast_dir,
+        slots=[make_slot("17-03-2027", "19:00", "en"), make_slot("17-03-2027", "21:00", "en")],
+    )
+    sender: _PartialFormSender = _PartialFormSender("17-03-2027_2100_en")
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(NICK_CONFIG_CHANNELS), planer_paths, fake_platform, sender, now, rng
+    )
+    assert len(fake_platform.created) == 2
+    assert sender.calls == ["17-03-2027_1900_en", "17-03-2027_2100_en"]
+    assert outcome.exit_code == ExitCode.ERRORS                 # первый ключ не дошёл
+    keys: str = planer_paths.keys_file.read_text(encoding="utf-8")
+    assert "форма  НЕ отправлен: форма не подтвердила" in keys and "форма  отправлен в форму" in keys
+
+
+def test_incomplete_answers_after_publication_skip_the_post(
+    tmp_path: Path,
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Адреса потока нет среди вариантов формы: эфир создан, POST нет, причина — в keys.txt."""
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "en")])
+    form: KeyForm = _form_with_dates(tmp_path, "17.03.2027")
+    url_question = form.questions["stream_url"]
+    assert url_question is not None
+    other_urls = replace(url_question, options=("rtmp://x.rtmp.youtube.com/live2/",))
+    form = replace(form, questions={**form.questions, "stream_url": other_urls})
+    sender: FakeFormSender = FakeFormSender(key_form=form)
+    with caplog.at_level("WARNING"):
+        outcome: RunOutcome = run(
+            RunMode.FULL, make_config(NICK_CONFIG_CHANNELS), planer_paths, fake_platform, sender, now, rng
+        )
+    assert len(fake_platform.created) == 1 and sender.calls == []
+    assert any(message.startswith("form_send_skipped slot_id=17-03-2027_1900_en") for message in caplog.messages)
+    assert outcome.exit_code == ExitCode.ERRORS
+    assert "НЕ отправлен: в форме нет нужного варианта ответа" in planer_paths.keys_file.read_text(encoding="utf-8")
+
+
+def test_dry_run_shows_admission_and_sends_nothing(
+    tmp_path: Path,
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    make_package(planer_paths.bcast_dir, slots=_nick_slots(make_slot))
+    sender: FakeFormSender = FakeFormSender(key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    with caplog.at_level("INFO"):
+        outcome: RunOutcome = run(
+            RunMode.DRY_RUN, make_config(NICK_CONFIG_CHANNELS), planer_paths, fake_platform, sender, now, rng
+        )
+    assert sender.calls == [] and fake_platform.created == []
+    assert outcome.report is not None and outcome.exit_code == ExitCode.ERRORS
+    kinds = [item.kind for item in outcome.report.outcomes]
+    assert kinds.count(OutcomeKind.NOT_ADMITTED) == 1 and kinds.count(OutcomeKind.CREATED) == 2
+    assert "Итог: опубликуем 2, исправим 0, уже стояло 0, не допущено 1," in _report_text(outcome)
+    assert "slot_not_admitted slot_id=18-03-2027_2000_en" in "\n".join(caplog.messages)
+    assert any(
+        message.startswith(
+            'slot_not_admitted_reason slot_id=18-03-2027_2000_en channel="nick" handle=@nick '
+            "kind=form_field code=missingOption field=date"
+        )
+        for message in caplog.messages
+    )
+    assert sum(1 for message in caplog.messages if message.startswith("slot_admitted ")) == 2

@@ -2,6 +2,8 @@
 
 Журнал сверка не видит: решение и ключ найденного эфира — только по ответу площадки.
 Объект too_late сверяется только на чтение: опознание и ключ, решение остаётся TOO_LATE.
+Не допущенный объект (PlannedBroadcast.admit): канал не READY — к площадке по этому каналу не обращаемся
+вовсе, объекты остаются NOT_ADMITTED; канал READY, не допущен по форме — только опознание и ключ, как too_late.
 Решения и найденные данные записываются в сами объекты; наружу отдаются только эфиры,
 у которых есть маркер планера, но нет соответствующего слота (сироты, §12 п.4).
 Маркер планера — slot_id в названии привязанного потока. Поток с другим названием
@@ -34,6 +36,7 @@ from app.pipeline.plan import (
     PlannedBroadcast,
     to_minute,
 )
+from app.platforms.channel import Channel, ChannelStatus
 from app.platforms.base import (
     BroadcastPlatform,
     PlatformError,
@@ -132,6 +135,21 @@ def _group_by_channel(
     return list(groups.values())
 
 
+def _first_channel_object(items: Sequence[PlannedBroadcast]) -> Channel | None:
+    """У всех объектов одного канала — один объект канала."""
+    return next((item.channel_object for item in items if item.channel_object is not None), None)
+
+
+def _is_channel_not_ready(items: Sequence[PlannedBroadcast]) -> bool:
+    channel_object: Channel | None = _first_channel_object(items)
+    return channel_object is not None and channel_object.status is not ChannelStatus.READY
+
+
+def _channel_status(items: Sequence[PlannedBroadcast]) -> str:
+    channel_object: Channel | None = _first_channel_object(items)
+    return channel_object.status.value if channel_object is not None else "-"
+
+
 class Reconciler:
     """list_upcoming — ровно раз на канал; get_stream кешируется по (channel.key, stream_id).
 
@@ -181,19 +199,28 @@ class Reconciler:
         items: list[PlannedBroadcast],
         slot_ids: frozenset[str],
     ) -> list[OrphanBroadcast]:
+        if _is_channel_not_ready(items):
+            LOGGER.info(
+                'channel_skipped_not_ready channel="%s" handle=%s status=%s planned=%d',
+                channel.account_name,
+                channel.handle,
+                _channel_status(items),
+                len(items),
+            )
+            return []
         try:
             broadcasts: list[UpcomingBroadcast] = self._list_upcoming(channel)
         except PlatformError as error:
             LOGGER.warning('channel_unavailable channel="%s" handle=%s code=%s planned=%d', channel.account_name, channel.handle, error.code, len(items))
             for item in items:
-                if item.is_too_late:
-                    continue      # решения у него нет: ключа просто не будет, ошибкой это не считается
+                if item.is_too_late or not item.is_admitted:
+                    continue      # решения нет: ключа просто не будет; не допущенный остаётся NOT_ADMITTED
                 item.decision = Decision.ERROR
                 item.error = _platform_error(channel, error)
             return []
         placeholders: frozenset[str] = self._channel_placeholders(channel, broadcasts)
         for item in items:
-            if item.is_too_late:
+            if item.is_too_late or not item.is_admitted:
                 self._read_key_only(item, broadcasts)
             else:
                 self._decide(item, broadcasts, placeholders)
@@ -267,7 +294,7 @@ class Reconciler:
         item.decision = Decision.UPDATE if item.changed_fields else Decision.MATCH
 
     def _read_key_only(self, item: PlannedBroadcast, broadcasts: list[UpcomingBroadcast]) -> None:
-        """too_late: только опознать эфир и взять его ключ; не нашёлся — ключа нет, решение прежнее."""
+        """too_late и не допущенный: только опознать эфир и взять ключ; решение прежнее, AMBIGUOUS не ставится."""
         pick: CandidatePick = self._find(item, broadcasts)
         if pick.is_ambiguous or pick.broadcast is None or pick.stream is None:
             return

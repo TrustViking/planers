@@ -4,7 +4,7 @@
 итоговый текст отсюда начинается со строки «Итог».
 
 У каждой поверхности свой читатель: консоль — блоки без markdown, отчёт в logs\\ — подробности,
-лог — диагностика для разработки. Порядок блоков: ВНИМАНИЕ, ОПУБЛИКОВАЛИ, ИСПРАВИЛИ, КЛЮЧИ СТРИМЕРУ,
+лог — диагностика для разработки. Не допущенные к публикации объекты — строками ВНИМАНИЕ. Порядок блоков: ВНИМАНИЕ, ОПУБЛИКОВАЛИ, ИСПРАВИЛИ, КЛЮЧИ СТРИМЕРУ,
 УЖЕ СТОЯЛО, НЕ ПУБЛИКОВАЛИ; пустой блок не печатается, нули видны в строке «Итог» (build_totals).
 Эфиры группируются по каналу в порядке channels.json; ключ в консоли — только маской, полный — в keys.txt
 (путь к нему — один раз, в подвале). В ИСПРАВИЛИ — только тексты эфира; настройки с «было/стало» — во ВНИМАНИЕ.
@@ -31,6 +31,7 @@ from app.output.report import (
     RunTotals,
     SkipKind,
     SkippedLine,
+    admission_reasons_text,
     build_totals,
     channel_text,
     display_path,
@@ -77,6 +78,7 @@ def render_console(
             matched=totals.matched,
             skipped=totals.skipped,
             errors=totals.errors,
+            not_admitted=totals.not_admitted,
         ),
     ]
     _append_block(lines, _rule(msg.CONSOLE_BLOCK_ATTENTION), _attention_lines(report))
@@ -270,12 +272,32 @@ def _attention_lines(report: RunReport) -> list[str]:
         for outcome in report.outcomes
         if outcome.form is FormState.FAILED
     )
+    lines.extend(_not_admitted_lines(report))
     lines.extend(msg.CONSOLE_ATTENTION_PACKAGE.format(text=text) for text in package_problem_texts(report))
     if report.notice:
         lines.append(msg.CONSOLE_ATTENTION_TEXT.format(text=report.notice))
     lines.extend(_restored_lines(report))
     lines.extend(msg.CONSOLE_ATTENTION_TEXT.format(text=text) for text in report.run_warnings)
     return lines
+
+
+def _not_admitted_lines(report: RunReport) -> list[str]:
+    """Строка на не допущенный объект: коротко по сути; полный отказ канала — строкой ошибки выше, один раз."""
+    return [
+        msg.CONSOLE_ATTENTION_NOT_ADMITTED.format(
+            prefix=outcome_prefix(outcome),
+            reasons=admission_reasons_text(outcome),
+            tail=_not_admitted_tail(outcome),
+        )
+        for outcome in report.outcomes
+        if outcome.kind is OutcomeKind.NOT_ADMITTED
+    ]
+
+
+def _not_admitted_tail(outcome: PairOutcome) -> str:
+    if not outcome.is_channel_ready:
+        return msg.NOT_ADMITTED_TAIL_CHANNEL
+    return msg.CONSOLE_NOT_ADMITTED_TAIL_KEY if outcome.stream_key else msg.CONSOLE_NOT_ADMITTED_TAIL_NO_KEY
 
 
 def _restored_lines(report: RunReport) -> list[str]:

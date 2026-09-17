@@ -127,3 +127,10 @@ def test_required_question_without_answer(structure: FormStructure) -> None:
         (FORM_CODE_REQUIRED_MISSING, "Название канала ( Channel name)")
     ]
     assert FIELD_STREAM_KEY not in {item.field for item in answers.missing}
+
+
+def training_key_form(tmp_path: Path) -> KeyForm:
+    """Настоящая тренировочная форма (сохранённая страница) — для тестов допуска объектов."""
+    session: _FakeSession = _FakeSession(_FakeResponse(PAGE))
+    structure: FormStructure = FormDiscovery(session, tmp_path, datetime(2026, 9, 13, 12, 0)).structure(SHORT_URL)
+    return KeyForm.build(build_form_spec(), structure)

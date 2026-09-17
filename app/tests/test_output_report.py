@@ -46,7 +46,7 @@ STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 # Пример из ТЗ §5.6: итог и ошибки сверху, справка ниже, пустых разделов нет.
 TZ_SAMPLE_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 13-09-2026 12:00
 
-Итог: опубликовано 2, исправлено 1, уже стояло 1, не публиковали 3, ошибок 1. Файл ключей: keystreams\\keys.txt
+Итог: опубликовано 2, исправлено 1, уже стояло 1, не допущено 0, не публиковали 3, ошибок 1. Файл ключей: keystreams\\keys.txt
 
 ## Ключ не дошёл до стримера
 - 18-09-2026 19:00 uk -> Канал UA — форма не подтвердила запись ответа (notConfirmed); эфир на канале стоит — передайте ключ стримеру из keys.txt вручную
@@ -76,13 +76,13 @@ TZ_SAMPLE_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 13-09-2026 12:
 
 EMPTY_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00
 
-Итог: опубликовано 0, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0.
+Итог: опубликовано 0, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0.
 """
 
 DRY_RUN_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00 (dry-run)
 Внимание: Площадка — заглушка
 
-Итог: опубликуем 1, исправим 0, уже стояло 0, не публиковали 0, ошибок 0.
+Итог: опубликуем 1, исправим 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0.
 
 ## Создано (1)
 - 17-03-2027 19:00 uk -> Test UA — эфира нет, будет создан — не выполнено (dry-run)
@@ -218,7 +218,7 @@ def test_matched_fixed_ambiguous_and_planer_error_texts() -> None:
     assert "несколько эфиров на эту минуту без маркера планера" in text
     assert "у найденного эфира нет привязанного потока" in text
     assert "журнал" not in text and "повторная отправка" not in text and "создан заново" not in text
-    assert text.splitlines()[2] == "Итог: опубликовано 1, исправлено 1, уже стояло 1, не публиковали 0, ошибок 2."
+    assert text.splitlines()[2] == "Итог: опубликовано 1, исправлено 1, уже стояло 1, не допущено 0, не публиковали 0, ошибок 2."
     assert "✅" not in text and "❌" not in text
 
 
@@ -268,7 +268,7 @@ def test_not_delivered_section_only_when_form_failed() -> None:
         ],
     )
     lines: list[str] = render_report(failed).splitlines()
-    assert lines[2] == "Итог: опубликовано 2, исправлено 0, уже стояло 0, не публиковали 0, ошибок 0."
+    assert lines[2] == "Итог: опубликовано 2, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0."
     assert lines[4] == "## Ключ не дошёл до стримера"
     assert lines[5].startswith("- 18-03-2027 19:00 uk -> Test UA — в форме нет нужного варианта ответа (18.03.2027)")
     assert "## Создано (2)" in lines
@@ -302,6 +302,7 @@ def test_totals_are_counted_once_for_report_and_console() -> None:
             _slot_outcome(OutcomeKind.STREAM_ATTACHED, form=FormState.FAILED),
             _slot_outcome(OutcomeKind.MATCHED),
             _slot_outcome(OutcomeKind.NO_STREAM),
+            _slot_outcome(OutcomeKind.NOT_ADMITTED),
         ],
     )
     assert build_totals(report) == RunTotals(
@@ -315,7 +316,8 @@ def test_totals_are_counted_once_for_report_and_console() -> None:
         matched=1,
         orphans=0,
         skipped=0,
-        errors=1,
+        errors=1,              # не допущенный — не ошибка
+        not_admitted=1,
     )
 
 
@@ -455,3 +457,45 @@ def test_youtube_error_with_unknown_reason_keeps_old_format() -> None:
     )
     [line] = error_texts(RunReport(mode=RunMode.FULL, generated_at_text="x", outcomes=[outcome]))
     assert line == "17-03-2027 19:00 uk -> Канал UA — YouTube: somethingNew (HTTP 400: странное)"
+
+
+def test_not_admitted_section_goes_right_after_not_delivered_and_before_errors() -> None:
+    report: RunReport = RunReport(
+        mode=RunMode.FULL,
+        generated_at_text="17-09-2026 01:18",
+        outcomes=[
+            _slot_outcome(OutcomeKind.CREATED, form=FormState.FAILED, form_error="notConfirmed: HTTP 200"),
+            _slot_outcome(
+                OutcomeKind.NOT_ADMITTED, handle="@nick", date="18-03-2027", time="20:00", language="en",
+                admission_texts=("в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» — нужен владельцу формы",),
+                broadcast_url="https://www.youtube.com/watch?v=qJjIZCbP89s",
+            ),
+            _slot_outcome(
+                OutcomeKind.NOT_ADMITTED, account_name="Українка Я", handle="@Ukrainian_girl25",
+                admission_texts=(msg.ADMISSION_CHANNEL_TEXT["refused"],), is_channel_ready=False,
+            ),
+            _slot_outcome(OutcomeKind.NOT_ADMITTED, admission_texts=("форма не прочиталась: нет скрипта",)),
+            PairOutcome(
+                OutcomeKind.ERROR, account_name="Українка Я", handle="@Ukrainian_girl25",
+                error=OutcomeError(origin="youtube", code="channelHandleMismatch", message="полный текст отказа"),
+            ),
+        ],
+    )
+    text: str = render_report(report)
+    lines: list[str] = text.splitlines()
+    assert lines[2] == (
+        "Итог: опубликовано 1, исправлено 0, уже стояло 0, не допущено 3, не публиковали 0, ошибок 1."
+    )
+    assert text.index("## Ключ не дошёл до стримера") < text.index("## Не допущено к публикации (3)") < text.index(
+        "## Ошибки"
+    )
+    assert (
+        "- 18-03-2027 20:00 en -> Test UA @nick — в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» "
+        "— нужен владельцу формы; эфир на канале: https://www.youtube.com/watch?v=qJjIZCbP89s"
+    ) in lines
+    assert (
+        "- 17-03-2027 19:00 uk -> Українка Я @Ukrainian_girl25 — не тот канал; "
+        "канал не подтверждён — эфиры на нём не проверялись"
+    ) in lines
+    assert "- 17-03-2027 19:00 uk -> Test UA — форма не прочиталась: нет скрипта; эфира на канале нет" in lines
+    assert sum(1 for line in lines if "полный текст отказа" in line) == 1

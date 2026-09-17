@@ -5,8 +5,8 @@
 
 Только тренировочная форма: адрес берётся из манифеста самого свежего пакета в bcast\\, а после
 редиректа идентификатор формы сверяется с TRAINING_FORM_ID — при несовпадении ничего не отправляется.
-Структура формы читается production-кодом (FormDiscovery), тело и разделы собираются production-функциями
-submitter; постит пробник сам, потому что ему нужно сырое тело ответа. Пишет только в logs\\.
+Структура формы читается production-кодом (FormDiscovery), ответы и разделы строит объект-форма (KeyForm),
+тело — submitter.build_body; постит пробник сам, потому что ему нужно сырое тело ответа. Пишет только в logs\\.
 К YouTube не обращается. Вспомогательный инструмент разработки, в поставку не входит.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ import re
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Final
@@ -26,22 +26,14 @@ import requests
 from app.core.dates import FILE_STAMP_FORMAT
 from app.form.base import FormError
 from app.form.discovery import REQUEST_TIMEOUT_SEC, FormDiscovery, FormQuestion, FormStructure, HttpSession
+from app.form.key_form import FIELD_LANGUAGE, FormAnswer, FormAnswers, KeyForm
 from app.form.submitter import (
     CONFIRMATION_MARKERS,
-    FIELD_ACCOUNT_NAME,
-    FIELD_DATE,
-    FIELD_LANGUAGE,
-    FIELD_PLATFORM,
-    FIELD_STREAM_KEY,
-    FIELD_STREAM_URL,
     HEADER_ACCEPT_LANGUAGE,
-    PLATFORM_CODE,
     RESPONSE_LANGUAGE,
-    _Answer,
-    _build_body,
-    _page_title,
-    _visited_pages,
-    _with_response_language,
+    build_body,
+    page_title,
+    with_response_language,
 )
 from app.package.model import FormSpec, Package, PackageError
 from app.package.bcast import list_package_files
@@ -234,13 +226,12 @@ def _submit(context: _Context, submission: Submission) -> Observation:
     )
     structure: FormStructure = discovery.structure(context.form.url)
     _require_training_form(structure)
-    answers: list[_Answer] = _answers(context.form, structure, submission)
-    pages: list[int] = _visited_pages(structure, answers)
+    answers: FormAnswers = _answers(KeyForm.build(context.form, structure), submission)
     if submission.is_required_dropped:
-        answers = _drop_required(structure, answers, pages)
-    body: dict[str, list[str]] = _build_body(structure, answers, pages)
+        answers = _drop_required(structure, answers)
+    body: dict[str, list[str]] = build_body(structure, answers)
     response: requests.Response = context.session.post(
-        _with_response_language(structure.response_url),
+        with_response_language(structure.response_url),
         data=body,
         timeout=REQUEST_TIMEOUT_SEC,
         headers={HEADER_ACCEPT_LANGUAGE: RESPONSE_LANGUAGE},
@@ -249,51 +240,56 @@ def _submit(context: _Context, submission: Submission) -> Observation:
     return _observe(submission, response, structure.fbzx, saved)
 
 
-def _answers(form: FormSpec, structure: FormStructure, submission: Submission) -> list[_Answer]:
-    values: dict[str, str] = {
-        FIELD_ACCOUNT_NAME: submission.account_name,
-        FIELD_STREAM_KEY: submission.stream_key,
-    }
-    answers: list[_Answer] = []
-    for field, title in form.fields.items():
-        if title is None:
-            continue
-        question: FormQuestion | None = structure.question_by_title(title)
-        if question is None:
-            raise ProbeRefused(f"в форме нет вопроса «{title}» из пакета")
-        answers.append(_Answer(question=question, value=_value(field, form, question, values)))
+def _answers(form: KeyForm, submission: Submission) -> FormAnswers:
+    """Ответы строит объект-форма; пробник только выбирает значения — первые варианты языка, даты и адреса."""
+    answers: FormAnswers = form.answers(
+        language=_first_language(form),
+        start=_first_date(form),
+        account_name=submission.account_name,
+        stream_key=submission.stream_key,
+        stream_url=_first_option(form.stream_url_options, "Stream-URL"),
+    )
+    error: FormError | None = answers.error()
+    if error is not None:
+        raise ProbeRefused(f"ответ формы не собрать: {error.code} {error.message}")
     return answers
 
 
-def _value(field: str, form: FormSpec, question: FormQuestion, values: dict[str, str]) -> str:
-    if field in values:
-        return values[field]
-    if field == FIELD_PLATFORM:
-        wanted: str | None = form.values.get(FIELD_PLATFORM, {}).get(PLATFORM_CODE)
-        if wanted is None or (question.options and wanted not in question.options):
-            raise ProbeRefused(f"нет варианта площадки {PLATFORM_CODE!r} в вопросе «{question.title}»")
-        return wanted
-    if field in (FIELD_LANGUAGE, FIELD_DATE, FIELD_STREAM_URL):
-        if not question.options:
-            raise ProbeRefused(f"у вопроса «{question.title}» нет вариантов")
-        return question.options[0]
-    raise ProbeRefused(f"поле пакета {field!r} пробнику неизвестно")
+def _first_language(form: KeyForm) -> str:
+    """Код языка пакета, текст которого — первый вариант вопроса о языке."""
+    question: FormQuestion | None = form.questions.get(FIELD_LANGUAGE)
+    first: str = _first_option(question.options if question is not None else (), "язык")
+    texts: Mapping[str, str] = form.spec.values.get(FIELD_LANGUAGE, {})
+    for code, text in texts.items():
+        if text == first:
+            return code
+    raise ProbeRefused(f"вариант языка «{first}» не назван в form.values пакета")
 
 
-def _drop_required(structure: FormStructure, answers: list[_Answer], pages: list[int]) -> list[_Answer]:
+def _first_date(form: KeyForm) -> datetime:
+    return datetime.strptime(_first_option(form.accepted_dates, "дата"), form.spec.date_format)
+
+
+def _first_option(options: tuple[str, ...], name: str) -> str:
+    if not options:
+        raise ProbeRefused(f"в форме нет вариантов: {name}")
+    return options[0]
+
+
+def _drop_required(structure: FormStructure, answers: FormAnswers) -> FormAnswers:
     """Последний обязательный вопрос пройденных разделов, не развилка: навигация остаётся прежней."""
-    candidates: list[_Answer] = [
+    candidates: list[FormAnswer] = [
         answer
-        for answer in answers
+        for answer in answers.answers
         if answer.question.is_required
-        and answer.question.page_index in pages
+        and answer.question.page_index in answers.pages
         and answer.question.entry_id not in structure.navigation
     ]
     if not candidates:
         raise ProbeRefused("в пройденных разделах нет обязательного вопроса, который можно пропустить")
-    dropped: _Answer = candidates[-1]
+    dropped: FormAnswer = candidates[-1]
     print(f"D: не отправляется обязательный вопрос «{dropped.question.title}» ({dropped.question.entry_id})")
-    return [answer for answer in answers if answer is not dropped]
+    return replace(answers, answers=tuple(answer for answer in answers.answers if answer is not dropped))
 
 
 def _save(logs_dir: Path, submission: Submission, text: str) -> Path:
@@ -317,7 +313,7 @@ def _observe(submission: Submission, response: requests.Response, fbzx_sent: str
         submission=submission,
         http_status=response.status_code,
         body_length=len(text),
-        title=_page_title(text),
+        title=page_title(text),
         script_language=script.group(1) if script else MISSING,
         lang_attribute=lang.group(1) if lang else MISSING,
         entry_count=len(ENTRY_PATTERN.findall(text)),

@@ -9,6 +9,7 @@ import pytest
 
 from app.config.loader import PlanerConfig
 from app.form.base import (
+    FormError,
     FORM_CODE_MISSING_OPTION,
     FORM_CODE_NOT_CONFIRMED,
     FORM_CODE_REQUIRED_MISSING,
@@ -64,6 +65,13 @@ def _planned(
     return item
 
 
+def _send(sender: GoogleFormSender, item: PlannedBroadcast) -> FormSendResult:
+    """Штатный путь: объект допущен по форме отправителя и достроил ответы ключом и адресом — затем send."""
+    item.admit(None, sender.form_for(item.form), None)
+    item.refresh_form_answers()
+    return sender.send(item)
+
+
 def _sender(session: _FakeSession, tmp_path: Path) -> GoogleFormSender:
     now: datetime = datetime(2027, 3, 16, 12, 0)
     return GoogleFormSender(session, FormDiscovery(session, tmp_path / "logs", now))
@@ -93,7 +101,7 @@ def test_body_contains_expected_entries(
     make_slot_object: SlotFactory,
 ) -> None:
     session: _FakeSession = _session(CONFIRMED_BODY)
-    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    result: FormSendResult = _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
 
     assert result.confirmed is True
     [(url, body)] = session.post_calls
@@ -119,7 +127,7 @@ def test_null_fields_are_not_sent(
     """time, broadcast_url и slot_id в пакете null — таких вопросов в форме нет (§5.1)."""
     session: _FakeSession = _session(CONFIRMED_BODY)
     item: PlannedBroadcast = _planned(make_config, make_slot_object)
-    _sender(session, tmp_path).send(item)
+    _send(_sender(session, tmp_path), item)
     [(_, body)] = session.post_calls
     assert sorted(key for key in body if key.startswith("entry.")) == [
         "entry.1",
@@ -139,7 +147,7 @@ def test_stream_url_matches_ignoring_case_and_slash(
     session: _FakeSession = _session(CONFIRMED_BODY)
     item: PlannedBroadcast = _planned(make_config, make_slot_object)
     item.stream_url = "RTMP://a.RTMP.youtube.com/live2/"
-    assert _sender(session, tmp_path).send(item).confirmed is True
+    assert _send(_sender(session, tmp_path), item).confirmed is True
     [(_, body)] = session.post_calls
     assert body["entry.6"] == ["rtmp://a.rtmp.youtube.com/live2/"]
 
@@ -156,7 +164,7 @@ def test_missing_date_option_stops_the_send(
         make_slot_object,
         start=datetime(2027, 3, 25, 19, 0, tzinfo=KYIV),
     )
-    result: FormSendResult = _sender(session, tmp_path).send(item)
+    result: FormSendResult = _send(_sender(session, tmp_path), item)
     assert result.confirmed is False
     assert result.code == FORM_CODE_MISSING_OPTION
     assert "25.03.2027" in (result.error or "")
@@ -172,7 +180,7 @@ def test_required_question_without_value_stops_the_send(
     # обязательный вопрос в разделе YouTube, который планер не заполняет
     items.insert(7, [8, "Ещё один обязательный", None, 0, [[8, None, 1]]])
     session: _FakeSession = _FakeSession(_FakeResponse(build_html(build_payload(items))), _FakeResponse(CONFIRMED_BODY))
-    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    result: FormSendResult = _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     assert result.code == FORM_CODE_REQUIRED_MISSING
     assert "Ещё один обязательный" in (result.error or "")
     assert session.post_calls == []
@@ -185,7 +193,7 @@ def test_response_without_marker_is_not_confirmed(
 ) -> None:
     """Ответ 200, но это не страница формы — доставкой ключа не считается."""
     session: _FakeSession = _session("<html>что-то пошло не так</html>")
-    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    result: FormSendResult = _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     assert result.confirmed is False
     assert result.code == FORM_CODE_NOT_CONFIRMED
     assert result.diagnostic_path is not None and result.diagnostic_path.exists()
@@ -207,7 +215,7 @@ def test_server_error_is_retried_by_the_policy(
         _FakeResponse(build_html()),
         *[_FakeResponse("", status_code=500) for _ in range(RetryPolicy().max_attempts)],
     )
-    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    result: FormSendResult = _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     assert result.code == FORM_CODE_TRANSPORT_FAILED
     assert len(session.post_calls) == 5
     assert [int(delay) for delay in sleeps] == [2, 4, 8, 16]
@@ -225,7 +233,7 @@ def test_server_error_then_success_is_confirmed(
     session: _FakeSession = _FakeSession(
         _FakeResponse(build_html()), _FakeResponse("", status_code=503), _FakeResponse(CONFIRMED_BODY)
     )
-    assert _sender(session, tmp_path).send(_planned(make_config, make_slot_object)).confirmed is True
+    assert _send(_sender(session, tmp_path), _planned(make_config, make_slot_object)).confirmed is True
     assert len(session.post_calls) == 2
 
 
@@ -235,7 +243,7 @@ def test_client_error_is_not_retried(
     make_slot_object: SlotFactory,
 ) -> None:
     session: _FakeSession = _session("<html>нет</html>", status_code=400)
-    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    result: FormSendResult = _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     assert (result.confirmed, result.code) == (False, FORM_CODE_NOT_CONFIRMED)
     assert result.error == "HTTP 400"
     assert len(session.post_calls) == 1
@@ -248,8 +256,8 @@ def test_structure_is_read_once_for_two_objects(
 ) -> None:
     session: _FakeSession = _session(CONFIRMED_BODY)
     sender: GoogleFormSender = _sender(session, tmp_path)
-    sender.send(_planned(make_config, make_slot_object))
-    sender.send(_planned(make_config, make_slot_object, start=datetime(2027, 3, 18, 19, 0, tzinfo=KYIV)))
+    _send(sender, _planned(make_config, make_slot_object))
+    _send(sender, _planned(make_config, make_slot_object, start=datetime(2027, 3, 18, 19, 0, tzinfo=KYIV)))
     assert len(session.get_calls) == 1
     assert len(session.post_calls) == 2
 
@@ -266,7 +274,7 @@ def test_form_is_read_once_at_prepare_and_send_uses_it(
     second: PlannedBroadcast = _planned(make_config, make_slot_object, start=datetime(2027, 3, 18, 19, 0, tzinfo=KYIV))
     sender.prepare([first.form, second.form, first.form])
     assert session.get_calls == [SHORT_URL]
-    assert sender.send(first).confirmed and sender.send(second).confirmed
+    assert _send(sender, first).confirmed and _send(sender, second).confirmed
     assert session.get_calls == [SHORT_URL]
 
 
@@ -282,10 +290,58 @@ def test_unreadable_form_gives_the_same_error_to_every_send(
     with caplog.at_level("WARNING"):
         sender.prepare([item.form])
     assert any(message.startswith("form_unreadable url=") for message in caplog.messages)
-    first: FormSendResult = sender.send(item)
-    second: FormSendResult = sender.send(item)
-    assert first.code == second.code == FORM_CODE_STRUCTURE_UNREADABLE
+    with pytest.raises(FormError) as first:
+        sender.form_for(item.form)
+    with pytest.raises(FormError) as second:
+        sender.form_for(item.form)
+    assert first.value is second.value and first.value.code == FORM_CODE_STRUCTURE_UNREADABLE
+    item.admit(None, None, first.value)
+    assert sender.send(item).code == FORM_CODE_STRUCTURE_UNREADABLE     # защита: без ответов POST нет
     assert len(session.get_calls) == 1 and session.post_calls == []
+
+
+def test_send_takes_the_answers_of_the_object_and_the_body_is_unchanged(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+) -> None:
+    """Тело POST — как до объекта-слота: те же поля и в том же порядке."""
+    session: _FakeSession = _session(CONFIRMED_BODY)
+    sender: GoogleFormSender = _sender(session, tmp_path)
+    item: PlannedBroadcast = _planned(make_config, make_slot_object)
+    item.admit(None, sender.form_for(item.form), None)
+    assert item.form_answers is not None and item.form_answers.pending == ("You Tube Stream Key", "Stream-URL (YT)")
+    item.refresh_form_answers()
+    assert sender.send(item).confirmed is True
+    [(_, body)] = session.post_calls
+    assert list(body.items()) == [
+        ("entry.1", ["Русский ( Russian)"]),
+        ("entry.2", ["yt_ru"]),
+        ("entry.3", ["17.03.2027 Дата стрима (время стрима указано в объявлении)"]),
+        ("entry.4", ["You Tube"]),
+        ("entry.5", [STREAM_KEY]),
+        ("entry.6", ["rtmp://a.rtmp.youtube.com/live2/"]),
+        ("fvv", ["1"]),
+        ("pageHistory", ["0,1"]),
+        ("fbzx", ["-1234567890"]),
+    ]
+
+
+def test_incomplete_answers_are_refused_without_post(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+) -> None:
+    """Ответы без ключа и адреса (не достроены) и ответы с адресом не из вариантов — FormError, POST нет."""
+    session: _FakeSession = _session(CONFIRMED_BODY)
+    sender: GoogleFormSender = _sender(session, tmp_path)
+    item: PlannedBroadcast = _planned(make_config, make_slot_object)
+    item.admit(None, sender.form_for(item.form), None)
+    assert sender.send(item).code == FORM_CODE_REQUIRED_MISSING         # pending: не достроены
+    item.stream_url = "rtmp://b.rtmp.youtube.com/live2"
+    item.refresh_form_answers()
+    assert sender.send(item).code == FORM_CODE_MISSING_OPTION
+    assert session.post_calls == []
 
 
 def test_form_ready_is_logged_with_dates_and_languages(
@@ -310,7 +366,7 @@ def test_page_history_uses_page_index_not_section_id(
 ) -> None:
     """Регрессия живого прогона 13-09-2026: было pageHistory=0,1281939289 и HTTP 400."""
     session: _FakeSession = _session(CONFIRMED_BODY)
-    _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     [(_, body)] = session.post_calls
     assert str(YOUTUBE_SECTION_ID) not in body["pageHistory"][0]
     assert body["pageHistory"] == ["0,1"]
@@ -324,7 +380,7 @@ def test_unknown_section_id_falls_back_to_answered_pages(
     items: list[Any] = default_items()
     items[3][4][0][1] = [["You Tube", None, 555], ["Facebook", None, 777]]
     session: _FakeSession = _FakeSession(_FakeResponse(build_html(build_payload(items))), _FakeResponse(CONFIRMED_BODY))
-    assert _sender(session, tmp_path).send(_planned(make_config, make_slot_object)).confirmed is True
+    assert _send(_sender(session, tmp_path), _planned(make_config, make_slot_object)).confirmed is True
     [(_, body)] = session.post_calls
     pages: list[int] = [int(page) for page in body["pageHistory"][0].split(",")]
     assert pages == [0, 1]
@@ -350,7 +406,7 @@ def test_out_of_range_page_is_never_sent(
     )
     session: _FakeSession = _FakeSession(_FakeResponse(CONFIRMED_BODY))
     sender: GoogleFormSender = GoogleFormSender(session, _FixedDiscovery(session, tmp_path, broken))
-    assert sender.send(_planned(make_config, make_slot_object)).confirmed is True
+    assert _send(sender, _planned(make_config, make_slot_object)).confirmed is True
     [(_, body)] = session.post_calls
     assert body["pageHistory"] == ["0,1"]
 
@@ -392,7 +448,7 @@ def test_success_page_is_confirmed_whatever_its_language(
     page: str = SUCCESS_PAGE.replace(ENGLISH_CONFIRMATION, visible_text)
     session: _FakeSession = _session(page)
     with caplog.at_level("INFO"):
-        result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+        result: FormSendResult = _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     assert (result.confirmed, result.diagnostic_path) == (True, None)
     [line] = [message for message in caplog.messages if message.startswith("form_confirmed")]
     assert "entry_fields=0 fbzx=False form_page=True" in line
@@ -420,7 +476,7 @@ def test_error_page_is_not_confirmed_and_logged_with_both_signals(
 ) -> None:
     session: _FakeSession = _session(REFUSAL_PAGE, status_code=400)
     with caplog.at_level("WARNING"):
-        result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+        result: FormSendResult = _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     assert (result.confirmed, result.code, result.error) == (False, FORM_CODE_NOT_CONFIRMED, "HTTP 400")
     assert result.diagnostic_path is not None and result.diagnostic_path.exists()
     assert "This is a required question" in result.diagnostic_path.read_text(encoding="utf-8")
@@ -436,7 +492,7 @@ def test_success_is_logged_with_http_status(
 ) -> None:
     session: _FakeSession = _session(CONFIRMED_BODY)
     with caplog.at_level("INFO"):
-        _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+        _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     [line] = [message for message in caplog.messages if message.startswith("form_confirmed")]
     assert "http_status=200 entry_fields=0 fbzx=False form_page=True marker='your response has been recorded'" in line
 
@@ -448,7 +504,7 @@ def test_legacy_confirmation_class_is_not_a_confirmation(
 ) -> None:
     """Класса freebirdFormviewerViewResponseConfirmationMessage в вёрстке Google больше нет."""
     session: _FakeSession = _session(LEGACY_CLASS_BODY)
-    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    result: FormSendResult = _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     assert (result.confirmed, result.code) == (False, FORM_CODE_NOT_CONFIRMED)
 
 
@@ -458,7 +514,7 @@ def test_post_asks_for_english_response_and_get_is_untouched(
     make_slot_object: SlotFactory,
 ) -> None:
     session: _FakeSession = _session(CONFIRMED_BODY)
-    _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    _send(_sender(session, tmp_path), _planned(make_config, make_slot_object))
     [(url, _)] = session.post_calls
     assert url == RESPONSE_URL
     assert session.post_headers == [{"Accept-Language": "en"}]

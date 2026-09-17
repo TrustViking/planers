@@ -412,8 +412,24 @@ REPORT_SECTION_WARNINGS: Final[str] = "## Предупреждения"
 REPORT_SECTION_MISMATCHES: Final[str] = "## Расхождения с платформой"
 REPORT_SECTION_ERRORS: Final[str] = "## Ошибки"
 REPORT_SECTION_NOT_DELIVERED: Final[str] = "## Ключ не дошёл до стримера"
+REPORT_SECTION_NOT_ADMITTED: Final[str] = "## Не допущено к публикации ({count})"
 REPORT_SECTION_NOTES: Final[str] = "## Особенности площадки — так устроена площадка, это не про этот запуск"
 NOT_DELIVERED_LINE: Final[str] = "{prefix} — {reason}; эфир на канале стоит — передайте ключ стримеру из keys.txt вручную"
+# Не допущено к публикации (PlannedBroadcast.admit): причины коротко, затем что с эфиром на канале.
+NOT_ADMITTED_LINE: Final[str] = "{prefix} — {reasons}; {tail}"
+NOT_ADMITTED_REASON_JOINER: Final[str] = "; "
+NOT_ADMITTED_TAIL_BROADCAST: Final[str] = "эфир на канале: {url}"
+NOT_ADMITTED_TAIL_NO_BROADCAST: Final[str] = "эфира на канале нет"
+NOT_ADMITTED_TAIL_CHANNEL: Final[str] = "канал не подтверждён — эфиры на нём не проверялись"
+ADMISSION_MISSING_OPTION: Final[str] = "в форме нет варианта «{text}» — нужен владельцу формы"
+ADMISSION_REQUIRED_MISSING: Final[str] = "в форме обязательный вопрос без ответа: {text}"
+ADMISSION_FORM_UNREADABLE: Final[str] = "форма не прочиталась: {text}"
+# ключи — значения ChannelStatus (app/platforms/channel.py); полный текст отказа канала — в «Ошибки»
+ADMISSION_CHANNEL_TEXT: Final[dict[str, str]] = {
+    "refused": "не тот канал",
+    "failed": "площадка не ответила",
+    "needs_login": "вход не выполнен",
+}
 
 # --- консоль (ТЗ §5.6): блоки сверху вниз, без markdown и значков
 CONSOLE_TITLE: Final[str] = "Planer {version} — {generated_at}"
@@ -422,10 +438,12 @@ CONSOLE_TITLE_DRY_RUN: Final[str] = (
 )
 CONSOLE_TITLE_STATUS: Final[str] = "Planer {version} — {generated_at} — --status: эфиры планера на каналах"
 CONSOLE_TOTAL: Final[str] = (
-    "Итог: опубликовано {created}, исправлено {fixed}, уже стояло {matched}, не публиковали {skipped}, ошибок {errors}"
+    "Итог: опубликовано {created}, исправлено {fixed}, уже стояло {matched}, не допущено {not_admitted}, "
+    "не публиковали {skipped}, ошибок {errors}"
 )
 CONSOLE_TOTAL_DRY_RUN: Final[str] = (
-    "Итог: опубликуем {created}, исправим {fixed}, уже стояло {matched}, не публиковали {skipped}, ошибок {errors}"
+    "Итог: опубликуем {created}, исправим {fixed}, уже стояло {matched}, не допущено {not_admitted}, "
+    "не публиковали {skipped}, ошибок {errors}"
 )
 CONSOLE_TOTAL_STATUS: Final[str] = "Итог: уже стояло {matched}, ошибок {errors}"
 # Итог отчёта — те же слова, что в консоли, плюс файл ключей.
@@ -460,6 +478,9 @@ CONSOLE_SKIP_GROUP_TOO_LATE: Final[str] = "  до старта меньше {min
 CONSOLE_SKIP_GROUP_NO_CHANNEL: Final[str] = "  нет канала для языка {language}"
 CONSOLE_ATTENTION_ERROR: Final[str] = "  ошибка: {text}"
 CONSOLE_ATTENTION_NOT_DELIVERED: Final[str] = "  ключ не дошёл до стримера: {prefix} — {reason}"
+CONSOLE_ATTENTION_NOT_ADMITTED: Final[str] = "  не допущено: {prefix} — {reasons}; {tail}"
+CONSOLE_NOT_ADMITTED_TAIL_KEY: Final[str] = "эфир на канале есть — ключ стримеру не передан"
+CONSOLE_NOT_ADMITTED_TAIL_NO_KEY: Final[str] = "эфира нет"
 CONSOLE_ATTENTION_PACKAGE: Final[str] = "  пакет: {text}"
 CONSOLE_ATTENTION_TEXT: Final[str] = "  {text}"
 CONSOLE_ATTENTION_RESTORED: Final[str] = "  вернули к пакету: {prefix} — {field}: было {before}, стало {after}"
@@ -488,13 +509,16 @@ PROGRESS_REPORT: Final[str] = "пишу отчёт"
 KEY_FORM_SENT_LEAD: Final[str] = "отправлен в форму"
 KEY_FORM_KEPT_LEAD: Final[str] = "в этом запуске в форму не отправлялся"
 KEY_FORM_FAILED_LEAD: Final[str] = "НЕ отправлен"
+KEY_FORM_NOT_ADMITTED_LEAD: Final[str] = KEY_FORM_FAILED_LEAD + ": не допущено"
 KEYS_FILE_HEADER: Final[tuple[str, ...]] = (
     "# Ключи трансляций. Сгенерировано планером {generated_at}.",
     "# Файл перезаписывается на каждом запуске — не править.",
     "# Строка «форма»:",
     "#   «" + KEY_FORM_SENT_LEAD + "» — ключ у стримера;",
     "#   «" + KEY_FORM_KEPT_LEAD + "» — эфир уже стоял, ключ уходил раньше;",
-    "#   «" + KEY_FORM_FAILED_LEAD + "» — передайте ключ стримеру вручную.",
+    "#   «" + KEY_FORM_FAILED_LEAD + "» — передайте ключ стримеру вручную;",
+    "#   «" + KEY_FORM_NOT_ADMITTED_LEAD + "» — форма этот эфир не принимает (нет даты или варианта) "
+    "или канал не подтверждён: эфир стоит, ключ стримеру не передан — передайте вручную.",
 )
 KEYS_BLOCK_TITLE: Final[str] = "{date} {time}  {language}  {account_name} {handle}"
 KEYS_BLOCK_KEY: Final[str] = "  ключ   {value}"
@@ -504,3 +528,4 @@ KEYS_BLOCK_FORM: Final[str] = "  форма  {value}"
 KEY_FORM_SENT: Final[str] = KEY_FORM_SENT_LEAD + " {sent_at}"
 KEY_FORM_KEPT: Final[str] = KEY_FORM_KEPT_LEAD + ": эфир уже стоял с этим ключом"
 KEY_FORM_FAILED: Final[str] = KEY_FORM_FAILED_LEAD + ": {reason} — передайте стримеру вручную"
+KEY_FORM_NOT_ADMITTED: Final[str] = KEY_FORM_NOT_ADMITTED_LEAD + " — {reasons}"

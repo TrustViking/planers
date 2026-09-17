@@ -17,7 +17,8 @@ import pytest
 from app.config.loader import ChannelConfig, Platform, PlanerConfig, PlanerSettings, Privacy
 from app.core.dates import build_slot_id, format_date, format_time, parse_date, parse_time
 from app.core.text import HANDLE_PREFIX
-from app.form.base import FormSendResult
+from app.form.base import FormError, FormSendResult
+from app.form.key_form import KeyForm
 from app.output.progress import BroadcastStep
 from app.package.model import FormSpec, Package, Slot
 from app.pipeline.plan import BroadcastSpec, PlannedBroadcast
@@ -196,11 +197,16 @@ class FakeFormSender:
         confirmed: bool = True,
         error: str | None = None,
         platform: FakePlatform | None = None,
+        key_form: KeyForm | None = None,
+        form_failure: FormError | None = None,
     ) -> None:
         self.confirmed: bool = confirmed
         self.error: str | None = error
         self.calls: list[FormCall] = []
         self._platform: FakePlatform | None = platform
+        self._key_form: KeyForm | None = key_form          # задана — объекты допускаются по настоящей форме
+        self._form_failure: FormError | None = form_failure
+        self.sent_after_created: list[int] = []            # сколько эфиров было создано к моменту каждой отправки
         # (адреса форм, сколько обращений к площадке было к моменту чтения форм)
         self.prepared: list[tuple[tuple[str, ...], int]] = []
 
@@ -208,7 +214,14 @@ class FakeFormSender:
         touched: int = 0 if self._platform is None else len(self._platform.describe_calls + self._platform.list_calls)
         self.prepared.append((tuple(sorted({form.url for form in forms})), touched))
 
+    def form_for(self, spec: FormSpec) -> KeyForm | None:
+        if self._form_failure is not None:
+            raise self._form_failure
+        return self._key_form
+
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
+        if self._platform is not None:
+            self.sent_after_created.append(len(self._platform.created))
         self.calls.append(FormCall(planned.slot_id, planned.account_name, planned.stream_key, planned.form.url))
         return FormSendResult(confirmed=self.confirmed, error=self.error)
 

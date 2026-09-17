@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Final
 
 from app.core.dates import format_datetime_text, parse_date
-from app.output.report import form_reason_text
+from app.output.report import admission_texts, form_reason_text
 from app.paths import PlanerPaths
 from app.pipeline.plan import PlannedBroadcast
 from app.pipeline.reconciler import MarkedBroadcast
@@ -38,7 +38,11 @@ class KeyRow:
 
 
 def form_status_text(item: PlannedBroadcast) -> str:
-    """Только этот запуск: передан сейчас, должен был уйти и не ушёл, или в этом запуске не отправлялся."""
+    """Только этот запуск: передан сейчас, не допущен, должен был уйти и не ушёл, или в этом запуске не отправлялся."""
+    if not item.is_admitted:
+        return msg.KEY_FORM_NOT_ADMITTED.format(
+            reasons=msg.NOT_ADMITTED_REASON_JOINER.join(admission_texts(item.admission_reasons))
+        )
     if item.is_form_sent:
         return msg.KEY_FORM_SENT.format(
             sent_at=format_datetime_text(item.form_sent_at) if item.form_sent_at else MISSING_VALUE
