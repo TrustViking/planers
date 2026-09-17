@@ -6,6 +6,8 @@
 
 Вход в браузере файл токена не пишет: токен записывает вызывающий (save_token) — только после того,
 как канал за этим входом подтверждён. Обновление действующего токена пишет файл сразу.
+Ожидание браузера ограничено LOGIN_TIMEOUT_SEC; текст про ссылку в консоли и страница «вход выполнен»
+в браузере — из messages_ru, а не английские тексты библиотеки.
 """
 from __future__ import annotations
 
@@ -17,10 +19,11 @@ from typing import Final
 from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow, WSGITimeoutError
 
 from app.core.text import token_file_stem
 from app.observability.logging_setup import get_logger
+from app.ui import messages_ru as msg
 
 LOGGER = get_logger("auth")
 
@@ -32,6 +35,11 @@ ACCESS_TYPE: Final[str] = "offline"        # без него Google не выд�
 # select_account — экран выбора аккаунта и канала (личный и дополнительные) даже при login_hint;
 # consent — при повторной авторизации refresh-токен выдаётся заново.
 PROMPT: Final[str] = "select_account consent"
+# Ожидание входа в браузере: без предела запуск висит, пока окно не закроют (прогон 17-09-2026 16:38).
+# 10 минут — с запасом: живой первый вход 17-09-2026 (выбор аккаунта, канала и экран «не проверено») занял 8,5 минуты.
+LOGIN_TIMEOUT_SEC: Final[int] = 600
+SECONDS_PER_MINUTE: Final[int] = 60
+LOGIN_TIMEOUT_MINUTES: Final[int] = LOGIN_TIMEOUT_SEC // SECONDS_PER_MINUTE
 TOKEN_ENCODING: Final[str] = "utf-8"
 TOKEN_FILE_TEMPLATE: Final[str] = "{stem}.token.json"
 
@@ -42,6 +50,7 @@ class AuthErrorReason(str, Enum):
     FLOW_FAILED = "flow_failed"
     REFRESH_FAILED = "refresh_failed"
     LOGIN_REQUIRED = "login_required"   # нужен браузер, а вызывающий вход запретил (allow_login=False)
+    LOGIN_TIMEOUT = "login_timeout"     # вход в браузере не завершён за LOGIN_TIMEOUT_SEC
 
 
 class AuthError(Exception):
@@ -163,7 +172,10 @@ def _refresh(credentials: Credentials, token_file: Path) -> Credentials | None:
 
 
 def _run_flow(client_secret_file: Path, login_hint: str) -> Credentials:
-    """Браузер; файл токена не пишется."""
+    """Браузер не дольше LOGIN_TIMEOUT_SEC; файл токена не пишется.
+
+    WSGITimeoutError наследует AttributeError — ловится отдельно, до общих сбоев.
+    """
     try:
         flow: InstalledAppFlow = InstalledAppFlow.from_client_secrets_file(
             str(client_secret_file),
@@ -174,7 +186,12 @@ def _run_flow(client_secret_file: Path, login_hint: str) -> Credentials:
             access_type=ACCESS_TYPE,
             prompt=PROMPT,
             login_hint=login_hint,
+            timeout_seconds=LOGIN_TIMEOUT_SEC,
+            authorization_prompt_message=msg.AUTH_OPEN_LINK,
+            success_message=msg.AUTH_BROWSER_DONE,
         )
+    except WSGITimeoutError as error:
+        raise AuthError(AuthErrorReason.LOGIN_TIMEOUT, f"no answer in {LOGIN_TIMEOUT_SEC} s") from error
     except (OSError, ValueError, RefreshError, TransportError) as error:
         raise AuthError(AuthErrorReason.FLOW_FAILED, str(error)) from error
     if credentials is None:

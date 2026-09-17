@@ -44,13 +44,22 @@ from app.core.dates import format_datetime_text
 from app.form.base import FormSender
 from app.form.discovery import FormDiscovery
 from app.form.submitter import GoogleFormSender
+from app.google.auth import AuthErrorReason
 from app.observability.logging_setup import close_logging, get_logger, setup_logging
 from app.output.console import render_console
 from app.output.progress import ConsoleProgress
 from app.paths import PlanerPaths, build_paths, ensure_dirs, resolve_root
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
-from app.platforms.channel import Channel, ChannelBindingError, ChannelBook, ChannelStatus, youtube_handle_text
+from app.platforms.channel import (
+    Channel,
+    ChannelBindingError,
+    ChannelBook,
+    ChannelStatus,
+    login_failure_reason,
+    login_failure_text,
+    youtube_handle_text,
+)
 from app.platforms.channel_sync import ChannelSync
 from app.platforms.verified import VerifiedPlatform
 from app.platforms.youtube import YouTubePlatform
@@ -61,7 +70,6 @@ from app.version import APP_VERSION
 LOGGER = get_logger("main")
 
 LIST_JOINER: Final[str] = ", "
-REASON_SEPARATOR: Final[str] = ":"   # сообщение отказа входа: «<AuthErrorReason>: подробности»
 # Шапка запуска: --check и --auth — обычная, как у полного цикла.
 TITLES: Final[dict[RunMode, str]] = {
     RunMode.FULL: msg.CONSOLE_TITLE,
@@ -93,15 +101,15 @@ class ChannelConsole:
         )
 
     def on_login_failed(self, channel: ChannelConfig, error: PlatformError) -> None:
-        reason: str = error.message.split(REASON_SEPARATOR, 1)[0]
         _say(
             msg.AUTH_FAILED.format(
                 account_name=channel.account_name,
                 handle=channel.handle,
-                reason=msg.AUTH_REASON_TEXT.get(reason, error.message),
+                reason=login_failure_text(error),
             )
         )
-        _say(msg.AUTH_SCOPE_HINT)
+        if login_failure_reason(error) != AuthErrorReason.LOGIN_TIMEOUT.value:
+            _say(msg.AUTH_SCOPE_HINT)   # экрана согласия при таймауте могло и не быть
 
     def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo) -> None:
         _say(

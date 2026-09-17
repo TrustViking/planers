@@ -11,13 +11,16 @@ main.py только разбирает флаги, строит зависим�
 Истина об эфирах и ключах — на площадке. Память планера (app/records) — только о том, что форма уже подтвердила:
 из неё объект читает результаты, задания из неё не берутся. Должен ли ключ уйти, решает объект
 (PlannedBroadcast.decide_key_delivery); ошибка другого шага отправку уже взятого ключа не отменяет.
+Запись в память — только если она изменилась (PlannedBroadcast.record_to_save).
+Время старта запуска (now_utc) — для отчёта, имён файлов, отбора too_late и чистки; время событий
+(публикация, подтверждение формы, updated_at записи) — из часов (clock) в момент события.
 """
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum, IntEnum
 from pathlib import Path
 from typing import Final, Protocol
@@ -160,15 +163,11 @@ class _RunContext:
     progress: RunProgress
     logins: ChannelLogins | None        # None — входов нет (тесты без ChannelBook)
     store: RecordStore                  # память планера; read_only в --dry-run и --status
+    clock: Callable[[], datetime]       # время событий: момент публикации, подтверждения, записи
 
     @property
     def now_local(self) -> datetime:
         return self.now_utc.astimezone()
-
-    @property
-    def now_naive(self) -> datetime:
-        """Для form_sent_at: местное время без смещения."""
-        return self.now_local.replace(tzinfo=None)
 
     @property
     def generated_at_text(self) -> str:
@@ -177,6 +176,11 @@ class _RunContext:
     @property
     def is_full(self) -> bool:
         return self.mode is RunMode.FULL
+
+
+def utc_now() -> datetime:
+    """Часы запуска по умолчанию: текущее время UTC."""
+    return datetime.now(timezone.utc)
 
 
 def run(
@@ -193,16 +197,19 @@ def run(
     channel_warnings: Sequence[str] = (),
     logins: ChannelLogins | None = None,
     store: RecordStore | None = None,
+    clock: Callable[[], datetime] = utc_now,
 ) -> RunOutcome:
     """channel_warnings — предупреждения сверки каналов при старте: в отчёт и консоль вместе с прочими.
 
     logins — фаза входов: каналы с объектами (в --status — все каналы) входят до первого обращения к площадке.
     store — память планера; открывает и закрывает её main. Без неё (тесты) — пустая память в оперативной
     памяти, как у первого запуска.
+    clock — часы для времени событий; тесты передают свои.
     """
     context: _RunContext = _RunContext(
         mode, config, paths, platform, form_sender, now_utc, rng, notice, [], tuple(channel_warnings), progress, logins,
         store if store is not None else RecordStore.memory(is_new=True),
+        clock,
     )
     if mode is RunMode.STATUS:
         return _run_status(context)
@@ -306,7 +313,7 @@ def _bootstrap_records(context: _RunContext, planned: Sequence[PlannedBroadcast]
         return []
     count: int = 0
     for item in planned:
-        if not item.bootstrap_confirmation(context.now_utc):
+        if not item.bootstrap_confirmation(context.clock()):
             continue
         count += 1
         LOGGER.info(
@@ -331,10 +338,24 @@ def _decide_without_actions(planned: Sequence[PlannedBroadcast]) -> None:
 
 
 def _save_record(context: _RunContext, item: PlannedBroadcast, stage: SlotStage) -> None:
-    """Запись объекта; канал без id YouTube — записи нет. Сбой базы — предупреждение хранилища, объект идёт дальше."""
-    if item.record_channel_id is None:
+    """Запись объекта, если она изменилась; канал без id YouTube — записи нет.
+
+    Сбой базы — предупреждение хранилища, объект идёт дальше и сравнивает следующую запись с прежней.
+    """
+    channel_id: str | None = item.record_channel_id
+    if channel_id is None:
         return
-    context.store.save(item.to_record(context.now_utc, stage))
+    record: SlotRecord | None = item.record_to_save(context.clock(), stage)
+    if record is None:
+        LOGGER.debug(
+            "record_unchanged slot_id=%s youtube_channel_id=%s stage=%s",
+            item.slot_id,
+            channel_id,
+            item.record.stage.value if item.record is not None else stage.value,
+        )
+        return
+    if context.store.save(record, requested=stage):
+        item.remember_record(record)
 
 
 def _form_for(context: _RunContext, spec: FormSpec) -> tuple[KeyForm | None, FormError | None]:
@@ -624,15 +645,16 @@ class _Executor:
         item.decide_key_delivery()
         if not item.should_send_key:
             return
-        self._send_key(item)
-        if item.is_form_sent:
-            item.confirm_key(self._context.now_utc)
+        confirmed_at: datetime | None = self._send_key(item)
+        if confirmed_at is not None:
+            item.confirm_key(confirmed_at)
             _save_record(self._context, item, SlotStage.KEY_CONFIRMED)
 
-    def _send_key(self, item: PlannedBroadcast) -> None:
+    def _send_key(self, item: PlannedBroadcast) -> datetime | None:
         """Ключ этого объекта — в форму сейчас (should_send_key уже решён объектом, §7.5).
 
         Ответы достроены объектом (ключ и адрес потока); неполные — без POST, причина в last_error.
+        Возвращает момент, когда форма подтвердила (часы запуска); не подтвердила — None.
         """
         answers: FormAnswers | None = item.form_answers
         if not item.is_key_ready_to_send:
@@ -647,12 +669,14 @@ class _Executor:
                     error.code,
                     _quoted(error.message),
                 )
-            return
+            return None
         self._context.progress.key_send_started(item)
         result: FormSendResult = self._context.form_sender.send(item)
+        confirmed_at: datetime | None = None
         if result.confirmed:
+            confirmed_at = self._context.clock()
             item.is_form_sent = True
-            item.form_sent_at = self._context.now_naive
+            item.form_sent_at = confirmed_at.astimezone().replace(tzinfo=None)   # местное время без смещения
             item.last_error = None
         else:
             item.last_error = _form_error_text(result)
@@ -666,6 +690,7 @@ class _Executor:
             result.confirmed,
             mask_stream_key(item.stream_key),
         )
+        return confirmed_at
 
     def _dispatch(self, item: PlannedBroadcast) -> None:
         if item.is_too_late or not item.is_admitted:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 import shutil
@@ -12,6 +13,7 @@ import pytest
 
 from app import main as main_module
 from app.config.loader import PlanerSettings
+from app.google.auth import LOGIN_TIMEOUT_MINUTES
 from app.main import run_cli
 from app.paths import ROOT_ENV_VAR, PlanerPaths
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
@@ -599,6 +601,61 @@ def test_auth_failure_names_the_reason_and_scope_hint(
     assert msg.AUTH_REASON_TEXT["flow_failed"] in out
     assert "скоуп youtube не добавлен" in out
     assert not (planer_root / "secrets" / f"{UA_HANDLE}.token.json").exists()
+
+
+def test_login_timeout_names_the_reason_without_scope_hint(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Вход не завершён за 10 минут: причина словами, подсказки про скоуп нет, объекты канала не допущены."""
+    _write_config(planer_root)
+    fake_platform_in_main.tokens_missing = {UA_KEY}
+    fake_platform_in_main.fail_login[UA_KEY] = PlatformError("authFailed", "login_timeout: no answer in 600 s")
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    assert run_cli([]) == 1
+    out: str = capsys.readouterr().out
+    timeout_text: str = msg.AUTH_REASON_TEXT["login_timeout"].format(minutes=LOGIN_TIMEOUT_MINUTES)
+    assert msg.AUTH_FAILED.format(**UA_NAMES, reason=timeout_text) in out
+    assert "скоуп youtube не добавлен" not in out
+    assert fake_platform_in_main.logins == [UA_KEY]                 # второй попытки нет
+    assert fake_platform_in_main.created == []
+    assert "login_timeout channel=" in _log_text(planer_root)
+
+
+def test_terminal_has_no_raw_log_lines(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """WARNING и ERROR планера и чужих библиотек — только в файл лога; в терминале — тексты владельца."""
+
+    class _NoisySender(FakeFormSender):
+        def prepare(self, forms: Any) -> None:
+            logging.getLogger("googleapiclient.discovery_cache").warning("file_cache is unavailable")
+            super().prepare(forms)
+
+    monkeypatch.setattr(main_module, "build_form_sender", lambda paths, now_utc, rng: _NoisySender())
+    _write_config(planer_root)
+    _write_tokens(planer_root, RU_HANDLE)
+    fake_platform_in_main.tokens_missing = {UA_KEY}
+    fake_platform_in_main.fail_login[UA_KEY] = PlatformError("authFailed", "flow_failed: browser closed")
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    assert run_cli([]) == 1
+    captured: pytest.CaptureResult[str] = capsys.readouterr()
+    for marker in (" | WARNING | ", " | INFO | ", " | ERROR | ", " | DEBUG | "):
+        assert marker not in captured.out and marker not in captured.err
+    assert captured.err == ""
+    assert "не допущено: " in captured.out                           # та же причина — текстом владельца
+    log: str = _log_text(planer_root)
+    assert " | WARNING | planer.runner | slot_not_admitted " in log
+    assert " | ERROR | planer.channel | login_failed " in log
+    assert " | WARNING | googleapiclient.discovery_cache | file_cache is unavailable" in log
 
 
 def _log_text(root: Path) -> str:

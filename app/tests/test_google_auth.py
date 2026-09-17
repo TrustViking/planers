@@ -5,10 +5,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from google_auth_oauthlib.flow import WSGITimeoutError
 
 from app.google import auth as auth_module
 from app.google.auth import (
     ACCESS_TYPE,
+    LOGIN_TIMEOUT_SEC,
     PROMPT,
     SCOPES,
     YOUTUBE_SCOPE,
@@ -19,6 +21,7 @@ from app.google.auth import (
     save_token,
     token_file_for,
 )
+from app.ui import messages_ru as msg
 
 TOKEN_JSON: str = json.dumps({"token": "x", "refresh_token": "y"})
 LOGIN_HINT: str = "owner@gmail.com"
@@ -44,6 +47,7 @@ class _FakeFlow:
 
     last_kwargs: dict[str, Any] = {}
     credentials: _FakeCredentials | None = None
+    error: Exception | None = None
 
     @classmethod
     def from_client_secrets_file(cls, path: str, scopes: list[str]) -> _FakeFlow:
@@ -52,6 +56,8 @@ class _FakeFlow:
 
     def run_local_server(self, **kwargs: Any) -> _FakeCredentials:
         _FakeFlow.last_kwargs.update(kwargs)
+        if _FakeFlow.error is not None:
+            raise _FakeFlow.error
         credentials: _FakeCredentials = _FakeFlow.credentials or _FakeCredentials()
         return credentials
 
@@ -67,6 +73,7 @@ def client_secret(tmp_path: Path) -> Path:
 def flow(monkeypatch: pytest.MonkeyPatch) -> type[_FakeFlow]:
     _FakeFlow.last_kwargs = {}
     _FakeFlow.credentials = None
+    _FakeFlow.error = None
     monkeypatch.setattr(auth_module, "InstalledAppFlow", _FakeFlow)
     return _FakeFlow
 
@@ -290,3 +297,24 @@ def test_transport_failure_on_refresh_is_reported(
     with pytest.raises(AuthError) as raised:
         load_credentials(client_secret, token_file, LOGIN_HINT)
     assert raised.value.reason is AuthErrorReason.REFRESH_FAILED
+
+
+def test_browser_wait_is_limited_and_texts_are_russian(
+    client_secret: Path, tmp_path: Path, flow: type[_FakeFlow]
+) -> None:
+    load_credentials(client_secret, tmp_path / "t.json", login_hint=LOGIN_HINT)
+    assert flow.last_kwargs["timeout_seconds"] == LOGIN_TIMEOUT_SEC == 600
+    assert flow.last_kwargs["authorization_prompt_message"] == msg.AUTH_OPEN_LINK
+    assert flow.last_kwargs["success_message"] == msg.AUTH_BROWSER_DONE
+    assert "{url}" in msg.AUTH_OPEN_LINK
+
+
+def test_browser_timeout_is_login_timeout(client_secret: Path, tmp_path: Path, flow: type[_FakeFlow]) -> None:
+    """WSGITimeoutError наследует AttributeError: без отдельной ветки это было бы падение запуска."""
+    flow.error = WSGITimeoutError("Timed out waiting for response from authorization server")
+    token_file: Path = tmp_path / "t.json"
+    with pytest.raises(AuthError) as raised:
+        load_credentials(client_secret, token_file, login_hint=LOGIN_HINT)
+    assert raised.value.reason is AuthErrorReason.LOGIN_TIMEOUT
+    assert str(raised.value).startswith("login_timeout:")
+    assert not token_file.exists()

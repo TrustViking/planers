@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from typing import Any, Final
 
@@ -130,6 +130,22 @@ class SlotRecord:
     updated_at: str              # DD-MM-YYYY HH:MM
     results: RecordResults
     snapshot: RecordSnapshot | None = None   # None — запись прочитана из базы (снимок обратно не читается)
+    stored_json: str | None = field(default=None, compare=False, repr=False)   # JSON, как он лежит в базе
+
+    def has_same_content(self, other: SlotRecord | None) -> bool:
+        """Запись не изменилась: всё, кроме updated_at, как у последней записанной (из базы или этим запуском).
+
+        У записи из базы снимка нет — сравнивается JSON, как он лежит в базе.
+        """
+        if other is None:
+            return False
+        own: tuple[str, ...] = (self.slot_id, self.youtube_channel_id, self.slot_start_utc, self.stage.value)
+        theirs: tuple[str, ...] = (other.slot_id, other.youtube_channel_id, other.slot_start_utc, other.stage.value)
+        return own == theirs and self.record_json() == other.saved_json()
+
+    def saved_json(self) -> str:
+        """JSON записи в базе: прочитанный — как прочитан, построенный — как будет записан."""
+        return self.stored_json if self.stored_json is not None else self.record_json()
 
     def record_json(self) -> str:
         payload: dict[str, Any] = {
@@ -162,6 +178,7 @@ class SlotRecord:
             stage=_stage(stage),
             updated_at=updated_at,
             results=RecordResults.from_json(results),
+            stored_json=record_json,
         )
 
 

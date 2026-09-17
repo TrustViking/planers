@@ -136,3 +136,34 @@ def test_schema_version_is_recorded(tmp_path: Path) -> None:
     RecordStore.open(path, read_only=False, now_local=NOW).close()
     value = sqlite3.connect(path).execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     assert value == (store_module.SCHEMA_VERSION,)
+
+
+def test_saved_line_names_requested_stage_only_when_it_differs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="planer")
+    store: RecordStore = RecordStore.open(tmp_path / "planer.sqlite3", read_only=False, now_local=NOW)
+    store.save(_record(), requested=SlotStage.ADMITTED)
+    store.save(_record(), requested=SlotStage.PUBLISHED)
+    store.close()
+    lines: list[str] = [record.getMessage() for record in caplog.records if record.getMessage().startswith("record_saved")]
+    assert lines == [
+        "record_saved slot_id=17-03-2027_1900_uk youtube_channel_id=UC1 stage=published requested=admitted",
+        "record_saved slot_id=17-03-2027_1900_uk youtube_channel_id=UC1 stage=published",
+    ]
+
+
+def test_record_read_back_has_same_content_except_updated_at(tmp_path: Path) -> None:
+    """Сравнение «запись изменилась»: прочитанная из базы и та же, построенная заново, — одинаковые."""
+    path: Path = tmp_path / "planer.sqlite3"
+    store: RecordStore = RecordStore.open(path, read_only=False, now_local=NOW)
+    store.save(_record())
+    found: SlotRecord | None = store.find("17-03-2027_1900_uk", "UC1")
+    store.close()
+    assert found is not None
+    later: SlotRecord = replace(_record(), updated_at="16-03-2027 13:00")
+    assert later.has_same_content(found)
+    assert not later.has_same_content(None)
+    assert not replace(later, stage=SlotStage.KEY_CONFIRMED).has_same_content(found)
+    changed: SlotRecord = replace(later, results=RecordResults(stream_key="bcde-bcde-bcde-bcde-bcde"))
+    assert not changed.has_same_content(found)

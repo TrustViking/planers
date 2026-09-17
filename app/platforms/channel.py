@@ -8,6 +8,7 @@ ChannelBook — все каналы запуска. Порядок запуск�
 READY / NEEDS_LOGIN / REFUSED / FAILED) → фаза входов (log_in_needed: каналы с объектами и статусом
 NEEDS_LOGIN входят подряд) → работа с площадкой только по каналам READY (VerifiedPlatform). После фазы
 входов браузер в этом запуске не открывается. Токен нового входа пишется только после подтверждения канала.
+Вход, не завершённый за LOGIN_TIMEOUT_SEC, — FAILED без второй попытки: человека нет у компьютера.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.text import UNICODE_FORM, handle_from_custom_url, normalize_handle
+from app.google.auth import LOGIN_TIMEOUT_MINUTES, LOGIN_TIMEOUT_SEC, AuthErrorReason
 from app.observability.logging_setup import get_logger
 from app.platforms.base import LOGIN_REQUIRED_CODE, BroadcastPlatform, ChannelInfo, PlatformError
 from app.platforms.passport import PassportEntry
@@ -40,7 +42,8 @@ REFUSAL_TEMPLATES: Final[dict[str, str]] = {
     ERROR_CHANNEL_HANDLE_MISMATCH: msg.AUTH_CHANNEL_HANDLE_MISMATCH,
     ERROR_CHANNEL_ID_MISMATCH: msg.AUTH_CHANNEL_ID_MISMATCH,
 }
-LOGIN_REQUIRED_REASON: Final[str] = "login_required"   # ключ AUTH_REASON_TEXT
+LOGIN_REQUIRED_REASON: Final[str] = AuthErrorReason.LOGIN_REQUIRED.value   # ключ AUTH_REASON_TEXT
+REASON_SEPARATOR: Final[str] = ":"   # сообщение отказа входа: «<AuthErrorReason>: подробности»
 
 
 def normalize_channel_title(title: str) -> str:
@@ -56,6 +59,17 @@ def youtube_handle_key(info: ChannelInfo) -> str | None:
 def youtube_handle_text(info: ChannelInfo) -> str:
     """Ник, который прислал YouTube, — для людей; ника нет — «без ника»."""
     return handle_from_custom_url(info.handle_raw) if info.handle_raw else msg.AUTH_YOUTUBE_HANDLE_MISSING
+
+
+def login_failure_reason(error: PlatformError) -> str:
+    """Причина отказа входа — значение AuthErrorReason в начале сообщения площадки."""
+    return error.message.split(REASON_SEPARATOR, 1)[0]
+
+
+def login_failure_text(error: PlatformError) -> str:
+    """Причина отказа входа для владельца; причины нет в AUTH_REASON_TEXT — сообщение как есть."""
+    template: str | None = msg.AUTH_REASON_TEXT.get(login_failure_reason(error))
+    return template.format(minutes=LOGIN_TIMEOUT_MINUTES) if template is not None else error.message
 
 
 class ChannelStatus(str, Enum):
@@ -274,6 +288,7 @@ class ChannelBook:
         return False
 
     def _fail(self, channel: Channel, error: PlatformError) -> None:
+        """Сбой входа — FAILED, второй попытки нет (в том числе по таймауту: человека нет у компьютера)."""
         LOGGER.error(
             'login_failed channel="%s" handle=%s code=%s message="%s"',
             channel.config.account_name,
@@ -282,7 +297,17 @@ class ChannelBook:
             error.message,
         )
         self._platform.drop_login(channel.config)
-        channel.mark_failed(error)
+        if login_failure_reason(error) == AuthErrorReason.LOGIN_TIMEOUT.value:
+            LOGGER.warning(
+                'login_timeout channel="%s" handle=%s timeout_sec=%d',
+                channel.config.account_name,
+                channel.config.handle,
+                LOGIN_TIMEOUT_SEC,
+            )
+            # в отчёт — текст для владельца, а не служебное сообщение библиотеки
+            channel.mark_failed(PlatformError(error.code, login_failure_text(error)))
+        else:
+            channel.mark_failed(error)
         if self._console is not None:
             self._console.on_login_failed(channel.config, error)
 

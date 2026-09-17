@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from app.config.loader import ChannelConfig, PlanerConfig, load_channels, render_channels_file
-from app.google.auth import token_file_for
+from app.google.auth import LOGIN_TIMEOUT_MINUTES, token_file_for
 from app.paths import PlanerPaths
 from app.pipeline.runner import RunMode, run
 from app.platforms.base import ChannelInfo, PlatformError
@@ -25,6 +25,7 @@ from app.platforms.channel import (
     ChannelBook,
     ChannelStatus,
     CheckVerdict,
+    login_failure_text,
 )
 from app.platforms.channel_sync import ChannelSync
 from app.platforms.fake import FAKE_TOKEN_TEXT, FakePlatform
@@ -243,6 +244,29 @@ def test_login_failure_is_failed(
     assert channel.error is not None and channel.error.code == "authFailed"
     assert console.events == [("login", "yt_ua"), ("failed", "yt_ua", "authFailed")]
     assert not _token(planer_paths, ua).exists()
+
+
+def test_login_timeout_is_failed_without_second_attempt(
+    planer_paths: PlanerPaths, make_config: ConfigFactory, fake_platform: FakePlatform
+) -> None:
+    """Вход не завершён за LOGIN_TIMEOUT_SEC: FAILED с текстом причины, второго входа нет, другой канал входит."""
+    config: PlanerConfig = make_config()
+    ua, other = config.channels[0], config.channels[1]
+    fake_platform.tokens_missing = {ua.key, other.key}
+    fake_platform.fail_login[ua.key] = PlatformError("authFailed", "login_timeout: no answer in 600 s")
+    console: _Console = _Console()
+    book: ChannelBook = _book(fake_platform, planer_paths, console)
+    book.log_in_needed(config.channels)
+    channel: Channel = book.channel(ua)
+    assert channel.status is ChannelStatus.FAILED and channel.login_attempts == 1
+    expected: str = msg.AUTH_REASON_TEXT["login_timeout"].format(minutes=LOGIN_TIMEOUT_MINUTES)
+    assert channel.error is not None and channel.error.message == expected
+    assert "10 минут" in expected
+    assert login_failure_text(PlatformError("authFailed", "login_timeout: no answer in 600 s")) == expected
+    assert fake_platform.logins.count(ua.key) == 1
+    assert ("failed", ua.key, "authFailed") in console.events
+    assert book.channel(other).status is ChannelStatus.READY
+    assert not _token(planer_paths, ua).exists()           # следующий запуск снова предложит вход
 
 
 def test_login_with_other_title_aligns_channels_file(

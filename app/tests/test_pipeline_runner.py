@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import logging
 import random
 import re
 
 import pytest
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from app.config.loader import ChannelConfig, PlanerConfig
+from app.core.dates import format_datetime_text
 from app.package.model import FormSpec, PackageError, PackageErrorReason
 from app.output.report import FormState, OutcomeKind, PackageLineStatus, SkipKind, SkippedLine
 from app.paths import PlanerPaths
@@ -81,8 +83,8 @@ def _run(
     rng: random.Random,
     store: RecordStore | None = None,
 ) -> RunOutcome:
-    """Без store — пустая память первого запуска (эфиры с меткой планера — уже переданные)."""
-    return run(mode, config, paths, platform, sender, now, rng, store=store)
+    """Без store — пустая память первого запуска (эфиры с меткой планера — уже переданные). Часы стоят на now."""
+    return run(mode, config, paths, platform, sender, now, rng, store=store, clock=lambda: now)
 
 
 def _memory_without_confirmations() -> RecordStore:
@@ -1583,11 +1585,15 @@ def _run_with_memory(
     sender: FakeFormSender,
     now: datetime,
     rng: random.Random,
+    clock: Callable[[], datetime] | None = None,
 ) -> RunOutcome:
-    """Как main: память открыта на запуск (в --dry-run и --status — только чтение) и закрыта после него."""
+    """Как main: память открыта на запуск (в --dry-run и --status — только чтение) и закрыта после него.
+
+    Без clock часы стоят на now.
+    """
     store: RecordStore = _open_store(paths, read_only=mode is not RunMode.FULL)
     try:
-        return run(mode, config, paths, platform, sender, now, rng, store=store)
+        return run(mode, config, paths, platform, sender, now, rng, store=store, clock=clock or (lambda: now))
     finally:
         store.close()
 
@@ -1851,3 +1857,97 @@ def test_record_log_lines_follow_the_object(
     assert names == [
         "record_saved admitted", "broadcast_created", "record_saved published", "form_send", "record_saved key_confirmed"
     ]
+
+
+class _SteppingClock:
+    """Часы запуска: стоят, пока их не сдвинут; отправитель формы сдвигает их в момент отправки."""
+
+    def __init__(self, start: datetime) -> None:
+        self.now: datetime = start
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class _ClockMovingSender(FakeFormSender):
+    """Форма отвечает не сразу: к подтверждению часы ушли вперёд."""
+
+    def __init__(self, clock: _SteppingClock, step: timedelta, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._clock: _SteppingClock = clock
+        self._step: timedelta = step
+
+    def send(self, planned: PlannedBroadcast) -> FormSendResult:
+        self._clock.now = self._clock.now + self._step
+        return super().send(planned)
+
+
+def _clock_text(moment: datetime) -> str:
+    return format_datetime_text(moment.astimezone())
+
+
+def test_event_times_come_from_the_clock_at_the_event(
+    tmp_path: Path, planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    """Публикация и подтверждение — моменты событий, а не время старта запуска."""
+    _uk_package(make_package, make_slot, planer_paths)
+    published: datetime = now + timedelta(minutes=11)
+    confirmed: datetime = published + timedelta(minutes=3)
+    clock: _SteppingClock = _SteppingClock(published)
+    sender: _ClockMovingSender = _ClockMovingSender(
+        clock, confirmed - published, key_form=_form_with_dates(tmp_path, "17.03.2027")
+    )
+    outcome: RunOutcome = _run_with_memory(
+        RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng, clock=clock
+    )
+    assert outcome.exit_code == ExitCode.OK and len(sender.calls) == 1
+    record: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert record is not None
+    assert record.results.published_at == _clock_text(published)
+    assert record.results.confirmed_at == _clock_text(confirmed)
+    assert record.updated_at == _clock_text(confirmed)
+    keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
+    assert f"отправлен в форму {_clock_text(confirmed)}" in keys_text
+    assert outcome.report is not None and _clock_text(now) == outcome.report.generated_at_text
+    # следующий запуск показывает момент подтверждения из памяти
+    later: datetime = confirmed + timedelta(hours=2)
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, later, rng)
+    assert f"передан в форму {_clock_text(confirmed)}" in planer_paths.keys_file.read_text(encoding="utf-8")
+
+
+def _record_lines(caplog: pytest.LogCaptureFixture, name: str) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.getMessage().startswith(name + " ")]
+
+
+def test_unchanged_record_is_not_written_again(
+    tmp_path: Path, planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, now: datetime, rng: random.Random,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Запуск без изменений ничего не пишет в память; изменение — пишет; в лог — итоговая и запрошенная стадии."""
+    caplog.set_level(logging.DEBUG, logger="planer")
+    _uk_package(make_package, make_slot, planer_paths)
+    sender: FakeFormSender = FakeFormSender(key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    # второй запуск: решение сменилось (создан -> совпал) — снимок записи другой, одна запись
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    before: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    caplog.clear()
+    later: datetime = now + timedelta(hours=1)
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, later, rng)
+    assert _record_lines(caplog, "record_saved") == []
+    unchanged: list[str] = _record_lines(caplog, "record_unchanged")
+    assert unchanged and all("stage=key_confirmed" in line for line in unchanged)
+    assert _stored(planer_paths, UK_SLOT) == before          # updated_at тоже прежний: записи не было
+    assert len(sender.calls) == 1
+    caplog.clear()
+    make_package(
+        planer_paths.bcast_dir, generated_at="14-09-2026 10:15",
+        slots=[make_slot("17-03-2027", "19:00", "uk", title="Новое название эфира")],
+    )
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, later, rng)
+    saved: list[str] = _record_lines(caplog, "record_saved")
+    assert saved and saved[0].endswith("stage=key_confirmed requested=admitted")
+    after: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert after is not None and after.updated_at == _clock_text(later)

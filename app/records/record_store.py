@@ -16,7 +16,7 @@ from typing import Final
 
 from app.core.dates import FILE_STAMP_FORMAT
 from app.observability.logging_setup import get_logger
-from app.records.slot_record import SlotRecord
+from app.records.slot_record import SlotRecord, SlotStage
 from app.ui import messages_ru as msg
 
 LOGGER = get_logger("records")
@@ -144,8 +144,11 @@ class RecordStore:
             return None
         return SlotRecord.from_row(*row) if row is not None else None
 
-    def save(self, record: SlotRecord) -> bool:
-        """Upsert одной транзакцией; read_only — ничего не пишет. Сбой — False и строка предупреждения один раз."""
+    def save(self, record: SlotRecord, requested: SlotStage | None = None) -> bool:
+        """Upsert одной транзакцией; read_only — ничего не пишет. Сбой — False и строка предупреждения один раз.
+
+        requested — стадия, которую просил код; в лог идёт, если легла другая (стадия не откатывается).
+        """
         if self._read_only:
             return False
         values: tuple[str, ...] = (
@@ -162,11 +165,15 @@ class RecordStore:
         except (sqlite3.Error, OSError) as error:
             self._report_write_failure(record, error)
             return False
+        requested_part: str = (
+            f" requested={requested.value}" if requested is not None and requested is not record.stage else ""
+        )
         LOGGER.info(
-            "record_saved slot_id=%s youtube_channel_id=%s stage=%s",
+            "record_saved slot_id=%s youtube_channel_id=%s stage=%s%s",
             record.slot_id,
             record.youtube_channel_id,
             record.stage.value,
+            requested_part,
         )
         return True
 

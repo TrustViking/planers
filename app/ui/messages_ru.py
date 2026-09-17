@@ -134,13 +134,22 @@ AUTH_SCOPE_HINT: Final[str] = (
     "Если на экране согласия не было пункта про управление YouTube-аккаунтом — "
     "значит скоуп youtube не добавлен в настройках доступа приложения в Google Cloud."
 )
-# ключи — значения AuthErrorReason (app/google/auth.py)
+# Вход в браузере (app/google/auth.py::_run_flow): строка в консоли — формат библиотеки, плейсхолдер {url};
+# страница в браузере после входа.
+AUTH_OPEN_LINK: Final[str] = "Если браузер не открылся — откройте ссылку: {url}"
+AUTH_BROWSER_DONE: Final[str] = "Вход выполнен. Вернитесь в окно планера."
+# ключи — значения AuthErrorReason (app/google/auth.py); {minutes} — auth.LOGIN_TIMEOUT_MINUTES,
+# подставляет app/platforms/channel.py::login_failure_text
 AUTH_REASON_TEXT: Final[dict[str, str]] = {
     "client_secret_missing": "нет файла client_secret.json",
     "token_unreadable": "файл токена не читается; удалите его и повторите --auth",
     "flow_failed": "браузер не вернул разрешение",
     "refresh_failed": "не удалось обновить токен (нет связи с Google)",
     "login_required": "нужен вход в Google: токена нет или он отозван",
+    "login_timeout": (
+        "вход не завершён за {minutes} минут — браузер закрыт или вход не выбран; "
+        "при следующем запуске планер снова предложит вход"
+    ),
 }
 # Выравнивание канала по id YouTube (app/platforms/channel_sync.py): предупреждения запуска.
 WARNING_CHANNEL_ALIGNED: Final[str] = (

@@ -296,7 +296,7 @@ class PlannedBroadcast:
     should_send_key: bool = False  # ключ должен дойти до стримера в этом запуске (decide_key_delivery)
 
     # --- память планера: запись прошлых запусков (из неё читаются только результаты)
-    record: SlotRecord | None = None
+    record: SlotRecord | None = None   # последняя записанная: прочитанная из памяти или записанная этим запуском
     confirmed_results: RecordResults | None = None   # подтверждение этого запуска (confirm_key); иначе — из записи
     is_bootstrap_confirmed: bool = False             # первый запуск с памятью записал подтверждение без отправки
 
@@ -485,7 +485,7 @@ class PlannedBroadcast:
         return True
 
     def confirm_key(self, now: datetime, *, is_bootstrap: bool = False) -> None:
-        """Форма подтвердила текущую тройку: ключ, адрес формы, ответы."""
+        """Форма подтвердила текущую тройку: ключ, адрес формы, ответы. now — момент подтверждения."""
         self.confirmed_results = replace(
             self.results,
             confirmed_stream_key=self.stream_key,
@@ -516,8 +516,20 @@ class PlannedBroadcast:
             snapshot=self._snapshot(),
         )
 
+    def record_to_save(self, now: datetime, stage: SlotStage) -> SlotRecord | None:
+        """Новая запись объекта на момент now; None — она не отличается от последней записанной (кроме updated_at)."""
+        record: SlotRecord = self.to_record(now, stage)
+        return None if record.has_same_content(self.record) else record
+
+    def remember_record(self, record: SlotRecord) -> None:
+        """Записанное становится последней записью объекта: с ней сравнивается следующая."""
+        self.record = record
+
     def _published_results(self, now: datetime) -> RecordResults:
-        """Эфир, поток и ключ — взятые этим запуском; не взяты — прежние из записи."""
+        """Эфир, поток и ключ — взятые этим запуском; не взяты — прежние из записи.
+
+        now — момент записи сразу после действий по объекту: published_at нового ключа — это он.
+        """
         results: RecordResults = self.results
         if not self.stream_key:
             return results
