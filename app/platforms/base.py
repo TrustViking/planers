@@ -33,6 +33,8 @@ PICTURE_SHA_CHARS: Final[int] = 12
 # Отпечаток заглушки в описании потока: планер записывает его при создании эфира, пока обложки ещё нет.
 PLACEHOLDER_TOKEN: Final[str] = "thumb0={sha}"
 PLACEHOLDER_PATTERN: Final[re.Pattern[str]] = re.compile(r"thumb0=([0-9a-f]{12})")
+# Код площадки «нужен вход, а браузер открывать нельзя» — один на все площадки и на фейк.
+LOGIN_REQUIRED_CODE: Final[str] = "loginRequired"
 
 
 def picture_sha(content: bytes) -> str:
@@ -219,6 +221,18 @@ class BroadcastPlatform(Protocol):
         """Канал, на который ведёт токен: id, название, ник, язык канала (ТЗ §5.3).
 
         allow_login=False — вход в браузере запрещён: нужен вход — PlatformError, браузер не открывается.
+        allow_login=True зовёт только вход канала (ChannelBook), всегда после drop_login.
+        """
+        ...
+
+    def keep_login(self, channel: ChannelConfig) -> None:
+        """Канал подтверждён: записать токен нового входа. Нового входа не было — ничего не делать."""
+        ...
+
+    def drop_login(self, channel: ChannelConfig) -> None:
+        """Забыть клиент, учётные данные и ChannelInfo канала: следующий describe_channel откроет вход заново.
+
+        Файл токена на диске не трогается и следующим входом не читается.
         """
         ...
 

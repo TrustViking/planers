@@ -14,7 +14,9 @@ from app.google.auth import (
     YOUTUBE_SCOPE,
     AuthError,
     AuthErrorReason,
+    drop_token,
     load_credentials,
+    save_token,
     token_file_for,
 )
 
@@ -146,7 +148,22 @@ def test_flow_runs_on_free_port_and_asks_for_refresh_token(
     assert flow.last_kwargs["access_type"] == ACCESS_TYPE
     assert flow.last_kwargs["prompt"] == PROMPT
     assert flow.last_kwargs["login_hint"] == LOGIN_HINT     # браузер сразу предлагает аккаунт канала
+    assert PROMPT == "select_account consent"                # экран выбора аккаунта и канала
+    assert not token_file.exists()                          # вход файл не пишет: канал ещё не подтверждён
+
+
+def test_save_token_writes_the_file(tmp_path: Path) -> None:
+    token_file: Path = tmp_path / "secrets" / "@yt_ua.token.json"
+    save_token(_FakeCredentials(), token_file)  # type: ignore[arg-type]
     assert token_file.read_text(encoding="utf-8") == TOKEN_JSON
+
+
+def test_drop_token_removes_the_file(tmp_path: Path) -> None:
+    token_file: Path = tmp_path / "@yt_ua.token.json"
+    token_file.write_text("x", encoding="utf-8")
+    drop_token(token_file)
+    drop_token(token_file)                                  # файла уже нет — не ошибка
+    assert not token_file.exists()
 
 
 def test_valid_token_is_reused_without_browser(
@@ -188,7 +205,7 @@ def test_expired_token_is_refreshed_silently(
     assert token_file.read_text(encoding="utf-8") == TOKEN_JSON
 
 
-def test_force_reauth_drops_token_and_opens_browser(
+def test_force_reauth_keeps_old_token_and_opens_browser(
     client_secret: Path,
     tmp_path: Path,
     flow: type[_FakeFlow],
@@ -203,7 +220,7 @@ def test_force_reauth_drops_token_and_opens_browser(
     )
     load_credentials(client_secret, token_file, LOGIN_HINT, force_reauth=True)
     assert flow.last_kwargs["port"] == 0
-    assert token_file.read_text(encoding="utf-8") == TOKEN_JSON
+    assert token_file.read_text(encoding="utf-8") == "old token"   # --auth: прежний токен до подтверждения
 
 
 def test_unreadable_token_is_reported(

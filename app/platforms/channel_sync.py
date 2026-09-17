@@ -4,19 +4,21 @@ Id канала на YouTube не меняется никогда, а ник и 
 подтверждается по id (паспорт каналов), планер сам переписывает ник и название в channels.json,
 переименовывает файл токена и обновляет паспорт — повторный вход владельцу не нужен.
 
-При старте (run) — по каждому каналу channels.json, без браузера (describe_channel(allow_login=False)):
-  - токен по нику есть: ник на YouTube совпал — выровнять название (если в паспорте тот же ник не
-    с другим id), иначе — выровнять ник, если паспорт по нику подтверждает тот же id;
+При старте (run) — по каждому каналу channels.json, без браузера (describe_channel(allow_login=False));
+что делать, решает Channel.check (app/platforms/channel.py), итог записывается в объект Channel:
+  - токен по нику есть: подтверждён — READY; тот же канал с другим ником или названием — выровнять, READY;
+    не тот канал и паспорт его id не подтверждает — токен чужой: файл удаляется, NEEDS_LOGIN;
+    нужен вход (токен отозван) — NEEDS_LOGIN; сбой площадки — FAILED;
   - токена по нику нет: токен ищется по записям паспорта, чьих ников нет в channels.json (ник поправили
-    руками) — канал за таким токеном с ником из channels.json — тот же канал: токен переименовывается.
-Канал без токена браузер не открывает: вход — при первом обращении к нему (VerifiedPlatform).
+    руками) — канал за таким токеном с ником из channels.json — тот же канал: токен переименовывается, READY;
+    иначе — NEEDS_LOGIN.
+Браузер здесь не открывается: вход — в фазе входов (ChannelBook.log_in_needed).
 За старт channels.json переписывается один раз (прежний — в channels.previous.json), затем конфиг перечитывается.
-VerifiedPlatform выравнивает тем же кодом (align_in_run), если расхождение нашлось уже по ходу запуска.
+Вход в фазе входов выравнивает тем же кодом (align_in_run).
 """
 from __future__ import annotations
 
 import os
-import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -34,27 +36,26 @@ from app.config.loader import (
     save_channels_file,
 )
 from app.core.dates import format_datetime_text
-from app.core.text import UNICODE_FORM, handle_from_custom_url, normalize_handle
-from app.google.auth import token_file_for
+from app.core.text import handle_from_custom_url, normalize_handle
+from app.google.auth import AuthError, drop_token, token_file_for
 from app.observability.logging_setup import get_logger
 from app.paths import PlanerPaths
-from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
+from app.platforms.base import LOGIN_REQUIRED_CODE, BroadcastPlatform, ChannelInfo, PlatformError
+from app.platforms.channel import (
+    Channel,
+    ChannelCheck,
+    CheckVerdict,
+    normalize_channel_title,
+    youtube_handle_key,
+    youtube_handle_text,
+)
 from app.platforms.passport import ChannelPassport, PassportEntry
 from app.ui import messages_ru as msg
 
 LOGGER = get_logger("channel")
 
 LOG_MISSING: Final[str] = "-"
-
-
-def normalize_channel_title(title: str) -> str:
-    """Название канала на YouTube в форме channels.json: NFC, края сняты."""
-    return unicodedata.normalize(UNICODE_FORM, title).strip()
-
-
-def youtube_handle_key(info: ChannelInfo) -> str | None:
-    """Ключ ника, который прислал YouTube; ника нет — None."""
-    return normalize_handle(handle_from_custom_url(info.handle_raw)) if info.handle_raw else None
+ERROR_TOKEN_DROP: Final[str] = "authFailed"   # как ERROR_AUTH у YouTube: файл токена не удалился
 
 
 @dataclass(frozen=True)
@@ -73,13 +74,14 @@ class _Alignment:
 
 
 class ChannelSync:
-    """Один экземпляр на запуск: общий паспорт для сверки при старте и для VerifiedPlatform."""
+    """Один экземпляр на запуск: общий паспорт для сверки при старте и для входов (ChannelBook)."""
 
     def __init__(self, platform: BroadcastPlatform, paths: PlanerPaths, now_local: datetime) -> None:
         self._platform: BroadcastPlatform = platform
         self._paths: PlanerPaths = paths
         self._verified_at: str = format_datetime_text(now_local)
         self._warnings: list[str] = []
+        self._channels: list[Channel] = []   # объекты каналов после run; забирает take_channels
         self._passport: ChannelPassport
         self._passport, problem = ChannelPassport.load(paths.channels_passport_file)
         self._is_passport_dirty: bool = problem is not None   # не читался — перезаписать
@@ -97,6 +99,22 @@ class ChannelSync:
     def token_file(self, channel: ChannelConfig) -> Path:
         return token_file_for(self._paths.secrets_dir, channel.handle)
 
+    def new_channel(self, config: ChannelConfig) -> Channel:
+        """Объект канала до проверки: файл токена и запись паспорта по нику."""
+        return Channel(
+            config=config,
+            token_file=self.token_file(config),
+            passport_entry=self._passport.find_by_key(config.key),
+        )
+
+    def take_channels(self) -> list[Channel]:
+        taken: list[Channel] = list(self._channels)
+        self._channels.clear()
+        return taken
+
+    def add_warning(self, text: str) -> None:
+        self._warnings.append(text)
+
     def take_warnings(self) -> list[str]:
         """Предупреждения запуска, накопленные с прошлого вызова."""
         taken: list[str] = list(self._warnings)
@@ -104,19 +122,36 @@ class ChannelSync:
         return taken
 
     def run(self, config: PlanerConfig) -> tuple[PlanerConfig, list[str]]:
-        """Сверка при старте: конфиг после выравнивания и предупреждения для консоли и отчёта."""
+        """Сверка при старте: конфиг после выравнивания и предупреждения для консоли и отчёта.
+
+        Объекты каналов (статус, что прислал YouTube) — take_channels, по значениям конфига после выравнивания.
+        """
         known: frozenset[str] = frozenset(channel.key for channel in config.channels)
         claimed: set[str] = set()   # записи паспорта, чей токен уже отдан другому каналу
-        alignments: list[_Alignment] = []
-        for channel in config.channels:
-            alignment: _Alignment | None = self._check_channel(channel, known, claimed)
-            if alignment is not None:
-                alignments.append(alignment)
-        applied: list[_Alignment] = self._apply(alignments, in_run=False)
+        checked: list[tuple[Channel, _Alignment | None]] = []
+        for channel_config in config.channels:
+            channel: Channel = self.new_channel(channel_config)
+            checked.append((channel, self._check_channel(channel, known, claimed)))
+        applied: list[_Alignment] = self._apply([item for _, item in checked if item is not None], in_run=False)
+        for channel, alignment in checked:
+            if alignment is not None and alignment in applied:
+                channel.config, channel.token_file = alignment.after, alignment.token_target
         self._save_passport()
         if applied:
             config = load_planer_config(self._paths.config_file, self._paths.channels_file)
+        self._channels = self._channels_for(config, [channel for channel, _ in checked])
         return config, self.take_warnings()
+
+    def _channels_for(self, config: PlanerConfig, channels: Sequence[Channel]) -> list[Channel]:
+        """Объекты в порядке channels.json; конфиг объекта — ровно тот, что прочитан после выравнивания."""
+        by_key: dict[str, Channel] = {channel.key: channel for channel in channels}
+        result: list[Channel] = []
+        for channel_config in config.channels:
+            channel: Channel = by_key.get(channel_config.key) or self.new_channel(channel_config)
+            channel.config = channel_config
+            channel.passport_entry = self._passport.find_by_key(channel_config.key)
+            result.append(channel)
+        return result
 
     def confirm(self, channel: ChannelConfig, info: ChannelInfo) -> None:
         """Канал проверен без выравнивания: запись паспорта создать или обновить и сразу сохранить."""
@@ -132,36 +167,68 @@ class ChannelSync:
         self._save_passport()
         return bool(applied)
 
-    def _check_channel(self, channel: ChannelConfig, known: frozenset[str], claimed: set[str]) -> _Alignment | None:
-        token: Path = self.token_file(channel)
-        if not token.is_file():
-            return self._find_moved_token(channel, known, claimed)
+    def _check_channel(self, channel: Channel, known: frozenset[str], claimed: set[str]) -> _Alignment | None:
+        """Статус канала — в объект; наружу — что выровнять."""
+        if not channel.token_file.is_file():
+            alignment: _Alignment | None = self._find_moved_token(channel.config, known, claimed)
+            if alignment is not None:
+                channel.mark_ready(alignment.info)
+            return alignment
         info: ChannelInfo | None = self._describe(channel)
         if info is None:
             return None
-        return self._decide(channel, info, token)
+        return self._decide(channel, info)
 
-    def _decide(self, channel: ChannelConfig, info: ChannelInfo, token: Path) -> _Alignment | None:
-        """Ник совпал — выровнять название; ник другой — выровнять ник, только если паспорт подтверждает id."""
-        entry: PassportEntry | None = self._passport.find_by_key(channel.key)
-        handle_key: str | None = youtube_handle_key(info)
-        is_same_id: bool = entry is not None and entry.youtube_channel_id == info.youtube_channel_id
-        if handle_key == channel.key and (entry is None or is_same_id):
-            if normalize_channel_title(info.title) == channel.account_name:
-                self._record(channel, channel, info)
-                return None
-            return self._plan(channel, info, token)
-        if handle_key is not None and handle_key != channel.key and is_same_id:
-            return self._plan(channel, info, token)
-        LOGGER.info(
-            'channel_sync_left channel="%s" handle=%s handle_raw=%s youtube_channel_id=%s passport_channel_id=%s',
-            channel.account_name,
-            channel.handle,
+    def _decide(self, channel: Channel, info: ChannelInfo) -> _Alignment | None:
+        """Решение — Channel.check: подтверждён — паспорт; тот же канал — выровнять; не тот — токен чужой."""
+        check: ChannelCheck = channel.check(info)
+        if check.verdict is CheckVerdict.REFUSED and check.code is not None:
+            self._refuse(channel, info, check.code)
+            return None
+        channel.mark_ready(info)
+        if check.verdict is CheckVerdict.ALIGN:
+            alignment: _Alignment | None = self._plan(channel.config, info, channel.token_file)
+            if alignment is not None:
+                return alignment
+        self._record(channel.config, channel.config, info)
+        return None
+
+    def _refuse(self, channel: Channel, info: ChannelInfo, code: str) -> None:
+        """Паспорт подтверждает id (у канала пропал ник) — отказ до конца запуска; иначе токен чужой."""
+        if not channel.is_confirmed_by_passport(info):
+            self._reject_token(channel, info, code)
+            return
+        channel.log_refused(info, code)
+        channel.mark_refused(info, channel.refusal(info, code, self._paths.channels_file))
+
+    def _reject_token(self, channel: Channel, info: ChannelInfo, code: str) -> None:
+        """Токен ведёт не на тот канал: файл удаляется, канал входит заново в фазе входов."""
+        config: ChannelConfig = channel.config
+        LOGGER.warning(
+            'token_rejected channel="%s" handle=%s youtube_title="%s" handle_raw=%s youtube_channel_id=%s code=%s',
+            config.account_name,
+            config.handle,
+            info.title,
             info.handle_raw or LOG_MISSING,
             info.youtube_channel_id,
-            entry.youtube_channel_id if entry is not None else LOG_MISSING,
+            code,
         )
-        return None
+        self._platform.drop_login(config)
+        try:
+            drop_token(channel.token_file)
+        except AuthError as error:
+            channel.mark_failed(PlatformError(ERROR_TOKEN_DROP, f"{error.reason.value}: {error.detail}"))
+            return
+        channel.mark_needs_login()
+        self._warnings.append(
+            msg.WARNING_TOKEN_REJECTED.format(
+                account_name=config.account_name,
+                handle=config.handle,
+                youtube_title=info.title,
+                youtube_handle=youtube_handle_text(info),
+                youtube_channel_id=info.youtube_channel_id,
+            )
+        )
 
     def _find_moved_token(
         self,
@@ -174,14 +241,29 @@ class ChannelSync:
             source: Path = self._paths.secrets_dir / entry.token_file
             if entry.key in known or entry.key in claimed or not source.is_file():
                 continue
-            info: ChannelInfo | None = self._describe(_channel_from_entry(entry, channel))
+            info: ChannelInfo | None = self._describe_moved(_channel_from_entry(entry, channel))
             if info is not None and youtube_handle_key(info) == channel.key:
                 claimed.add(entry.key)
                 return self._plan(channel, info, source)
         return None
 
-    def _describe(self, channel: ChannelConfig) -> ChannelInfo | None:
-        """Без браузера; любой сбой — канал пропускается, его проверит VerifiedPlatform как обычно."""
+    def _describe(self, channel: Channel) -> ChannelInfo | None:
+        """Без браузера: нужен вход — NEEDS_LOGIN, другой сбой — FAILED; None — дальше проверять нечего."""
+        config: ChannelConfig = channel.config
+        try:
+            return self._platform.describe_channel(config, allow_login=False)
+        except PlatformError as error:
+            LOGGER.info(
+                'channel_sync_skipped channel="%s" handle=%s code=%s', config.account_name, config.handle, error.code
+            )
+            if error.code == LOGIN_REQUIRED_CODE:
+                channel.mark_needs_login()
+            else:
+                channel.mark_failed(error)
+            return None
+
+    def _describe_moved(self, channel: ChannelConfig) -> ChannelInfo | None:
+        """Канал за токеном под прежним ником; любой сбой — токен не опознан."""
         try:
             return self._platform.describe_channel(channel, allow_login=False)
         except PlatformError as error:

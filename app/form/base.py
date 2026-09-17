@@ -1,10 +1,12 @@
 """Отправка ключа в Google-форму (ТЗ §7.5): Protocol FormSender, результат и коды ошибок."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
+from app.package.model import FormSpec
 from app.pipeline.plan import PlannedBroadcast
 
 # Коды исходов отправки; тексты для владельца — в messages_ru по этим же ключам.
@@ -43,6 +45,10 @@ class FormError(Exception):
 
 
 class FormSender(Protocol):
+    def prepare(self, forms: Sequence[FormSpec]) -> None:
+        """Прочитать формы запуска — в начале, один раз на форму; send потом берёт готовую."""
+        ...
+
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         """Всё нужное — внутри объекта: ключ, канал, слот и форма его пакета (§7.5)."""
         ...
@@ -50,6 +56,9 @@ class FormSender(Protocol):
 
 class NoopFormSender:
     """Форма не отправляется: ключ остаётся непереданным. Остаётся для тестов."""
+
+    def prepare(self, forms: Sequence[FormSpec]) -> None:
+        """Читать нечего."""
 
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         return FormSendResult(confirmed=False)

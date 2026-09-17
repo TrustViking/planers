@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ from app.google.auth import AuthError, AuthErrorReason
 from app.platforms.youtube import (
     ERROR_AUTH,
     ERROR_LOGIN_REQUIRED,
-    RETRY_MAX_ATTEMPTS,
+    RETRY_POLICY,
     YOUTUBE_STREAM_KEY_PATTERN,
     ErrorBehavior,
     YouTubePlatform,
@@ -50,6 +51,13 @@ OTHER_CHANNEL: ChannelConfig = replace(
     CHANNEL, account_name="Канал RU", handle="@KanalRU", google_account="ru@gmail.com"
 )
 GOOD_KEY: str = "abcd-1234-efgh-5678-ijkl"
+RNG_SEED: int = 7
+
+
+def _expected_delays(count: int) -> list[float]:
+    """Паузы повторов 1..count по RetryPolicy с тем же фиксированным rng, что у площадки в тестах."""
+    rng: random.Random = random.Random(RNG_SEED)
+    return [RETRY_POLICY.delay_sec(number, rng) for number in range(1, count + 1)]
 
 
 class _FakeRequest:
@@ -142,7 +150,7 @@ class _FakeService:
 def platform(tmp_path: Path) -> YouTubePlatform:
     client_secret: Path = tmp_path / "client_secret.json"
     client_secret.write_text("{}", encoding="utf-8")
-    return YouTubePlatform(client_secret, tmp_path, request_pause_sec=0)
+    return YouTubePlatform(client_secret, tmp_path, request_pause_sec=0, rng=random.Random(RNG_SEED))
 
 
 @pytest.fixture
@@ -479,19 +487,19 @@ def test_transport_failure_becomes_platform_error(
     service: _FakeService = _install(
         platform,
         monkeypatch,
-        _FakeService(liveBroadcasts=[ConnectionError("нет сети")] * RETRY_MAX_ATTEMPTS),
+        _FakeService(liveBroadcasts=[ConnectionError("нет сети")] * RETRY_POLICY.max_attempts),
     )
     with pytest.raises(PlatformError) as raised:
         platform.list_upcoming(CHANNEL)
     assert raised.value.code == "transportFailed"
-    assert len(service.calls) == RETRY_MAX_ATTEMPTS
-    assert clock.sleeps == [1.0, 2.0, 4.0]
+    assert len(service.calls) == RETRY_POLICY.max_attempts == 5
+    assert clock.sleeps == _expected_delays(4)
 
 
 def _platform_with_pause(tmp_path: Path, pause: int) -> YouTubePlatform:
     client_secret: Path = tmp_path / "client_secret.json"
     client_secret.write_text("{}", encoding="utf-8")
-    return YouTubePlatform(client_secret, tmp_path, request_pause_sec=pause)
+    return YouTubePlatform(client_secret, tmp_path, request_pause_sec=pause, rng=random.Random(RNG_SEED))
 
 
 def _stream_list(stream_id: str = "S1") -> dict[str, Any]:
@@ -515,7 +523,7 @@ def test_retry_pause_counts_toward_the_request_pause(
     monkeypatch: pytest.MonkeyPatch,
     clock: _FakeClock,
 ) -> None:
-    """Пауза повтора 1 с дополняется до 2 с; паузы 2 и 4 с её уже покрывают — лишнего sleep нет."""
+    """Паузы повторов (от 2 с) уже покрывают паузу между обращениями — лишнего sleep нет."""
     platform: YouTubePlatform = _platform_with_pause(tmp_path, 2)
     service: _FakeService = _install(
         platform,
@@ -523,7 +531,7 @@ def test_retry_pause_counts_toward_the_request_pause(
         _FakeService(clock, liveBroadcasts=[_http_error(503, "backendError", "x")] * 3 + [{"items": []}]),
     )
     assert platform.list_upcoming(CHANNEL) == []
-    assert clock.sleeps == [1.0, 1.0, 2.0, 4.0]
+    assert clock.sleeps == _expected_delays(3)
     moments: list[float] = [call["at"] for call in service.calls]
     assert all(later - earlier >= 2 for earlier, later in zip(moments, moments[1:]))
 
@@ -693,13 +701,13 @@ def test_retried_refusal_after_all_attempts(
 ) -> None:
     """5xx и сеть после всех попыток — transportFailed; лимит частоты сохраняет свою причину."""
     service: _FakeService = _install(
-        platform, monkeypatch, _FakeService(liveBroadcasts=[_http_error(status, reason, "x")] * RETRY_MAX_ATTEMPTS)
+        platform, monkeypatch, _FakeService(liveBroadcasts=[_http_error(status, reason, "x")] * RETRY_POLICY.max_attempts)
     )
     with pytest.raises(PlatformError) as raised:
         platform.list_upcoming(CHANNEL)
     assert raised.value.code == code
-    assert len(service.calls) == RETRY_MAX_ATTEMPTS
-    assert clock.sleeps == [1.0, 2.0, 4.0]
+    assert len(service.calls) == RETRY_POLICY.max_attempts == 5
+    assert clock.sleeps == _expected_delays(4)
 
 
 def test_unknown_refusal_without_retry_status_is_asked_once(
@@ -799,19 +807,19 @@ def test_broadcast_body_comes_from_the_spec(platform: YouTubePlatform, monkeypat
     assert service.calls[3]["body"]["snippet"]["categoryId"] == "25"
 
 
-def test_login_callback_gets_the_channel_before_the_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Токен ищется по нику; вход — через on_login ровно перед браузером."""
+class _Credentials:
+    def to_json(self) -> str:
+        return '{"token": "new"}'
+
+
+def test_new_login_is_kept_in_memory_until_the_channel_is_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Токен ищется по нику; новый вход файл не пишет — это делает keep_login после подтверждения."""
     client_secret: Path = tmp_path / "client_secret.json"
     client_secret.write_text("{}", encoding="utf-8")
-    logins: list[str] = []
-    platform: YouTubePlatform = YouTubePlatform(
-        client_secret,
-        tmp_path,
-        request_pause_sec=0,
-        on_login=lambda channel: logins.append(channel.account_name),
-    )
-    token_files: list[Path] = []
-    hints: list[str] = []
+    platform: YouTubePlatform = YouTubePlatform(client_secret, tmp_path, request_pause_sec=0, rng=random.Random(RNG_SEED))
+    calls: list[tuple[Path, str, bool, bool]] = []
 
     def _load(
         client_secret_file: Path,
@@ -821,18 +829,79 @@ def test_login_callback_gets_the_channel_before_the_browser(tmp_path: Path, monk
         on_login: Any = None,
         allow_login: bool = True,
     ) -> object:
-        token_files.append(token_file)
-        hints.append(login_hint)
+        calls.append((token_file, login_hint, force_reauth, allow_login))
+        on_login()                                     # браузер открылся: вход новый
+        return _Credentials()
+
+    monkeypatch.setattr(youtube_module, "load_credentials", _load)
+    monkeypatch.setattr(youtube_module, "build", lambda *args, **kwargs: _FakeService())
+    token_file: Path = tmp_path / "@KanalUA.token.json"
+    token_file.write_text("old", encoding="utf-8")
+    platform.drop_login(CHANNEL)
+    platform._service(CHANNEL, True)
+    platform._service(CHANNEL, True)                   # клиент кешируется: вход один раз
+    assert calls == [(token_file, "owner@gmail.com", True, True)]   # токен на диске не читается
+    assert token_file.read_text(encoding="utf-8") == "old"
+    platform.keep_login(CHANNEL)
+    assert token_file.read_text(encoding="utf-8") == '{"token": "new"}'
+    platform.keep_login(CHANNEL)                        # второй раз записывать нечего
+    assert token_file.read_text(encoding="utf-8") == '{"token": "new"}'
+
+
+def test_dropped_login_is_not_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Канал не тот: drop_login забывает учётные данные — keep_login после него ничего не пишет."""
+    client_secret: Path = tmp_path / "client_secret.json"
+    client_secret.write_text("{}", encoding="utf-8")
+    platform: YouTubePlatform = YouTubePlatform(client_secret, tmp_path, request_pause_sec=0, rng=random.Random(RNG_SEED))
+    forced: list[bool] = []
+
+    def _load(client_secret_file: Path, token_file: Path, login_hint: str, force_reauth: bool = False,
+              on_login: Any = None, allow_login: bool = True) -> object:
+        forced.append(force_reauth)
         on_login()
-        return object()
+        return _Credentials()
 
     monkeypatch.setattr(youtube_module, "load_credentials", _load)
     monkeypatch.setattr(youtube_module, "build", lambda *args, **kwargs: _FakeService())
     platform._service(CHANNEL, True)
-    platform._service(CHANNEL, True)                   # клиент кешируется: вход один раз
-    assert logins == ["Канал UA"]
-    assert token_files == [tmp_path / "@KanalUA.token.json"]
-    assert hints == ["owner@gmail.com"]
+    platform.drop_login(CHANNEL)
+    platform.keep_login(CHANNEL)
+    assert not (tmp_path / "@KanalUA.token.json").exists()
+    platform._service(CHANNEL, True)                   # клиент забыт: вход заново, мимо токена
+    assert forced == [False, True]
+
+
+def test_operations_other_than_describe_never_open_the_browser(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allowed: list[bool] = []
+
+    def _load(client_secret_file: Path, token_file: Path, login_hint: str, force_reauth: bool = False,
+              on_login: Any = None, allow_login: bool = True) -> object:
+        allowed.append(allow_login)
+        raise AuthError(AuthErrorReason.LOGIN_REQUIRED, token_file.name)
+
+    monkeypatch.setattr(youtube_module, "load_credentials", _load)
+    with pytest.raises(PlatformError) as raised:
+        platform.list_upcoming(CHANNEL)
+    assert raised.value.code == ERROR_LOGIN_REQUIRED and allowed == [False]
+
+
+def test_server_error_is_retried_by_the_policy_then_refused(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+) -> None:
+    """503: первое обращение и 4 повтора с паузами RetryPolicy (2–3, 4–5, 8–9, 16–17 с), затем отказ."""
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(liveBroadcasts=[_http_error(503, "backendError", "x")] * 5)
+    )
+    with pytest.raises(PlatformError) as raised:
+        platform.list_upcoming(CHANNEL)
+    assert raised.value.code == "transportFailed"
+    assert len(service.calls) == 5
+    assert clock.sleeps == _expected_delays(4)
+    assert [int(delay) for delay in clock.sleeps] == [2, 4, 8, 16]
 
 
 def test_describe_without_login_is_refused_but_not_remembered(
@@ -841,7 +910,7 @@ def test_describe_without_login_is_refused_but_not_remembered(
     """allow_login=False: нужен вход — loginRequired без браузера; следующий обычный вызов входит как всегда."""
     client_secret: Path = tmp_path / "client_secret.json"
     client_secret.write_text("{}", encoding="utf-8")
-    platform: YouTubePlatform = YouTubePlatform(client_secret, tmp_path, request_pause_sec=0)
+    platform: YouTubePlatform = YouTubePlatform(client_secret, tmp_path, request_pause_sec=0, rng=random.Random(RNG_SEED))
     allowed: list[bool] = []
 
     def _load(

@@ -1,7 +1,9 @@
-"""Оркестрация запуска (ТЗ §4): bcast → объекты → сверка → действия → форма → keys.txt → отчёт.
+"""Оркестрация запуска (ТЗ §4): bcast → формы → объекты → входы → сверка → действия → форма → keys.txt → отчёт.
 
 main.py только разбирает флаги, строит зависимости и печатает результат.
 Рабочая единица — PlannedBroadcast: один эфир одного слота на одном канале.
+Формы читаются сразу после пакетов, до входов и до обращений к площадке (FormSender.prepare).
+Фаза входов (ChannelLogins) — между отбором объектов и сверкой: после неё браузер не открывается.
 Отправка в форму — отдельным финальным проходом: ключи, которые в этом запуске должны дойти до стримера (§7.5).
 Истина об эфирах — на площадке: планер не держит своей памяти о прошлых запусках.
 """
@@ -13,9 +15,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
-from app.config.loader import PlanerConfig
+from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import format_datetime_text
 from app.core.retention import cleanup_expired
 from app.form.base import FormSender, FormSendResult
@@ -103,6 +105,13 @@ SPEC_LOG_KEYS: Final[tuple[str, ...]] = (
 )
 
 
+class ChannelLogins(Protocol):
+    """Фаза входов (app/platforms/channel.py::ChannelBook): каналы без входа входят подряд, один за другим."""
+
+    def log_in_needed(self, channels: Sequence[ChannelConfig]) -> None:
+        ...
+
+
 class ExitCode(IntEnum):
     OK = 0            # всё, что можно было сделать, сделано
     ERRORS = 1        # есть ошибки
@@ -135,6 +144,7 @@ class _RunContext:
     form_diagnostics: list[str]   # пути сохранённых ответов формы (§7.5)
     channel_warnings: tuple[str, ...]   # сверка каналов при старте (ChannelSync.run)
     progress: RunProgress
+    logins: ChannelLogins | None        # None — входов нет (тесты без ChannelBook)
 
     @property
     def now_local(self) -> datetime:
@@ -166,10 +176,14 @@ def run(
     notice: str | None = None,
     progress: RunProgress = NoProgress(),
     channel_warnings: Sequence[str] = (),
+    logins: ChannelLogins | None = None,
 ) -> RunOutcome:
-    """channel_warnings — предупреждения сверки каналов при старте: в отчёт и консоль вместе с прочими."""
+    """channel_warnings — предупреждения сверки каналов при старте: в отчёт и консоль вместе с прочими.
+
+    logins — фаза входов: каналы с объектами (в --status — все каналы) входят до первого обращения к площадке.
+    """
     context: _RunContext = _RunContext(
-        mode, config, paths, platform, form_sender, now_utc, rng, notice, [], tuple(channel_warnings), progress
+        mode, config, paths, platform, form_sender, now_utc, rng, notice, [], tuple(channel_warnings), progress, logins
     )
     if mode is RunMode.STATUS:
         return _run_status(context)
@@ -180,6 +194,10 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     scan: BcastScan = scan_bcast(context.paths, context.now_utc)
     if scan.is_empty:
         return RunOutcome(report=None, exit_code=int(ExitCode.BCAST_EMPTY), problem=RunProblem.BCAST_EMPTY)
+    packages: list[ReportPackageLine] = build_package_lines(scan, context.config)
+    _progress_packages(context, packages)
+    # формы — один раз на форму, до входов и до обращений к площадке
+    context.form_sender.prepare([slot.form for slot in scan.slot_map.values()])
     selection: Selection = build_planned(
         scan.slot_map,
         scan.slot_sources,
@@ -187,9 +205,8 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         context.platform.limits,
         context.now_utc,
     )
-    packages: list[ReportPackageLine] = build_package_lines(scan, context.config)
-    _progress_packages(context, packages)
-    # к площадке обращаемся только по каналам, у которых есть объекты: вход и проверка канала — при первом обращении
+    # к площадке обращаемся только по каналам, у которых есть объекты (и too_late): входы — все до сверки
+    _log_in(context, [item.channel for item in selection.planned])
     orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
         selection.planned,
         frozenset(scan.slot_map),
@@ -226,6 +243,11 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     return _complete(context, report, has_errors=has_errors)
 
 
+def _log_in(context: _RunContext, channels: Sequence[ChannelConfig]) -> None:
+    if context.logins is not None:
+        context.logins.log_in_needed(channels)
+
+
 def _progress_packages(context: _RunContext, packages: list[ReportPackageLine]) -> None:
     """Числа — тем же подсчётом, что «Итог» и раздел «Пакеты» отчёта (build_totals), второго счёта нет."""
     totals: RunTotals = build_totals(
@@ -252,7 +274,8 @@ def _execute_full(
 
 
 def _run_status(context: _RunContext) -> RunOutcome:
-    """Без пакетов: эфиры с маркером планера на каналах → keys.txt и отчёт."""
+    """Без пакетов: входы всех каналов → эфиры с маркером планера на каналах → keys.txt и отчёт."""
+    _log_in(context, context.config.channels)
     marked: MarkedScan = Reconciler(context.platform, progress=context.progress).marked_broadcasts(
         context.config.channels
     )

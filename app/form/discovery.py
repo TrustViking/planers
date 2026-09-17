@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +20,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from app.core.dates import FILE_STAMP_FORMAT
+from app.core.retry import RetryPolicy
 from app.form.base import FORM_CODE_STRUCTURE_UNREADABLE, FORM_CODE_TRANSPORT_FAILED, FormError
 from app.observability.logging_setup import get_logger
 
@@ -40,6 +43,9 @@ HTML_ENCODING: Final[str] = "utf-8"
 URL_HASH_CHARS: Final[int] = 8
 DIAGNOSTIC_TEMPLATE: Final[str] = "{stamp}_form_{digest}.html"
 REQUEST_TIMEOUT_SEC: Final[float] = 30.0
+HTTP_OK: Final[int] = 200
+TRANSIENT_STATUS_MINIMUM: Final[int] = 500   # 5xx — сбой на стороне Google: повторяем
+RETRY_POLICY: Final[RetryPolicy] = RetryPolicy()
 
 
 class QuestionKind(str, Enum):
@@ -105,10 +111,17 @@ class HttpSession(Protocol):
 class FormDiscovery:
     """Одно чтение на каждый уникальный form.url запуска: два пакета могут вести в разные формы."""
 
-    def __init__(self, session: HttpSession, logs_dir: Path, now: datetime) -> None:
+    def __init__(
+        self,
+        session: HttpSession,
+        logs_dir: Path,
+        now: datetime,
+        rng: random.Random | None = None,
+    ) -> None:
         self._session: HttpSession = session
         self._logs_dir: Path = logs_dir
         self._now: datetime = now
+        self._rng: random.Random = rng or random.Random()   # добавка к паузам повторов; main передаёт свой
         self._cache: dict[str, FormStructure] = {}
 
     def structure(self, form_url: str) -> FormStructure:
@@ -143,17 +156,36 @@ class FormDiscovery:
         return path
 
     def _download(self, form_url: str) -> tuple[str, str]:
-        try:
-            response: HttpResponse = self._session.get(
+        """Сетевые сбои и 5xx повторяются по RETRY_POLICY; прочий ответ не 200 — сразу отказ."""
+        retry_number: int = 0
+        while True:
+            try:
+                response: HttpResponse = self._session.get(
+                    form_url,
+                    timeout=REQUEST_TIMEOUT_SEC,
+                    allow_redirects=True,
+                )
+            except OSError as error:
+                reason: str = str(error)
+            else:
+                if response.status_code == HTTP_OK:
+                    return response.text, response.url
+                if response.status_code < TRANSIENT_STATUS_MINIMUM:
+                    raise FormError(FORM_CODE_TRANSPORT_FAILED, f"HTTP {response.status_code}")
+                reason = f"HTTP {response.status_code}"
+            retry_number += 1
+            if not RETRY_POLICY.has_retry_left(retry_number):
+                raise FormError(FORM_CODE_TRANSPORT_FAILED, reason)
+            delay_sec: float = RETRY_POLICY.delay_sec(retry_number, self._rng)
+            LOGGER.warning(
+                "form_get_retry url=%s retry=%d/%d delay_sec=%.2f reason=%s",
                 form_url,
-                timeout=REQUEST_TIMEOUT_SEC,
-                allow_redirects=True,
+                retry_number,
+                RETRY_POLICY.max_retries,
+                delay_sec,
+                reason,
             )
-        except OSError as error:
-            raise FormError(FORM_CODE_TRANSPORT_FAILED, str(error)) from error
-        if response.status_code != 200:
-            raise FormError(FORM_CODE_TRANSPORT_FAILED, f"HTTP {response.status_code}")
-        return response.text, response.url
+            time.sleep(delay_sec)   # через модуль time: тесты подменяют
 
     def _parse(self, html: str, final_url: str, form_url: str) -> FormStructure:
         payload: Any = _load_script(html)

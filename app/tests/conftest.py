@@ -6,7 +6,7 @@ import json
 import os
 import random
 import zipfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -190,10 +190,23 @@ class FormCall:
 class FakeFormSender:
     """Отправитель формы для тестов: подтверждает (или возвращает ошибку) и записывает вызовы."""
 
-    def __init__(self, *, confirmed: bool = True, error: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        confirmed: bool = True,
+        error: str | None = None,
+        platform: FakePlatform | None = None,
+    ) -> None:
         self.confirmed: bool = confirmed
         self.error: str | None = error
         self.calls: list[FormCall] = []
+        self._platform: FakePlatform | None = platform
+        # (адреса форм, сколько обращений к площадке было к моменту чтения форм)
+        self.prepared: list[tuple[tuple[str, ...], int]] = []
+
+    def prepare(self, forms: Sequence[FormSpec]) -> None:
+        touched: int = 0 if self._platform is None else len(self._platform.describe_calls + self._platform.list_calls)
+        self.prepared.append((tuple(sorted({form.url for form in forms})), touched))
 
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         self.calls.append(FormCall(planned.slot_id, planned.account_name, planned.stream_key, planned.form.url))

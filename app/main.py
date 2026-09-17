@@ -3,9 +3,14 @@
 Только разбор флагов, построение зависимостей и печать; оркестрация — app/pipeline/runner.py.
 Вывод в консоль — только отсюда и только текстами из messages_ru: шапка сразу после настройки логов
 (до конфигов и сети), строки прогресса по ходу работы (ConsoleProgress), пустая строка, итоговые блоки.
-Порядок запуска: конфиги → сверка каналов без браузера (app/platforms/channel_sync.py: ник, название и файл
-токена выравниваются по id YouTube) → пакеты из bcast\\ → объекты → каналы, у которых есть объекты:
-вход и проверка ника, id и названия — при первом обращении к каналу (app/platforms/verified.py).
+Порядок запуска: конфиги → проверка каналов без браузера (ChannelBook.check_without_login: статус каждого
+канала — READY / NEEDS_LOGIN / REFUSED / FAILED; ник, название и файл токена выравниваются по id YouTube,
+чужой токен удаляется) → пакеты из bcast\\ → чтение форм → объекты → фаза входов: каналы с объектами
+и статусом NEEDS_LOGIN входят подряд (токен пишется только после подтверждения канала) → сверка и действия
+только по каналам READY (app/platforms/verified.py). После фазы входов браузер не открывается.
+--status и --check: проверка без браузера → фаза входов по всем каналам → работа. --auth: вход без проверки
+при старте; прежний токен остаётся, пока новый вход не подтверждён.
+Обрыв (Ctrl+C) и любое необработанное исключение ловятся в run_cli: строка в лог и в консоль, код 1.
 """
 
 from __future__ import annotations
@@ -34,19 +39,18 @@ from app.config.loader import (
     load_planer_config,
 )
 from app.core.dates import format_datetime_text
-from app.core.text import handle_from_custom_url
 from app.form.base import FormSender
 from app.form.discovery import FormDiscovery
 from app.form.submitter import GoogleFormSender
-from app.google.auth import AuthError, load_credentials, token_file_for
 from app.observability.logging_setup import close_logging, get_logger, setup_logging
 from app.output.console import render_console
 from app.output.progress import ConsoleProgress
 from app.paths import PlanerPaths, build_paths, ensure_dirs, resolve_root
 from app.pipeline.runner import ExitCode, RunMode, RunOutcome, RunProblem, run
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
+from app.platforms.channel import Channel, ChannelBindingError, ChannelBook, ChannelStatus, youtube_handle_text
 from app.platforms.channel_sync import ChannelSync
-from app.platforms.verified import ChannelBindingError, VerifiedPlatform
+from app.platforms.verified import VerifiedPlatform
 from app.platforms.youtube import YouTubePlatform
 from app.ui import messages_ru as msg
 from app.version import APP_VERSION
@@ -54,6 +58,7 @@ from app.version import APP_VERSION
 LOGGER = get_logger("main")
 
 LIST_JOINER: Final[str] = ", "
+REASON_SEPARATOR: Final[str] = ":"   # сообщение отказа входа: «<AuthErrorReason>: подробности»
 # Шапка запуска: --check и --auth — обычная, как у полного цикла.
 TITLES: Final[dict[RunMode, str]] = {
     RunMode.FULL: msg.CONSOLE_TITLE,
@@ -63,46 +68,56 @@ TITLES: Final[dict[RunMode, str]] = {
 
 
 class ChannelConsole:
-    """Вход и проверка канала глазами владельца: площадка зовёт это в момент первого обращения к каналу."""
-
-    def __init__(self) -> None:
-        self._logged_in: set[str] = set()
+    """Вход в канал глазами владельца: ChannelBook зовёт это в фазе входов, в --check и в --auth."""
 
     def on_login(self, channel: ChannelConfig) -> None:
         """Ровно перед открытием браузера: какой канал выбирать."""
-        LOGGER.info(
-            'login_started channel="%s" handle=%s google_account="%s"',
-            channel.account_name,
-            channel.handle,
-            channel.google_account,
-        )
-        self._logged_in.add(channel.key)
         names: dict[str, str] = {"account_name": channel.account_name, "handle": channel.handle}
         _say(msg.AUTH_STARTING.format(**names))
         _say(msg.AUTH_CHOOSE_ACCOUNT.format(google_account=channel.google_account, **names))
         _say(msg.AUTH_CHOOSE_RIGHT_CHANNEL.format(**names))
         _say(msg.AUTH_UNVERIFIED_APP_WARNING)
 
-    def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo) -> None:
-        if channel.key in self._logged_in:
-            self._logged_in.discard(channel.key)
-            _say(
-                msg.AUTH_OK.format(
-                    account_name=channel.account_name,
-                    handle=channel.handle,
-                    title=info.title,
-                    youtube_handle=_youtube_handle(info),
-                    youtube_channel_id=info.youtube_channel_id,
-                )
+    def on_wrong_channel(self, channel: ChannelConfig, info: ChannelInfo, will_retry: bool) -> None:
+        template: str = msg.AUTH_WRONG_CHANNEL_RETRY if will_retry else msg.AUTH_WRONG_CHANNEL_GIVE_UP
+        _say(
+            template.format(
+                account_name=channel.account_name,
+                handle=channel.handle,
+                youtube_title=info.title,
+                youtube_handle=youtube_handle_text(info),
             )
+        )
+
+    def on_login_failed(self, channel: ChannelConfig, error: PlatformError) -> None:
+        reason: str = error.message.split(REASON_SEPARATOR, 1)[0]
+        _say(
+            msg.AUTH_FAILED.format(
+                account_name=channel.account_name,
+                handle=channel.handle,
+                reason=msg.AUTH_REASON_TEXT.get(reason, error.message),
+            )
+        )
+        _say(msg.AUTH_SCOPE_HINT)
+
+    def on_channel_ready(self, channel: ChannelConfig, info: ChannelInfo) -> None:
+        _say(
+            msg.AUTH_OK.format(
+                account_name=channel.account_name,
+                handle=channel.handle,
+                title=info.title,
+                youtube_handle=youtube_handle_text(info),
+                youtube_channel_id=info.youtube_channel_id,
+            )
+        )
 
 
 @dataclass(frozen=True)
 class _Dependencies:
     config: PlanerConfig
     platform: VerifiedPlatform
-    console: ChannelConsole
-    sync: ChannelSync
+    book: ChannelBook
+    rng: random.Random
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_platform(paths: PlanerPaths, console: ChannelConsole, settings: PlanerSettings) -> BroadcastPlatform:
+def build_platform(paths: PlanerPaths, settings: PlanerSettings, rng: random.Random) -> BroadcastPlatform:
     """Боевая площадка; FakePlatform остаётся только для тестов.
 
     Из planer.json площадка берёт только паузу между обращениями; настройки эфира она получает спекой.
@@ -131,14 +146,15 @@ def build_platform(paths: PlanerPaths, console: ChannelConsole, settings: Planer
         paths.client_secret_file,
         paths.secrets_dir,
         request_pause_sec=settings.youtube_pause_seconds,
-        on_login=console.on_login,
+        rng=rng,
     )
 
 
-def build_form_sender(paths: PlanerPaths, now_utc: datetime) -> FormSender:
+def build_form_sender(paths: PlanerPaths, now_utc: datetime, rng: random.Random) -> FormSender:
     """Отправитель Google-формы; адрес формы приходит в пакете, здесь его нет (ТЗ §7.5)."""
     session: requests.Session = requests.Session()
-    return GoogleFormSender(session, FormDiscovery(session, paths.logs_dir, now_utc.astimezone()))  # type: ignore
+    discovery: FormDiscovery = FormDiscovery(session, paths.logs_dir, now_utc.astimezone(), rng)  # type: ignore
+    return GoogleFormSender(session, discovery, rng)  # type: ignore
 
 
 def run_cli(argv: Sequence[str] | None = None) -> int:
@@ -158,11 +174,27 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     now_utc: datetime = datetime.now(timezone.utc)
     _say_title(args, now_utc)
     try:
-        exit_code: int = _run(args, paths, log_path, now_utc)
+        exit_code: int = _run_guarded(args, paths, log_path, now_utc)
         LOGGER.info("run_finished exit_code=%d", exit_code)
         return exit_code
     finally:
         close_logging()
+
+
+def _run_guarded(args: argparse.Namespace, paths: PlanerPaths, log_path: Path, now_utc: datetime) -> int:
+    """Обрыв и падение не пропадают без следа: причина — в лог, короткая строка — в консоль, код 1."""
+    try:
+        return _run(args, paths, log_path, now_utc)
+    except KeyboardInterrupt:
+        LOGGER.warning("run_interrupted")
+        _say(msg.RUN_INTERRUPTED)
+    # Единственный перехват Exception в планере: всё, что не обработано ниже, — ошибка программы.
+    # Без него трассировка ушла бы только в окно консоли, которое владелец закроет, а лог остался бы
+    # оборванным на последней строке (живой прогон 17-09-2026 00:38 и 00:50).
+    except Exception:
+        LOGGER.exception("run_crashed log=%s", log_path)
+        _say(msg.RUN_CRASHED.format(log=log_path))
+    return int(ExitCode.ERRORS)
 
 
 def _configure_console() -> None:
@@ -198,10 +230,10 @@ def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path, now_utc: 
         return int(ExitCode.CONFIG)
     if args.auth is not None:
         return _run_auth(args.auth, paths, dependencies)
-    synced: tuple[_Dependencies, list[str]] | None = _sync_channels(dependencies)
-    if synced is None:
+    checked: tuple[_Dependencies, list[str]] | None = _check_channels(dependencies)
+    if checked is None:
         return int(ExitCode.CONFIG)
-    dependencies, channel_warnings = synced
+    dependencies, channel_warnings = checked
     if args.check:
         return _run_check(paths, dependencies, channel_warnings)
     return _run_pipeline(_requested_run_mode(args), paths, dependencies, log_path, now_utc, channel_warnings)
@@ -216,18 +248,18 @@ def _build_dependencies(paths: PlanerPaths, now_utc: datetime) -> _Dependencies 
         LOGGER.error("client_secret_missing path=%s", paths.client_secret_file)
         _say(msg.CLIENT_SECRET_MISSING.format(path=paths.client_secret_file))
         return None
-    console: ChannelConsole = ChannelConsole()
-    # сверка каналов и проверка при первом обращении — через одну и ту же площадку и один паспорт
-    youtube: BroadcastPlatform = build_platform(paths, console, config.settings)
+    rng: random.Random = random.Random()
+    youtube: BroadcastPlatform = build_platform(paths, config.settings, rng)
+    # проверка при старте, входы и шлюз площадки — через одну площадку, один паспорт и одну книгу каналов
     sync: ChannelSync = ChannelSync(youtube, paths, now_utc.astimezone())
-    platform: VerifiedPlatform = VerifiedPlatform(youtube, sync, listener=console)
-    return _Dependencies(config=config, platform=platform, console=console, sync=sync)
+    book: ChannelBook = ChannelBook(youtube, sync, ChannelConsole())
+    return _Dependencies(config=config, platform=VerifiedPlatform(youtube, book), book=book, rng=rng)
 
 
-def _sync_channels(dependencies: _Dependencies) -> tuple[_Dependencies, list[str]] | None:
-    """Сверка каналов при старте: конфиг после выравнивания и предупреждения запуска. None — код 2."""
+def _check_channels(dependencies: _Dependencies) -> tuple[_Dependencies, list[str]] | None:
+    """Проверка каналов без браузера: конфиг после выравнивания и предупреждения запуска. None — код 2."""
     try:
-        config, warnings = dependencies.sync.run(dependencies.config)
+        config, warnings = dependencies.book.check_without_login(dependencies.config)
     except ConfigError as error:
         _say_config_error(error)
         return None
@@ -279,15 +311,17 @@ def _say_channels_fields() -> None:
 
 
 def _run_auth(target: str, paths: PlanerPaths, dependencies: _Dependencies) -> int:
-    """Принудительный вход: токен пересоздаётся, название канала сверяется тем же путём, что и в запуске."""
+    """Принудительный вход: прежний токен заменяется только подтверждённым входом (правило то же, что в запуске)."""
     channels: tuple[ChannelConfig, ...] | None = _auth_targets(target, paths, dependencies.config)
     if channels is None:
         return int(ExitCode.ERRORS)
     failed: int = 0
-    for channel in channels:
-        if not _authorize_channel(channel, paths, dependencies):
+    for channel_config in channels:
+        channel: Channel = dependencies.book.log_in(channel_config, force=True)
+        if channel.status is not ChannelStatus.READY:
             failed += 1
-    _say_warnings(dependencies.sync.take_warnings())
+            _say_not_ready(channel)
+    _say_warnings(dependencies.book.take_warnings())
     return int(ExitCode.ERRORS) if failed else int(ExitCode.OK)
 
 
@@ -314,42 +348,16 @@ def _auth_targets(
     return (channel,)
 
 
-def _authorize_channel(channel: ChannelConfig, paths: PlanerPaths, dependencies: _Dependencies) -> bool:
-    try:
-        load_credentials(
-            paths.client_secret_file,
-            token_file_for(paths.secrets_dir, channel.handle),
-            login_hint=channel.google_account,
-            force_reauth=True,
-            on_login=lambda: dependencies.console.on_login(channel),
-        )
-    except AuthError as error:
-        _say_auth_error(channel, error.reason.value)
-        return False
-    return _verify_channel(channel, dependencies) is not None
-
-
-def _say_auth_error(channel: ChannelConfig, reason: str) -> None:
-    LOGGER.error('auth_failed channel="%s" handle=%s reason=%s', channel.account_name, channel.handle, reason)
-    _say(
-        msg.AUTH_FAILED.format(
-            account_name=channel.account_name,
-            handle=channel.handle,
-            reason=msg.AUTH_REASON_TEXT.get(reason, reason),
-        )
-    )
-    _say(msg.AUTH_SCOPE_HINT)
-
-
-def _verify_channel(channel: ChannelConfig, dependencies: _Dependencies) -> ChannelInfo | None:
-    """Вход (если нужен) и проверка названия канала; сбой — строка для владельца и None."""
-    try:
-        return dependencies.platform.verify(channel)
-    except ChannelBindingError as error:
-        _say(msg.CHECK_CHANNEL_REFUSED.format(message=error.message))
-    except PlatformError as error:
-        _say_channel_failed(channel, error)
-    return None
+def _say_not_ready(channel: Channel) -> None:
+    """Отказ — готовым текстом; сбой входа уже напечатан в момент входа (AUTH_FAILED)."""
+    if isinstance(channel.error, ChannelBindingError):
+        _say(msg.CHECK_CHANNEL_REFUSED.format(message=channel.error.message))
+        return
+    if channel.status is ChannelStatus.FAILED and channel.login_attempts:
+        return
+    error: PlatformError | None = channel.access_error()
+    if error is not None:
+        _say_channel_failed(channel.config, error)
 
 
 def _say_channel_failed(channel: ChannelConfig, error: PlatformError) -> None:
@@ -368,42 +376,41 @@ def _say_warnings(warnings: Sequence[str]) -> None:
         _say(msg.CONSOLE_ATTENTION_TEXT.format(text=warning))
 
 
-def _youtube_handle(info: ChannelInfo) -> str:
-    return handle_from_custom_url(info.handle_raw) if info.handle_raw else msg.AUTH_YOUTUBE_HANDLE_MISSING
-
-
 def _run_check(paths: PlanerPaths, dependencies: _Dependencies, channel_warnings: Sequence[str]) -> int:
-    """Все каналы конфига — тем же путём, что и запуск: вход при первом обращении, затем проверка ника и id."""
+    """Все каналы конфига — тем же путём, что и запуск: проверка без браузера, фаза входов, работа."""
     _say(msg.CHECK_HEADER.format(path=paths.channels_file))
     _say_warnings(channel_warnings)
+    dependencies.book.log_in_needed(dependencies.config.channels)
     failed: int = 0
     for channel in dependencies.config.channels:
         if not _check_channel(channel, dependencies):
             failed += 1
-    _say_warnings(dependencies.sync.take_warnings())
+    _say_warnings(dependencies.book.take_warnings())
     _say(msg.CHECK_CHANNEL_LANGUAGE_NOTE)
     _say(msg.CHECK_HAS_PROBLEMS if failed else msg.CHECK_ALL_OK)
     return int(ExitCode.ERRORS) if failed else int(ExitCode.OK)
 
 
-def _check_channel(channel: ChannelConfig, dependencies: _Dependencies) -> bool:
-    info: ChannelInfo | None = _verify_channel(channel, dependencies)
-    if info is None:
+def _check_channel(channel_config: ChannelConfig, dependencies: _Dependencies) -> bool:
+    channel: Channel = dependencies.book.channel(channel_config)
+    if channel.status is not ChannelStatus.READY or channel.info is None:
+        _say_not_ready(channel)
         return False
+    info: ChannelInfo = channel.info
     try:
-        upcoming: int = len(dependencies.platform.list_upcoming(channel))
+        upcoming: int = len(dependencies.platform.list_upcoming(channel_config))
     except PlatformError as error:
-        _say_channel_failed(channel, error)
+        _say_channel_failed(channel_config, error)
         return False
     _say(
         msg.CHECK_CHANNEL_OK.format(
-            account_name=channel.account_name,
-            handle=channel.handle,
+            account_name=channel_config.account_name,
+            handle=channel_config.handle,
             title=info.title,
-            youtube_handle=_youtube_handle(info),
+            youtube_handle=youtube_handle_text(info),
             youtube_channel_id=info.youtube_channel_id,
             channel_language=info.default_language or msg.CHECK_CHANNEL_LANGUAGE_UNSET,
-            languages=LIST_JOINER.join(channel.languages),
+            languages=LIST_JOINER.join(channel_config.languages),
             upcoming=upcoming,
         )
     )
@@ -423,11 +430,12 @@ def _run_pipeline(
         dependencies.config,
         paths,
         dependencies.platform,
-        build_form_sender(paths, now_utc),
+        build_form_sender(paths, now_utc, dependencies.rng),
         now_utc,
-        random.Random(),
+        dependencies.rng,
         progress=ConsoleProgress(),
         channel_warnings=channel_warnings,
+        logins=dependencies.book,
     )
     channel_order: tuple[str, ...] = tuple(channel.key for channel in dependencies.config.channels)
     _print_outcome(outcome, paths, log_path, channel_order)

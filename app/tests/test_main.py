@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import shutil
 from collections.abc import Callable
@@ -11,11 +12,10 @@ import pytest
 
 from app import main as main_module
 from app.config.loader import PlanerSettings
-from app.google.auth import AuthError, AuthErrorReason
-from app.main import ChannelConsole, run_cli
+from app.main import run_cli
 from app.paths import ROOT_ENV_VAR, PlanerPaths
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
-from app.platforms.fake import FakePlatform
+from app.platforms.fake import FAKE_TOKEN_TEXT, FakePlatform
 from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
 from app.version import APP_VERSION
@@ -41,23 +41,22 @@ CHANNELS_JSON: dict[str, Any] = {
 }
 PackageFactory = Callable[..., Path]
 SlotFactory = Callable[..., dict[str, Any]]
-CredentialsLoader = Callable[..., object]
 
 
 @pytest.fixture
 def fake_platform_in_main(monkeypatch: pytest.MonkeyPatch) -> FakePlatform:
     """Площадка и отправитель формы в main подменяются фейками: сеть в тестах запрещена.
 
-    Обёртка с проверкой названия канала (VerifiedPlatform) и печать входа остаются боевыми.
+    Книга каналов, шлюз (VerifiedPlatform) и печать входа остаются боевыми; токен нового входа фейк пишет в secrets.
     """
     platform: FakePlatform = FakePlatform()
 
-    def _build(paths: PlanerPaths, console: ChannelConsole, settings: PlanerSettings) -> BroadcastPlatform:
-        platform.on_login = console.on_login
+    def _build(paths: PlanerPaths, settings: PlanerSettings, rng: random.Random) -> BroadcastPlatform:
+        platform.secrets_dir = paths.secrets_dir
         return platform
 
     monkeypatch.setattr(main_module, "build_platform", _build)
-    monkeypatch.setattr(main_module, "build_form_sender", lambda paths, now_utc: FakeFormSender())
+    monkeypatch.setattr(main_module, "build_form_sender", lambda paths, now_utc, rng: FakeFormSender())
     return platform
 
 
@@ -85,25 +84,6 @@ def _write_tokens(root: Path, *handles: str) -> None:
 def _ready(root: Path) -> None:
     _write_config(root)
     _write_tokens(root)
-
-
-def _fake_login(calls: list[Path] | None = None) -> CredentialsLoader:
-    """load_credentials без браузера: зовёт on_login ровно там, где его позвал бы боевой код."""
-
-    def _load(
-        client_secret: Path,
-        token_file: Path,
-        login_hint: str,
-        force_reauth: bool = False,
-        on_login: Any = None,
-        allow_login: bool = True,
-    ) -> None:
-        if on_login is not None:
-            on_login()
-        if calls is not None:
-            calls.append(token_file)
-
-    return _load
 
 
 def test_run_without_flags_is_the_full_cycle(
@@ -282,14 +262,14 @@ def test_missing_client_secret_exits_2(planer_root: Path, capsys: pytest.Capture
     assert "client_secret.json" in capsys.readouterr().out
 
 
-def test_missing_token_logs_in_at_first_access_and_run_continues(
+def test_missing_token_logs_in_before_any_channel_is_read(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     make_package: PackageFactory,
     make_slot: SlotFactory,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """ТЗ §5.3: вход — когда до канала дошло дело; канал без объектов не трогается."""
+    """Фаза входов — до строк «запрашиваю канал»; канал без объектов не входит."""
     _write_config(planer_root)
     fake_platform_in_main.tokens_missing = set(CHANNEL_KEYS)
     make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
@@ -310,8 +290,14 @@ def test_missing_token_logs_in_at_first_access_and_run_continues(
     # шапка — до входа, итог — после
     assert out.index(f"Planer {APP_VERSION} — ") < out.index(msg.AUTH_STARTING.format(**UA_NAMES))
     assert out.index("Google hasn't verified this app") < out.index("Итог: ")
+    ok_line: str = msg.AUTH_OK.format(
+        **UA_NAMES, title=UA, youtube_handle=UA_HANDLE, youtube_channel_id=f"UCfake{UA_KEY}"
+    )
+    assert out.index(ok_line) < out.index(msg.PROGRESS_CHANNEL_READ_STARTED.format(**UA_NAMES))
     assert fake_platform_in_main.logins == [UA_KEY]
     assert fake_platform_in_main.describe_calls == [UA_KEY]        # сверка при старте без токенов канал не спрашивает
+    assert (planer_root / "secrets" / f"{UA_HANDLE}.token.json").is_file()   # токен — после подтверждения
+    assert not (planer_root / "secrets" / f"{RU_HANDLE}.token.json").exists()
 
 
 def test_channel_handle_mismatch_fails_only_that_channel(
@@ -333,7 +319,14 @@ def test_channel_handle_mismatch_fails_only_that_channel(
     assert run_cli([]) == 1
     out: str = capsys.readouterr().out
     assert "«Чужой канал»" in out
-    assert f"  {RU} {RU_HANDLE} ({RU_GOOGLE})" in out.splitlines()
+    lines: list[str] = out.splitlines()
+    names: dict[str, str] = {**UA_NAMES, "youtube_title": "Чужой канал", "youtube_handle": "@chuzhoy"}
+    assert msg.AUTH_WRONG_CHANNEL_RETRY.format(**names) in lines
+    assert msg.AUTH_WRONG_CHANNEL_GIVE_UP.format(**names) in lines
+    assert "--auth" not in out
+    assert not (planer_root / "secrets" / f"{UA_HANDLE}.token.json").exists()   # чужой токен удалён при старте
+    assert fake_platform_in_main.logins == [UA_KEY, UA_KEY]
+    assert f"  {RU} {RU_HANDLE} ({RU_GOOGLE})" in lines
     assert "  ошибка: 01-01-2099 19:00 uk -> Канал UA @KanalUA — YouTube: channelHandleMismatch (" in out
     assert [call.channel_id for call in fake_platform_in_main.created] == [RU_KEY]
     assert not (planer_root / "app").exists()                          # файлов привязок больше нет
@@ -526,35 +519,57 @@ def test_check_refuses_channel_with_other_handle(
 def test_auth_all_logs_in_every_channel(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
-    calls: list[Path] = []
-    monkeypatch.setattr(main_module, "load_credentials", _fake_login(calls))
     assert run_cli(["--auth", "all"]) == 0
     out: str = capsys.readouterr().out
     assert "Google hasn't verified this app" in out
     assert msg.AUTH_OK.format(**RU_NAMES, title=RU, youtube_handle=RU_HANDLE, youtube_channel_id=f"UCfake{RU_KEY}") in out
-    assert [path.name for path in calls] == [f"{UA_HANDLE}.token.json", f"{RU_HANDLE}.token.json"]
-    assert [path.parent for path in calls] == [planer_root / "secrets"] * 2
+    assert fake_platform_in_main.logins == [UA_KEY, RU_KEY]
+    assert fake_platform_in_main.describe_without_login == []        # --auth без проверки при старте
+    for handle in (UA_HANDLE, RU_HANDLE):
+        assert (planer_root / "secrets" / f"{handle}.token.json").read_text(encoding="utf-8") == FAKE_TOKEN_TEXT
 
 
-def test_auth_refuses_channel_with_other_handle(
+def test_auth_refused_keeps_the_previous_token(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """--auth: дважды выбран другой канал — прежний токен как был, текст отказа без «planer.bat --auth»."""
     _write_config(planer_root)
+    _write_tokens(planer_root, UA_HANDLE)
     fake_platform_in_main.channel_info[UA_KEY] = ChannelInfo(
         youtube_channel_id="UCwrong", title="Другой канал аккаунта", default_language=None, handle_raw="@drugoy"
     )
-    monkeypatch.setattr(main_module, "load_credentials", _fake_login())
     assert run_cli(["--auth", "kanalua"]) == 1                      # ник — без «@» и в другом регистре
     out: str = capsys.readouterr().out
-    assert "«Другой канал аккаунта»" in out and f"planer.bat --auth {UA_HANDLE}" in out
+    assert "«Другой канал аккаунта»" in out and "planer.bat --auth" not in out
+    assert msg.AUTH_NEXT_RUN_HINT in out
     assert "вход выполнен" not in out
+    assert fake_platform_in_main.logins == [UA_KEY, UA_KEY]
+    assert (planer_root / "secrets" / f"{UA_HANDLE}.token.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_auth_confirmed_replaces_the_previous_token(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(planer_root)
+    _write_tokens(planer_root, UA_HANDLE)
+    wrong: ChannelInfo = ChannelInfo(
+        youtube_channel_id="UCwrong", title="Другой", default_language=None, handle_raw="@drugoy"
+    )
+    right: ChannelInfo = ChannelInfo(
+        youtube_channel_id=f"UCfake{UA_KEY}", title=UA, default_language=None, handle_raw=UA_HANDLE
+    )
+    fake_platform_in_main.login_answers[UA_KEY] = [wrong, right]
+    assert run_cli(["--auth", UA_HANDLE]) == 0
+    out: str = capsys.readouterr().out
+    assert msg.AUTH_WRONG_CHANNEL_RETRY.format(**UA_NAMES, youtube_title="Другой", youtube_handle="@drugoy") in out
+    assert (planer_root / "secrets" / f"{UA_HANDLE}.token.json").read_text(encoding="utf-8") == FAKE_TOKEN_TEXT
 
 
 def test_auth_unknown_channel_lists_handles(
@@ -570,23 +585,58 @@ def test_auth_unknown_channel_lists_handles(
 def test_auth_failure_names_the_reason_and_scope_hint(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write_config(planer_root)
-
-    def _fail(
-        client_secret: Path,
-        token_file: Path,
-        login_hint: str,
-        force_reauth: bool = False,
-        on_login: Any = None,
-        allow_login: bool = True,
-    ) -> None:
-        raise AuthError(AuthErrorReason.FLOW_FAILED, "browser closed")
-
-    monkeypatch.setattr(main_module, "load_credentials", _fail)
+    fake_platform_in_main.fail_login[UA_KEY] = PlatformError("authFailed", "flow_failed: browser closed")
     assert run_cli(["--auth", UA_HANDLE]) == 1
     out: str = capsys.readouterr().out
     assert msg.AUTH_REASON_TEXT["flow_failed"] in out
     assert "скоуп youtube не добавлен" in out
+    assert not (planer_root / "secrets" / f"{UA_HANDLE}.token.json").exists()
+
+
+def _log_text(root: Path) -> str:
+    [log_file] = list((root / "logs").glob("*_planer.log"))
+    return log_file.read_text(encoding="utf-8")
+
+
+def test_interrupted_run_is_logged_and_exits_1(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ctrl+C во время входа: строка в лог и в консоль, код 1, run_finished есть."""
+    _write_config(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    fake_platform_in_main.tokens_missing = {UA_KEY}
+    fake_platform_in_main.fail_login[UA_KEY] = KeyboardInterrupt()  # type: ignore[assignment]
+    assert run_cli([]) == 1
+    assert msg.RUN_INTERRUPTED in capsys.readouterr().out.splitlines()
+    log: str = _log_text(planer_root)
+    assert "| run_interrupted" in log and "| run_finished exit_code=1" in log
+
+
+def test_crashed_run_writes_the_traceback_to_the_log(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("сломалось внутри")
+
+    monkeypatch.setattr(main_module, "render_console", _boom)
+    assert run_cli([]) == 1
+    [log_file] = list((planer_root / "logs").glob("*_planer.log"))
+    assert msg.RUN_CRASHED.format(log=log_file) in capsys.readouterr().out.splitlines()
+    log: str = _log_text(planer_root)
+    assert "| run_crashed " in log and "Traceback (most recent call last)" in log
+    assert "RuntimeError: сломалось внутри" in log and "| run_finished exit_code=1" in log

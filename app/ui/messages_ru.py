@@ -100,23 +100,33 @@ AUTH_CHOOSE_RIGHT_CHANNEL: Final[str] = (
 AUTH_OK: Final[str] = (
     "Канал «{account_name}» {handle}: вход выполнен — «{title}» {youtube_handle} (id {youtube_channel_id})."
 )
+# Вход в фазе входов (app/platforms/channel.py): в браузере выбран не тот канал.
+AUTH_WRONG_CHANNEL_RETRY: Final[str] = (
+    "Канал «{account_name}» {handle}: в браузере выбран канал «{youtube_title}» {youtube_handle} — "
+    "нужен «{account_name}» {handle}; вход ещё раз."
+)
+AUTH_WRONG_CHANNEL_GIVE_UP: Final[str] = (
+    "Канал «{account_name}» {handle}: в браузере снова выбран канал «{youtube_title}» {youtube_handle} — "
+    "нужен «{account_name}» {handle}; попытки входа кончились, в этом запуске канал не трогаю."
+)
+AUTH_NEXT_RUN_HINT: Final[str] = (
+    "при следующем запуске планер снова предложит вход; ник сменили на YouTube — впишите новый ник в channels.json"
+)
 # Отказы проверки канала: значение из channels.json и то, что прислал YouTube.
 AUTH_CHANNEL_HANDLE_MISSING: Final[str] = (
     "канал «{account_name}» {handle}: у YouTube-канала «{youtube_title}» (id {youtube_channel_id}) ника нет; "
-    "этот канал не трогаю. Выбран не тот канал — planer.bat --auth {handle}; "
-    "у канала нет ника — заведите его в Студии и впишите в {channels_file}"
+    "этот канал не трогаю. Заведите каналу ник в Студии YouTube и впишите его в {channels_file}; "
+    "выбран не тот канал — " + AUTH_NEXT_RUN_HINT
 )
 AUTH_CHANNEL_HANDLE_MISMATCH: Final[str] = (
     "канал «{account_name}» {handle}: вошли в YouTube-канал «{youtube_title}» {youtube_handle} "
     "(id {youtube_channel_id}), а в {channels_file} записан ник {handle}, и паспорт каналов не подтверждает, "
-    "что это тот же канал; этот канал не трогаю. Выбран не тот канал — planer.bat --auth {handle}; "
-    "ник сменили на YouTube — впишите новый ник в channels.json"
+    "что это тот же канал; этот канал не трогаю; " + AUTH_NEXT_RUN_HINT
 )
 AUTH_CHANNEL_ID_MISMATCH: Final[str] = (
     "канал «{account_name}» {handle}: в паспорте каналов у ника {handle} id {passport_channel_id}, "
-    "а YouTube прислал канал «{youtube_title}» {youtube_handle} с id {youtube_channel_id}; этот канал не трогаю. "
-    "Токен ведёт на другой канал — удалите файл токена этого канала ({token_file}) и войдите снова, "
-    "выбрав нужный канал"
+    "а YouTube прислал канал «{youtube_title}» {youtube_handle} с id {youtube_channel_id}; этот канал не трогаю; "
+    + AUTH_NEXT_RUN_HINT
 )
 AUTH_YOUTUBE_HANDLE_MISSING: Final[str] = "без ника"
 AUTH_FAILED: Final[str] = "Канал «{account_name}» {handle}: вход не удался — {reason}."
@@ -147,12 +157,29 @@ WARNING_CHANNEL_ALIGN_FAILED: Final[str] = (
     "канал «{account_name}» {handle}: YouTube подтвердил канал (id {youtube_channel_id}), "
     "но выровнять файлы не удалось — {reason}; файлы не тронуты"
 )
+WARNING_TOKEN_REJECTED: Final[str] = (
+    "токен канала «{account_name}» {handle} вёл на канал «{youtube_title}» {youtube_handle} "
+    "(id {youtube_channel_id}) — файл токена удалён, планер предложит вход в «{account_name}» {handle}"
+)
+WARNING_TOKEN_SAVE_FAILED: Final[str] = (
+    "канал «{account_name}» {handle}: вход выполнен, но файл токена не записан ({error}) — "
+    "в этом запуске канал работает, при следующем запуске планер снова предложит вход"
+)
 WARNING_PASSPORT_UNREADABLE: Final[str] = (
     "паспорт каналов {path} не читается ({error}) — он будет записан заново; "
     "канал с новым ником до его первой проверки по старому паспорту не узнаётся"
 )
 WARNING_PASSPORT_WRITE_FAILED: Final[str] = (
     "паспорт каналов {path} не записан ({error}); работа продолжается, паспорт запишет следующий запуск"
+)
+
+# --- обрыв и падение запуска (app/main.py::run_cli)
+RUN_INTERRUPTED: Final[str] = (
+    "Запуск прерван. Что уже сделано на YouTube, найдёт и учтёт следующий запуск."
+)
+RUN_CRASHED: Final[str] = (
+    "Планер аварийно остановился — подробности в логе {log}. "
+    "Что уже сделано на YouTube, найдёт и учтёт следующий запуск; перешлите лог оператору."
 )
 
 # --- проверка каналов (--check)

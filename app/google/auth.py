@@ -3,6 +3,9 @@
 Перенос ветки `_create_oauth_credentials` из broadcaster/app/google/auth.py:
 только OAuth, без service account, Docs, Drive и Sheets. Порт локального сервера — 0
 (свободный), иначе занятый порт кладёт авторизацию.
+
+Вход в браузере файл токена не пишет: токен записывает вызывающий (save_token) — только после того,
+как канал за этим входом подтверждён. Обновление действующего токена пишет файл сразу.
 """
 from __future__ import annotations
 
@@ -26,7 +29,9 @@ YOUTUBE_SCOPE: Final[str] = "https://www.googleapis.com/auth/youtube"
 SCOPES: Final[tuple[str, ...]] = (YOUTUBE_SCOPE,)
 LOCAL_SERVER_PORT: Final[int] = 0          # 0 — любой свободный порт
 ACCESS_TYPE: Final[str] = "offline"        # без него Google не выдаст refresh-токен
-PROMPT: Final[str] = "consent"             # при повторной авторизации refresh-токен выдаётся заново
+# select_account — экран выбора аккаунта и канала (личный и дополнительные) даже при login_hint;
+# consent — при повторной авторизации refresh-токен выдаётся заново.
+PROMPT: Final[str] = "select_account consent"
 TOKEN_ENCODING: Final[str] = "utf-8"
 TOKEN_FILE_TEMPLATE: Final[str] = "{stem}.token.json"
 
@@ -64,15 +69,15 @@ def load_credentials(
     """Готовые к работе учётные данные: из токена, обновлением или через браузер.
 
     login_hint — почта аккаунта Google канала (google_account): браузер сразу предлагает этот аккаунт.
-    on_login вызывается ровно перед открытием браузера: владелец должен знать, какой канал выбирать.
+    on_login вызывается ровно перед открытием браузера: по нему вызывающий знает, что вход новый.
+    force_reauth — вход в браузере без чтения токена; файл токена не удаляется и не перезаписывается.
     allow_login=False — браузер не открывается: нужен вход — AuthError(LOGIN_REQUIRED), токен не трогается.
+    Учётные данные нового входа в файл не пишутся — это делает save_token после подтверждения канала.
     """
     if not client_secret_file.is_file():
         raise AuthError(AuthErrorReason.CLIENT_SECRET_MISSING, str(client_secret_file))
     login: _Login = _Login(client_secret_file, token_file, login_hint, on_login, allow_login)
     if force_reauth:
-        login.check_allowed()
-        _drop_token(token_file)
         return login.run()
     credentials: Credentials | None = _load_token(token_file)
     if credentials is None:
@@ -83,6 +88,24 @@ def load_credentials(
     if refreshed is not None:
         return refreshed
     return login.run()
+
+
+def save_token(credentials: Credentials, token_file: Path) -> None:
+    """Записать токен канала; единственная запись файла токена, кроме обновления действующего."""
+    try:
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(credentials.to_json(), encoding=TOKEN_ENCODING)
+    except OSError as error:
+        raise AuthError(AuthErrorReason.TOKEN_UNREADABLE, f"{token_file}: {error}") from error
+
+
+def drop_token(token_file: Path) -> None:
+    """Удалить файл токена: единственное место удаления (токен ведёт не на тот канал)."""
+    try:
+        token_file.unlink(missing_ok=True)
+    except OSError as error:
+        raise AuthError(AuthErrorReason.TOKEN_UNREADABLE, f"{token_file}: {error}") from error
+    LOGGER.info("token_dropped file=%s", token_file.name)
 
 
 class _Login:
@@ -102,33 +125,15 @@ class _Login:
         self._on_login: Callable[[], None] | None = on_login
         self._allow_login: bool = allow_login
 
-    def check_allowed(self) -> None:
+    def run(self) -> Credentials:
         if not self._allow_login:
             LOGGER.info("login_not_allowed file=%s", self._token_file.name)
             raise AuthError(AuthErrorReason.LOGIN_REQUIRED, self._token_file.name)
-
-    def run(self) -> Credentials:
-        self.check_allowed()
-        return _login(self._client_secret_file, self._token_file, self._login_hint, self._on_login)
-
-
-def _login(
-    client_secret_file: Path,
-    token_file: Path,
-    login_hint: str,
-    on_login: Callable[[], None] | None,
-) -> Credentials:
-    if on_login is not None:
-        on_login()
-    return _run_flow(client_secret_file, token_file, login_hint)
-
-
-def _drop_token(token_file: Path) -> None:
-    try:
-        token_file.unlink(missing_ok=True)
-    except OSError as error:
-        raise AuthError(AuthErrorReason.TOKEN_UNREADABLE, f"{token_file}: {error}") from error
-    LOGGER.info("token_dropped file=%s", token_file.name)
+        if self._on_login is not None:
+            self._on_login()
+        credentials: Credentials = _run_flow(self._client_secret_file, self._login_hint)
+        LOGGER.info("login_completed file=%s", self._token_file.name)
+        return credentials
 
 
 def _load_token(token_file: Path) -> Credentials | None:
@@ -152,12 +157,13 @@ def _refresh(credentials: Credentials, token_file: Path) -> Credentials | None:
         return None
     except TransportError as error:
         raise AuthError(AuthErrorReason.REFRESH_FAILED, str(error)) from error
-    _save_token(credentials, token_file)
+    save_token(credentials, token_file)
     LOGGER.info("token_refreshed file=%s", token_file.name)
     return credentials
 
 
-def _run_flow(client_secret_file: Path, token_file: Path, login_hint: str) -> Credentials:
+def _run_flow(client_secret_file: Path, login_hint: str) -> Credentials:
+    """Браузер; файл токена не пишется."""
     try:
         flow: InstalledAppFlow = InstalledAppFlow.from_client_secrets_file(
             str(client_secret_file),
@@ -173,14 +179,4 @@ def _run_flow(client_secret_file: Path, token_file: Path, login_hint: str) -> Cr
         raise AuthError(AuthErrorReason.FLOW_FAILED, str(error)) from error
     if credentials is None:
         raise AuthError(AuthErrorReason.FLOW_FAILED, "flow returned no credentials")
-    _save_token(credentials, token_file)
-    LOGGER.info("token_created file=%s", token_file.name)
     return credentials
-
-
-def _save_token(credentials: Credentials, token_file: Path) -> None:
-    try:
-        token_file.parent.mkdir(parents=True, exist_ok=True)
-        token_file.write_text(credentials.to_json(), encoding=TOKEN_ENCODING)
-    except OSError as error:
-        raise AuthError(AuthErrorReason.TOKEN_UNREADABLE, f"{token_file}: {error}") from error

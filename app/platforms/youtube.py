@@ -11,9 +11,9 @@ update_broadcast, attach_stream, apply_video_settings, set_stream_marker. Люб
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from datetime import datetime, timezone
@@ -26,8 +26,9 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
 
 from app.config.loader import ChannelConfig
-from app.google.auth import AuthError, AuthErrorReason, load_credentials, token_file_for
+from app.google.auth import AuthError, AuthErrorReason, load_credentials, save_token, token_file_for
 from app.core.dates import format_datetime_text
+from app.core.retry import RetryPolicy
 from app.observability.logging_setup import get_logger, mask_stream_key
 from app.pipeline.plan import BroadcastSpec
 from app.pipeline.reconciler import MarkerParts, split_marker
@@ -43,6 +44,7 @@ from app.platforms.base import (
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
+    LOGIN_REQUIRED_CODE,
     PLACEHOLDER_TOKEN,
     broadcast_url_for,
     picture_sha,
@@ -89,7 +91,7 @@ YOUTUBE_STREAM_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]{4}(-
 # Коды ошибок площадки, которые планер называет сам (ответа Google за ними нет).
 ERROR_CHANNEL_NOT_FOUND: Final[str] = "channelNotFound"
 ERROR_AUTH: Final[str] = "authFailed"
-ERROR_LOGIN_REQUIRED: Final[str] = "loginRequired"   # вход нужен, но запрещён (allow_login=False)
+ERROR_LOGIN_REQUIRED: Final[str] = LOGIN_REQUIRED_CODE   # вход нужен, но запрещён (allow_login=False)
 ERROR_TRANSPORT: Final[str] = "transportFailed"
 ERROR_BAD_RESPONSE: Final[str] = "badResponse"
 ERROR_UNEXPECTED_KEY: Final[str] = "unexpectedStreamKeyFormat"
@@ -97,9 +99,7 @@ ERROR_UNKNOWN: Final[str] = "unknown"
 
 LOG_MISSING: Final[str] = "-"   # чего площадка не прислала: строка лога остаётся key=value
 
-RETRY_MAX_ATTEMPTS: Final[int] = 4
-RETRY_BASE_DELAY_SEC: Final[float] = 1.0
-RETRY_MAX_DELAY_SEC: Final[float] = 8.0
+RETRY_POLICY: Final[RetryPolicy] = RetryPolicy()
 HTTP_SERVER_ERROR_MIN: Final[int] = 500
 HTTP_TOO_MANY_REQUESTS: Final[int] = 429
 
@@ -164,11 +164,6 @@ def _error_behavior(operation: str, http_status: int | None, reason: str) -> Err
     return ErrorBehavior.CALL
 
 
-def _retry_delay(attempt: int) -> float:
-    """Нарастающая пауза перед повтором: 1, 2, 4 с, не больше RETRY_MAX_DELAY_SEC."""
-    return min(RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)), RETRY_MAX_DELAY_SEC)
-
-
 def _refusal_key(behavior: ErrorBehavior, channel_key: str, operation: str) -> RefusalKey | None:
     if behavior is ErrorBehavior.OPERATION:
         return (channel_key, operation)
@@ -192,8 +187,10 @@ class YouTubePlatform:
     """Клиент строится лениво и кешируется по channel.key: один токен — один канал.
 
     Настройки эфира площадка не хранит: всё, что уходит в эфир, приходит готовой спекой (§7.4).
-    on_login вызывается ровно перед открытием браузера для входа в канал.
     request_pause_sec — youtube_pause_seconds из planer.json: наименьший промежуток между обращениями.
+    rng — случайная добавка к паузам повторов (RetryPolicy); в тестах — фиксированный.
+    Браузер открывается только из describe_channel(allow_login=True): все прочие обращения входа не делают.
+    Учётные данные нового входа живут в памяти, пока канал не подтверждён (keep_login пишет токен).
     """
 
     def __init__(
@@ -202,17 +199,19 @@ class YouTubePlatform:
         secrets_dir: Path,
         *,
         request_pause_sec: int,
-        on_login: Callable[[ChannelConfig], None] | None = None,
+        rng: random.Random,
     ) -> None:
         self._client_secret_file: Path = client_secret_file
         self._secrets_dir: Path = secrets_dir
         self._request_pause_sec: int = request_pause_sec
-        self._on_login: Callable[[ChannelConfig], None] | None = on_login
+        self._rng: random.Random = rng
         self._last_request_at: float | None = None   # time.monotonic() конца предыдущего обращения
         self._refusals: dict[RefusalKey, tuple[PlatformError, ErrorBehavior]] = {}
         self._session: requests.Session = requests.Session()   # картинки эфиров (i.ytimg.com), без авторизации
         self._services: dict[str, Any] = {}
         self._channels: dict[str, ChannelInfo] = {}
+        self._new_logins: dict[str, Any] = {}   # channel.key → учётные данные входа, ещё не записанные в файл
+        self._fresh_logins: set[str] = set()    # channel.key, у которых следующий вход — браузером, без токена
         self._notices: list[PlatformNotice] = []   # замечания за запуск; забирает take_notices
 
     @property
@@ -616,30 +615,53 @@ class YouTubePlatform:
         )
         LOGGER.info('thumbnail_set channel="%s" handle=%s broadcast_id=%s', channel.account_name, channel.handle, broadcast_id)
 
+    def keep_login(self, channel: ChannelConfig) -> None:
+        """Канал подтверждён: учётные данные нового входа — в файл токена; нового входа не было — ничего."""
+        credentials: Any = self._new_logins.pop(channel.key, None)
+        if credentials is None:
+            return
+        self._fresh_logins.discard(channel.key)
+        token_file: Path = token_file_for(self._secrets_dir, channel.handle)
+        try:
+            save_token(credentials, token_file)
+        except AuthError as error:
+            raise PlatformError(ERROR_AUTH, f"{error.reason.value}: {error.detail}") from error
+        LOGGER.info('token_created channel="%s" handle=%s file=%s', channel.account_name, channel.handle, token_file.name)
+
+    def drop_login(self, channel: ChannelConfig) -> None:
+        """Клиент, учётные данные и ChannelInfo канала забыты; следующий вход — браузером, токен не читается."""
+        self._services.pop(channel.key, None)
+        self._channels.pop(channel.key, None)
+        self._new_logins.pop(channel.key, None)
+        self._fresh_logins.add(channel.key)
+        for key in [key for key in self._refusals if key[0] == channel.key]:
+            del self._refusals[key]
+        LOGGER.info('login_dropped channel="%s" handle=%s', channel.account_name, channel.handle)
+
     def _service(self, channel: ChannelConfig, allow_login: bool) -> Any:
         cached: Any = self._services.get(channel.key)
         if cached is not None:
             return cached
+        is_fresh: bool = channel.key in self._fresh_logins
+        logged_in: list[bool] = []
         try:
             credentials: Any = load_credentials(
                 self._client_secret_file,
                 token_file_for(self._secrets_dir, channel.handle),
                 login_hint=channel.google_account,
-                on_login=self._login_callback(channel),
+                force_reauth=is_fresh,
+                on_login=lambda: logged_in.append(True),
                 allow_login=allow_login,
             )
         except AuthError as error:
             code: str = ERROR_LOGIN_REQUIRED if error.reason is AuthErrorReason.LOGIN_REQUIRED else ERROR_AUTH
             raise PlatformError(code, f"{error.reason.value}: {error.detail}") from error
+        if logged_in:
+            # токен пишет keep_login — только когда канал за этим входом подтверждён
+            self._new_logins[channel.key] = credentials
         service: Any = build(API_SERVICE_NAME, API_VERSION, credentials=credentials, cache_discovery=False)
         self._services[channel.key] = service
         return service
-
-    def _login_callback(self, channel: ChannelConfig) -> Callable[[], None] | None:
-        if self._on_login is None:
-            return None
-        on_login: Callable[[ChannelConfig], None] = self._on_login
-        return lambda: on_login(channel)
 
     def _execute(
         self,
@@ -647,12 +669,16 @@ class YouTubePlatform:
         operation: str,
         request_builder: Any,
         *,
-        allow_login: bool = True,
+        allow_login: bool = False,
     ) -> dict[str, Any]:
-        """Единственная точка обращения к API: память отказов, пауза, повторы по _error_behavior."""
+        """Единственная точка обращения к API: память отказов, пауза, повторы по _error_behavior и RETRY_POLICY.
+
+        Вход в браузере — только когда его явно разрешил describe_channel(allow_login=True).
+        """
         self._raise_if_refused(channel, operation)
         service: Any = self._channel_service(channel, operation, allow_login)
-        for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        retry_number: int = 0
+        while True:
             self._wait_pause()
             try:
                 response: Any = request_builder(service).execute()
@@ -670,11 +696,11 @@ class YouTubePlatform:
                     raise PlatformError(ERROR_BAD_RESPONSE, f"{operation} returned {type(response).__name__}")
                 return response
             self._mark_request_done()
-            if failure.behavior is ErrorBehavior.RETRY and attempt < RETRY_MAX_ATTEMPTS:
-                _sleep_before_retry(channel, operation, attempt, failure)
+            if failure.behavior is ErrorBehavior.RETRY and RETRY_POLICY.has_retry_left(retry_number + 1):
+                retry_number += 1
+                self._sleep_before_retry(channel, operation, retry_number, failure)
                 continue
             raise self._refuse(channel, operation, failure)
-        raise PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.account_name}: retries exhausted")
 
     def _wait_pause(self) -> None:
         """Выждать остаток request_pause_sec от конца предыдущего обращения; паузы повторов входят в него."""
@@ -739,22 +765,20 @@ class YouTubePlatform:
             self._refusals[key] = (error, failure.behavior)
         return error
 
-
-
-def _sleep_before_retry(channel: ChannelConfig, operation: str, attempt: int, failure: _Failure) -> None:
-    delay_sec: float = _retry_delay(attempt)
-    LOGGER.warning(
-        'request_retry operation=%s channel="%s" handle=%s attempt=%d/%d delay_sec=%.1f http_status=%s reason=%s',
-        operation,
-        channel.account_name,
-        channel.handle,
-        attempt,
-        RETRY_MAX_ATTEMPTS,
-        delay_sec,
-        failure.http_status if failure.http_status is not None else LOG_MISSING,
-        failure.error.code,
-    )
-    time.sleep(delay_sec)   # через модуль time: тесты подменяют
+    def _sleep_before_retry(self, channel: ChannelConfig, operation: str, retry_number: int, failure: _Failure) -> None:
+        delay_sec: float = RETRY_POLICY.delay_sec(retry_number, self._rng)
+        LOGGER.warning(
+            'request_retry operation=%s channel="%s" handle=%s retry=%d/%d delay_sec=%.2f http_status=%s reason=%s',
+            operation,
+            channel.account_name,
+            channel.handle,
+            retry_number,
+            RETRY_POLICY.max_retries,
+            delay_sec,
+            failure.http_status if failure.http_status is not None else LOG_MISSING,
+            failure.error.code,
+        )
+        time.sleep(delay_sec)   # через модуль time: тесты подменяют
 
 
 def _largest_thumbnail(thumbnails: dict[str, Any]) -> str | None:

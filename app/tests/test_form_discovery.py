@@ -255,8 +255,39 @@ def test_fbzx_falls_back_to_the_payload(tmp_path: Path, now: datetime) -> None:
     assert structure.fbzx == FBZX
 
 
-def test_http_error_is_transport_failure(tmp_path: Path, now: datetime) -> None:
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Паузы повторов discovery.py — без ожидания."""
+    import app.form.discovery as discovery_module
+
+    recorded: list[float] = []
+    monkeypatch.setattr(discovery_module.time, "sleep", recorded.append)
+    return recorded
+
+
+def test_server_error_is_retried_then_transport_failure(tmp_path: Path, now: datetime, sleeps: list[float]) -> None:
     session: _FakeSession = _FakeSession(_FakeResponse("", status_code=503))
     with pytest.raises(FormError) as raised:
         _discovery(session, tmp_path, now).structure(SHORT_URL)
     assert raised.value.code == FORM_CODE_TRANSPORT_FAILED
+    assert len(session.get_calls) == 5
+    assert [int(delay) for delay in sleeps] == [2, 4, 8, 16]
+
+
+def test_network_failure_and_server_error_are_retried(tmp_path: Path, now: datetime, sleeps: list[float]) -> None:
+    session: _FakeSession = _FakeSession(
+        ConnectionError("нет сети"),  # type: ignore[arg-type]
+        _FakeResponse("", status_code=502),
+        _FakeResponse(build_html()),
+    )
+    structure: FormStructure = _discovery(session, tmp_path, now).structure(SHORT_URL)
+    assert structure.fbzx == FBZX
+    assert len(session.get_calls) == 3 and len(sleeps) == 2
+
+
+def test_client_error_is_not_retried(tmp_path: Path, now: datetime, sleeps: list[float]) -> None:
+    session: _FakeSession = _FakeSession(_FakeResponse("", status_code=404))
+    with pytest.raises(FormError) as raised:
+        _discovery(session, tmp_path, now).structure(SHORT_URL)
+    assert raised.value.code == FORM_CODE_TRANSPORT_FAILED and raised.value.message == "HTTP 404"
+    assert len(session.get_calls) == 1 and sleeps == []

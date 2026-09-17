@@ -1,19 +1,22 @@
 """FakePlatform — площадка в памяти: только для тестов.
 
 Хранение по channel.key (каждый канал — отдельный YouTube-канал); тест называет канал ником или ключом —
-fake_key приводит их к одному ключу. Вход в канал имитируется: канал из tokens_missing при первом обращении
-вызывает on_login, как YouTube перед браузером; с allow_login=False — отказ ERROR_LOGIN_REQUIRED. Идентификаторы
-детерминированные (счётчик); ключи — 5 групп по 4 символа [a-z0-9], как у YouTube (§7.4).
+fake_key приводит их к одному ключу. Вход в канал имитируется так же, как у YouTube: у канала из tokens_missing
+токена нет — любое обращение без входа даёт LOGIN_REQUIRED_CODE; вход — только describe_channel(allow_login=True)
+после drop_login. Ответ входа — очередной из login_answers (иначе channel_info или «тот же канал»), сбой входа —
+fail_login. Учётные данные нового входа «в памяти», пока keep_login их не «запишет» (файл — если задан secrets_dir).
+Идентификаторы детерминированные (счётчик); ключи — 5 групп по 4 символа [a-z0-9], как у YouTube (§7.4).
 """
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Final
 
 from app.config.loader import ChannelConfig
 from app.core.text import normalize_handle
+from app.google.auth import token_file_for
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
     AppliedVideo,
@@ -27,6 +30,7 @@ from app.platforms.base import (
     StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
+    LOGIN_REQUIRED_CODE,
     PLACEHOLDER_TOKEN,
     broadcast_url_for,
     picture_sha,
@@ -38,7 +42,7 @@ FAKE_STREAM_ID_TEMPLATE: Final[str] = "fakestream{number:04d}"
 FAKE_STREAM_KEY_TEMPLATE: Final[str] = "fake-{number:04d}-0000-0000-0000"
 FAKE_CHANNEL_ID_TEMPLATE: Final[str] = "UCfake{key}"   # по ключу канала: у каналов с одним названием id разные
 NOT_FOUND_CODE: Final[str] = "broadcastNotFound"
-LOGIN_REQUIRED_CODE: Final[str] = "loginRequired"   # как ERROR_LOGIN_REQUIRED у YouTube
+FAKE_TOKEN_TEXT: Final[str] = '{"token": "fake"}'
 # Те же лимиты, что у YouTube: тесты должны ловить реальное поведение обрезки.
 FAKE_TITLE_MAX_CHARS: Final[int] = 100
 FAKE_DESCRIPTION_MAX_CHARS: Final[int] = 5000
@@ -97,9 +101,15 @@ class FakePlatform:
         self.channel_info: dict[str, ChannelInfo] = {}     # channel.key → ответ describe_channel
         self.describe_calls: list[str] = []                # channel.key каждого describe_channel
         self.describe_without_login: list[str] = []        # channel.key каждого describe_channel(allow_login=False)
-        self.tokens_missing: set[str] = set()              # channel.key без токена: первый вызов — вход
-        self.on_login: Callable[[ChannelConfig], None] | None = None
-        self.logins: list[str] = []
+        self.tokens_missing: set[str] = set()              # channel.key без токена: без входа — отказ
+        self.login_answers: dict[str, list[ChannelInfo]] = {}   # channel.key → ответы входов по порядку
+        self.fail_login: dict[str, PlatformError] = {}     # channel.key → сбой входа (браузер закрыт)
+        self.logins: list[str] = []                        # channel.key каждого входа в браузере
+        self.kept_logins: list[str] = []                   # keep_login после нового входа
+        self.dropped_logins: list[str] = []                # drop_login
+        self.secrets_dir: Path | None = None               # задан — keep_login пишет файл токена
+        self._fresh: set[str] = set()                      # после drop_login: следующий describe — вход
+        self._new_logins: dict[str, ChannelInfo] = {}      # вход был, токен ещё не записан
         self.pictures: dict[str, str] = {}   # broadcast_id → отпечаток текущей картинки эфира
 
     def seed_broadcast(
@@ -189,12 +199,46 @@ class FakePlatform:
         self.describe_calls.append(channel.key)
         if not allow_login:
             self.describe_without_login.append(channel.key)
-            if channel.key in self.tokens_missing:
+        if self._needs_login(channel):
+            if not allow_login:
                 raise PlatformError(LOGIN_REQUIRED_CODE, f"login required for {channel.handle}")
-        self._login_if_needed(channel)
+            return self._log_in(channel)
+        if channel.key in self._new_logins:
+            return self._new_logins[channel.key]
         if channel.key in self.fail_describe:
             raise self.fail_describe[channel.key]
         return self.channel_info.get(channel.key, self.default_channel_info(channel))
+
+    def keep_login(self, channel: ChannelConfig) -> None:
+        if self._new_logins.pop(channel.key, None) is None:
+            return
+        self.tokens_missing.discard(channel.key)
+        self.kept_logins.append(channel.key)
+        if self.secrets_dir is not None:
+            token_file_for(self.secrets_dir, channel.handle).write_text(FAKE_TOKEN_TEXT, encoding="utf-8")
+
+    def drop_login(self, channel: ChannelConfig) -> None:
+        self._new_logins.pop(channel.key, None)
+        self._fresh.add(channel.key)
+        self.dropped_logins.append(channel.key)
+
+    def _needs_login(self, channel: ChannelConfig) -> bool:
+        if channel.key in self._new_logins:
+            return False
+        return channel.key in self._fresh or channel.key in self.tokens_missing
+
+    def _log_in(self, channel: ChannelConfig) -> ChannelInfo:
+        """Вход в «браузере»: ответ — очередной из login_answers, иначе как у describe без входа."""
+        self._fresh.discard(channel.key)
+        self.logins.append(channel.key)
+        if channel.key in self.fail_login:
+            raise self.fail_login[channel.key]
+        answers: list[ChannelInfo] = self.login_answers.get(channel.key, [])
+        info: ChannelInfo = (
+            answers.pop(0) if answers else self.channel_info.get(channel.key, self.default_channel_info(channel))
+        )
+        self._new_logins[channel.key] = info
+        return info
 
     @staticmethod
     def default_channel_info(channel: ChannelConfig) -> ChannelInfo:
@@ -207,7 +251,8 @@ class FakePlatform:
 
     def list_upcoming(self, channel: ChannelConfig) -> list[UpcomingBroadcast]:
         self.list_calls.append(channel.key)
-        self._login_if_needed(channel)
+        if self._needs_login(channel):
+            raise PlatformError(LOGIN_REQUIRED_CODE, f"login required for {channel.handle}")
         if channel.key in self.fail_list:
             raise self.fail_list[channel.key]
         broadcasts: list[UpcomingBroadcast] = [
@@ -388,14 +433,6 @@ class FakePlatform:
             auto_stop=broadcast.auto_stop,
             latency_preference=broadcast.latency_preference,
         )
-
-    def _login_if_needed(self, channel: ChannelConfig) -> None:
-        if channel.key not in self.tokens_missing:
-            return
-        self.tokens_missing.discard(channel.key)
-        self.logins.append(channel.key)
-        if self.on_login is not None:
-            self.on_login(channel)
 
     def _next_number(self) -> int:
         self._counter += 1

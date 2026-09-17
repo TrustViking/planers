@@ -12,16 +12,19 @@ from app.form.base import (
     FORM_CODE_MISSING_OPTION,
     FORM_CODE_NOT_CONFIRMED,
     FORM_CODE_REQUIRED_MISSING,
+    FORM_CODE_STRUCTURE_UNREADABLE,
     FORM_CODE_TRANSPORT_FAILED,
     FormSendResult,
 )
 from app.form.discovery import FormDiscovery, FormStructure, SectionJump
+from app.core.retry import RetryPolicy
 from app.form.submitter import CONFIRMATION_MARKERS, Confirmation, GoogleFormSender, read_confirmation
 from app.package.model import Slot
 from app.pipeline.plan import PlannedBroadcast
 from app.tests.conftest import build_planned
 from app.tests.test_form_discovery import (
     SHORT_URL,
+    VIEW_URL,
     YOUTUBE_SECTION_ID,
     _FakeResponse,
     _FakeSession,
@@ -189,7 +192,28 @@ def test_response_without_marker_is_not_confirmed(
     assert "что-то пошло не так" in result.diagnostic_path.read_text(encoding="utf-8")
 
 
-def test_server_error_is_retried_three_times(
+def test_server_error_is_retried_by_the_policy(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5xx: первое обращение и 4 повтора с паузами RetryPolicy, затем transportFailed."""
+    import app.form.submitter as submitter_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(submitter_module.time, "sleep", sleeps.append)
+    session: _FakeSession = _FakeSession(
+        _FakeResponse(build_html()),
+        *[_FakeResponse("", status_code=500) for _ in range(RetryPolicy().max_attempts)],
+    )
+    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
+    assert result.code == FORM_CODE_TRANSPORT_FAILED
+    assert len(session.post_calls) == 5
+    assert [int(delay) for delay in sleeps] == [2, 4, 8, 16]
+
+
+def test_server_error_then_success_is_confirmed(
     tmp_path: Path,
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
@@ -199,14 +223,10 @@ def test_server_error_is_retried_three_times(
 
     monkeypatch.setattr(submitter_module.time, "sleep", lambda seconds: None)
     session: _FakeSession = _FakeSession(
-        _FakeResponse(build_html()),
-        _FakeResponse("", status_code=500),
-        _FakeResponse("", status_code=500),
-        _FakeResponse("", status_code=500),
+        _FakeResponse(build_html()), _FakeResponse("", status_code=503), _FakeResponse(CONFIRMED_BODY)
     )
-    result: FormSendResult = _sender(session, tmp_path).send(_planned(make_config, make_slot_object))
-    assert result.code == FORM_CODE_TRANSPORT_FAILED
-    assert len(session.post_calls) == 3
+    assert _sender(session, tmp_path).send(_planned(make_config, make_slot_object)).confirmed is True
+    assert len(session.post_calls) == 2
 
 
 def test_client_error_is_not_retried(
@@ -232,6 +252,55 @@ def test_structure_is_read_once_for_two_objects(
     sender.send(_planned(make_config, make_slot_object, start=datetime(2027, 3, 18, 19, 0, tzinfo=KYIV)))
     assert len(session.get_calls) == 1
     assert len(session.post_calls) == 2
+
+
+def test_form_is_read_once_at_prepare_and_send_uses_it(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+) -> None:
+    """Формы читаются в начале запуска; несколько слотов одной формы — одно чтение, send страницу не качает."""
+    session: _FakeSession = _session(CONFIRMED_BODY)
+    sender: GoogleFormSender = _sender(session, tmp_path)
+    first: PlannedBroadcast = _planned(make_config, make_slot_object)
+    second: PlannedBroadcast = _planned(make_config, make_slot_object, start=datetime(2027, 3, 18, 19, 0, tzinfo=KYIV))
+    sender.prepare([first.form, second.form, first.form])
+    assert session.get_calls == [SHORT_URL]
+    assert sender.send(first).confirmed and sender.send(second).confirmed
+    assert session.get_calls == [SHORT_URL]
+
+
+def test_unreadable_form_gives_the_same_error_to_every_send(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session: _FakeSession = _FakeSession(_FakeResponse("<html>нет скрипта</html>"))
+    sender: GoogleFormSender = _sender(session, tmp_path)
+    item: PlannedBroadcast = _planned(make_config, make_slot_object)
+    with caplog.at_level("WARNING"):
+        sender.prepare([item.form])
+    assert any(message.startswith("form_unreadable url=") for message in caplog.messages)
+    first: FormSendResult = sender.send(item)
+    second: FormSendResult = sender.send(item)
+    assert first.code == second.code == FORM_CODE_STRUCTURE_UNREADABLE
+    assert len(session.get_calls) == 1 and session.post_calls == []
+
+
+def test_form_ready_is_logged_with_dates_and_languages(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session: _FakeSession = _session(CONFIRMED_BODY)
+    with caplog.at_level("INFO"):
+        _sender(session, tmp_path).prepare([_planned(make_config, make_slot_object).form])
+    [line] = [message for message in caplog.messages if message.startswith("form_ready")]
+    assert line == (
+        f"form_ready url={VIEW_URL} questions=7 pages=3 dates=17.03.2027,18.03.2027 languages=ru,en stream_urls=2"
+    )
 
 
 def test_page_history_uses_page_index_not_section_id(

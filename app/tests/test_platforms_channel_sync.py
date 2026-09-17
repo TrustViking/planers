@@ -20,7 +20,8 @@ from app.platforms.base import ChannelInfo, PlatformError
 from app.platforms.channel_sync import ChannelSync
 from app.platforms.fake import FakePlatform
 from app.platforms.passport import ChannelPassport, PassportEntry
-from app.platforms.verified import ERROR_CHANNEL_HANDLE_MISMATCH, ChannelBindingError, VerifiedPlatform
+from app.platforms.channel import Channel, ChannelBook, ChannelStatus
+from app.platforms.verified import VerifiedPlatform
 from app.tests.conftest import FIXED_NOW, FakeFormSender
 from app.ui import messages_ru as msg
 
@@ -74,6 +75,10 @@ def _sync(platform: FakePlatform, paths: PlanerPaths) -> ChannelSync:
     return ChannelSync(platform, paths, FIXED_NOW)
 
 
+def _statuses(sync: ChannelSync) -> dict[str, ChannelStatus]:
+    return {channel.key: channel.status for channel in sync.take_channels()}
+
+
 def _entry(paths: PlanerPaths, key: str) -> PassportEntry | None:
     return ChannelPassport.load(paths.channels_passport_file)[0].find_by_key(key)
 
@@ -114,8 +119,12 @@ def test_handle_changed_on_youtube_is_aligned_by_passport(
     _seed_passport(owner_root, channel)
     _token(owner_root, OLD)
     _answer(fake_platform, "yt_ua", channel, handle_raw="@YT_UA_new")
-    synced, warnings = _sync(fake_platform, owner_root).run(config)
+    sync: ChannelSync = _sync(fake_platform, owner_root)
+    synced, warnings = sync.run(config)
     assert [item.handle for item in synced.channels] == ["@YT_UA_new"]     # написание — как прислал YouTube
+    [channel] = sync.take_channels()
+    assert (channel.key, channel.status, channel.config) == ("yt_ua_new", ChannelStatus.READY, synced.channels[0])
+    assert channel.token_file == token_file_for(owner_root.secrets_dir, "@YT_UA_new")
     assert not token_file_for(owner_root.secrets_dir, OLD).exists()
     assert token_file_for(owner_root.secrets_dir, "@YT_UA_new").read_text(encoding="utf-8") == "token"
     assert _entry(owner_root, "yt_ua") is None
@@ -128,22 +137,59 @@ def test_handle_changed_on_youtube_is_aligned_by_passport(
     assert fake_platform.logins == []
 
 
-def test_handle_changed_without_passport_is_left_for_refusal(
+def test_foreign_token_is_dropped_at_start(
+    owner_root: PlanerPaths, make_config: ConfigFactory, fake_platform: FakePlatform
+) -> None:
+    """Токен ведёт на канал с другим ником, паспорт этого не подтверждает: файл удалён, NEEDS_LOGIN."""
+    channel: ChannelConfig = _channel(make_config)
+    config: PlanerConfig = _write_config(owner_root, channel)
+    before: bytes = owner_root.channels_file.read_bytes()
+    token: Path = _token(owner_root, OLD)
+    _answer(fake_platform, "yt_ua", channel, handle_raw="@lisathomson-v3l", title="Lisa Thomson")
+    sync: ChannelSync = _sync(fake_platform, owner_root)
+    synced, warnings = sync.run(config)
+    assert synced == config and owner_root.channels_file.read_bytes() == before
+    assert not token.exists()
+    assert warnings == [
+        msg.WARNING_TOKEN_REJECTED.format(
+            account_name="Канал UA", handle=OLD, youtube_title="Lisa Thomson",
+            youtube_handle="@lisathomson-v3l", youtube_channel_id=CHANNEL_ID,
+        )
+    ]
+    assert _statuses(sync) == {"yt_ua": ChannelStatus.NEEDS_LOGIN}
+    assert fake_platform.dropped_logins == ["yt_ua"] and fake_platform.logins == []
+
+
+def test_same_handle_with_other_id_in_passport_drops_the_token(
     owner_root: PlanerPaths, make_config: ConfigFactory, fake_platform: FakePlatform
 ) -> None:
     channel: ChannelConfig = _channel(make_config)
     config: PlanerConfig = _write_config(owner_root, channel)
-    before: bytes = owner_root.channels_file.read_bytes()
-    _token(owner_root, OLD)
-    _answer(fake_platform, "yt_ua", channel, handle_raw=NEW)
+    _seed_passport(owner_root, channel)
+    token: Path = _token(owner_root, OLD)
+    fake_platform.channel_info["yt_ua"] = replace(FakePlatform.default_channel_info(channel), youtube_channel_id="UCother")
     sync: ChannelSync = _sync(fake_platform, owner_root)
-    synced, warnings = sync.run(config)
-    assert synced == config and warnings == []
-    assert owner_root.channels_file.read_bytes() == before and not owner_root.channels_previous_file.exists()
-    assert token_file_for(owner_root.secrets_dir, OLD).exists()
-    with pytest.raises(ChannelBindingError) as raised:
-        VerifiedPlatform(fake_platform, sync).list_upcoming(synced.channels[0])
-    assert raised.value.code == ERROR_CHANNEL_HANDLE_MISMATCH
+    sync.run(config)
+    assert not token.exists()
+    assert _statuses(sync) == {"yt_ua": ChannelStatus.NEEDS_LOGIN}
+
+
+def test_channel_without_handle_confirmed_by_passport_is_refused_and_token_kept(
+    owner_root: PlanerPaths, make_config: ConfigFactory, fake_platform: FakePlatform
+) -> None:
+    """Паспорт подтверждает id, но ника на YouTube нет: токен свой — не удаляется, канал — отказ."""
+    channel: ChannelConfig = _channel(make_config)
+    config: PlanerConfig = _write_config(owner_root, channel)
+    _seed_passport(owner_root, channel)
+    token: Path = _token(owner_root, OLD)
+    _answer(fake_platform, "yt_ua", channel, handle_raw=None)
+    sync: ChannelSync = _sync(fake_platform, owner_root)
+    _, warnings = sync.run(config)
+    assert token.exists() and warnings == []
+    [refused] = sync.take_channels()
+    assert refused.status is ChannelStatus.REFUSED
+    assert refused.error is not None and refused.error.code == "channelHandleMissing"
+    assert "planer.bat --auth" not in refused.error.message
 
 
 def test_handle_fixed_by_hand_finds_token_under_old_handle(
@@ -155,8 +201,10 @@ def test_handle_fixed_by_hand_finds_token_under_old_handle(
     new_channel: ChannelConfig = _channel(make_config, NEW)
     config: PlanerConfig = _write_config(owner_root, new_channel)
     _answer(fake_platform, "yt_ua", old_channel, handle_raw=NEW)       # токен старого файла ведёт на канал с новым ником
-    synced, warnings = _sync(fake_platform, owner_root).run(config)
+    sync: ChannelSync = _sync(fake_platform, owner_root)
+    synced, warnings = sync.run(config)
     assert synced.channels == config.channels
+    assert _statuses(sync) == {"yt_ua_new": ChannelStatus.READY}
     assert not token_file_for(owner_root.secrets_dir, OLD).exists()
     assert token_file_for(owner_root.secrets_dir, NEW).read_text(encoding="utf-8") == "token"
     entry: PassportEntry | None = _entry(owner_root, "yt_ua_new")
@@ -194,8 +242,10 @@ def test_channel_without_token_is_not_asked_at_all(
 ) -> None:
     config: PlanerConfig = _write_config(owner_root, *make_config().channels)
     fake_platform.tokens_missing = {"yt_ua", "yt_ru"}
-    synced, warnings = _sync(fake_platform, owner_root).run(config)
+    sync: ChannelSync = _sync(fake_platform, owner_root)
+    synced, warnings = sync.run(config)
     assert synced == config and warnings == []
+    assert _statuses(sync) == {"yt_ua": ChannelStatus.NEEDS_LOGIN, "yt_ru": ChannelStatus.NEEDS_LOGIN}
     assert fake_platform.describe_calls == [] and fake_platform.logins == []
     assert not owner_root.channels_passport_file.exists()
 
@@ -208,10 +258,15 @@ def test_describe_failure_skips_the_channel(
         _token(owner_root, channel.handle)
     fake_platform.fail_describe["yt_ua"] = PlatformError("backendError", "503")
     fake_platform.tokens_missing = {"yt_ru"}                          # токен отозван: нужен вход, но не сейчас
-    synced, warnings = _sync(fake_platform, owner_root).run(config)
+    sync: ChannelSync = _sync(fake_platform, owner_root)
+    synced, warnings = sync.run(config)
     assert synced == config and warnings == []
     assert fake_platform.logins == []
     assert fake_platform.describe_without_login == ["yt_ua", "yt_ru"]
+    channels: dict[str, Channel] = {channel.key: channel for channel in sync.take_channels()}
+    assert channels["yt_ua"].status is ChannelStatus.FAILED
+    assert channels["yt_ua"].error is not None and channels["yt_ua"].error.code == "backendError"
+    assert channels["yt_ru"].status is ChannelStatus.NEEDS_LOGIN
 
 
 def test_output_and_form_use_values_aligned_at_start(
@@ -229,13 +284,13 @@ def test_output_and_form_use_values_aligned_at_start(
     _token(owner_root, OLD)
     _answer(fake_platform, "yt_ua", channel, handle_raw=NEW, title="Новое название")
     _answer(fake_platform, "yt_ua_new", _channel(make_config, NEW, "Новое название"))
-    sync: ChannelSync = _sync(fake_platform, owner_root)
-    synced, warnings = sync.run(config)
+    book: ChannelBook = ChannelBook(fake_platform, _sync(fake_platform, owner_root))
+    synced, warnings = book.check_without_login(config)
     make_package(owner_root.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     form_sender: FakeFormSender = FakeFormSender()
     outcome: RunOutcome = run(
-        RunMode.FULL, synced, owner_root, VerifiedPlatform(fake_platform, sync), form_sender, now, rng,
-        channel_warnings=warnings,
+        RunMode.FULL, synced, owner_root, VerifiedPlatform(fake_platform, book), form_sender, now, rng,
+        channel_warnings=warnings, logins=book,
     )
     assert outcome.report is not None
     assert [call.account_name for call in form_sender.calls] == ["Новое название"]

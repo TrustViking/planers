@@ -4,13 +4,14 @@ import random
 import re
 
 import pytest
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.config.loader import PlanerConfig
+from app.config.loader import ChannelConfig, PlanerConfig
+from app.package.model import FormSpec
 from app.output.report import FormState, OutcomeKind, PackageLineStatus, SkipKind, SkippedLine
 from app.paths import PlanerPaths
 from app.output.console import render_console
@@ -44,6 +45,9 @@ class _PartialFormSender:
     def __init__(self, confirmed_slot_id: str) -> None:
         self._confirmed_slot_id: str = confirmed_slot_id
         self.calls: list[str] = []
+
+    def prepare(self, forms: Sequence[FormSpec]) -> None:
+        """Формы в этом тесте не читаются."""
 
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         self.calls.append(planned.slot_id)
@@ -1201,3 +1205,113 @@ def test_channels_with_one_title_and_other_handles_do_not_mix(
     assert lines.count("  Українка @twin_a (owner@gmail.com)") == 3       # ОПУБЛИКОВАЛИ, КЛЮЧИ, УЖЕ СТОЯЛО
     assert "  Українка @twin_b (owner@gmail.com)" not in lines            # у twin_b только ошибки
     assert any(line.startswith("  ошибка: 17-03-2027 19:00 uk -> Українка @twin_b — ") for line in lines)
+
+
+class _LoginPhase:
+    """Фаза входов для runner: вход — через describe_channel(allow_login=True), как у ChannelBook."""
+
+    def __init__(self, platform: FakePlatform) -> None:
+        self._platform: FakePlatform = platform
+        self.phases: list[tuple[list[str], int]] = []   # (каналы, сколько list_upcoming было до фазы)
+
+    def log_in_needed(self, channels: Sequence[ChannelConfig]) -> None:
+        keys: list[str] = list(dict.fromkeys(channel.key for channel in channels))
+        self.phases.append((keys, len(self._platform.list_calls)))
+        for channel in {channel.key: channel for channel in channels}.values():
+            if channel.key in self._platform.tokens_missing:
+                self._platform.drop_login(channel)
+                self._platform.describe_channel(channel, allow_login=True)
+                self._platform.keep_login(channel)
+
+
+def test_logins_happen_before_any_channel_is_listed(
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    """Все входы — подряд до первого list_upcoming; в сверке и действиях браузер не открывается."""
+    make_package(
+        planer_paths.bcast_dir,
+        slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("17-03-2027", "19:00", "ru")],
+    )
+    fake_platform.tokens_missing = {"yt_ua", "yt_ru"}
+    logins: _LoginPhase = _LoginPhase(fake_platform)
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(), planer_paths, fake_platform, FakeFormSender(), now, rng, logins=logins
+    )
+    assert logins.phases == [(["yt_ru", "yt_ua"], 0)]
+    assert fake_platform.logins == ["yt_ru", "yt_ua"]
+    assert fake_platform.list_calls == ["yt_ru", "yt_ua"]
+    assert outcome.exit_code == ExitCode.OK and len(fake_platform.created) == 2
+
+
+def test_channel_without_login_after_the_phase_is_an_error_not_a_browser(
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    """Канал, который в фазе входов не вошёл, — ошибка его объектов; другие каналы обработаны."""
+    make_package(
+        planer_paths.bcast_dir,
+        slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("17-03-2027", "19:00", "ru")],
+    )
+    fake_platform.tokens_missing = {"yt_ua"}
+    fake_platform.fail_login["yt_ua"] = PlatformError("authFailed", "flow_failed: browser closed")
+
+    class _FailingPhase:
+        def log_in_needed(self, channels: Sequence[ChannelConfig]) -> None:
+            for channel in channels:
+                if channel.key in fake_platform.tokens_missing:
+                    fake_platform.drop_login(channel)
+                    with pytest.raises(PlatformError):
+                        fake_platform.describe_channel(channel, allow_login=True)
+
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(), planer_paths, fake_platform, FakeFormSender(), now, rng, logins=_FailingPhase()
+    )
+    assert fake_platform.logins == ["yt_ua"]                      # один вход — в фазе, не в сверке
+    assert outcome.report is not None
+    errors = [item for item in outcome.report.outcomes if item.kind is OutcomeKind.ERROR]
+    assert [item.account_name for item in errors] == ["yt_ua"]
+    assert [call.channel_id for call in fake_platform.created] == ["yt_ru"]
+
+
+def test_forms_are_read_before_the_platform_is_touched(
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    make_package(
+        planer_paths.bcast_dir,
+        slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "uk")],
+    )
+    sender: FakeFormSender = FakeFormSender(platform=fake_platform)
+    run(RunMode.DRY_RUN, make_config(), planer_paths, fake_platform, sender, now, rng)
+    assert sender.prepared == [((FORM_SPEC["url"],), 0)]
+    assert fake_platform.list_calls == ["yt_ua"]
+
+
+def test_status_logs_in_every_channel_first(
+    planer_paths: PlanerPaths,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    sender: FakeFormSender = FakeFormSender()
+    logins: _LoginPhase = _LoginPhase(fake_platform)
+    run(RunMode.STATUS, make_config(), planer_paths, fake_platform, sender, now, rng, logins=logins)
+    assert logins.phases == [(["yt_ua", "yt_ru"], 0)]
+    assert sender.prepared == []                                   # в --status форм нет
