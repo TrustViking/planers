@@ -1,8 +1,10 @@
 """Единый объект запланированного эфира (ТЗ §7.2, §7.3).
 
 Одна рабочая единица = один эфир одного слота на одном канале. Объект рождается из
-пакета и канала и ничего не знает о прошлых запусках: ключ и ссылка приходят только
-с площадки — из найденного эфира или из ответа на создание и привязку потока.
+пакета и канала; ключ и ссылка приходят только с площадки — из найденного эфира или из ответа
+на создание и привязку потока. Из памяти планера (app/records) объект получает только результаты
+прошлых запусков — главное, какую тройку «ключ, форма, ответы» форма уже подтвердила; задания
+из памяти не берутся. Должен ли ключ уйти в форму, решает одно правило — decide_key_delivery.
 После фазы входов объект получает объект своего канала и объект своей формы и сам решает,
 допущен ли он к публикации (admit) — единственное место этого правила.
 Сравнение идёт между двумя BroadcastSpec — «как должно быть» и «как есть», — поэтому
@@ -12,12 +14,13 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Final
 
 from app.config.loader import ChannelConfig, PlanerSettings
+from app.core.dates import format_datetime_text
 from app.core.text import normalize_description, normalize_title, safe_trim
 from app.package.model import FormSpec, Package, Slot
 from app.platforms.base import (
@@ -29,6 +32,7 @@ from app.platforms.base import (
     broadcast_url_for,
 )
 from app.platforms.channel import ChannelStatus
+from app.records.slot_record import ConfirmedAnswer, RecordResults, RecordSnapshot, SlotRecord, SlotStage
 from app.ui import messages_ru as msg
 
 if TYPE_CHECKING:   # форма и канал нужны объекту только для аннотаций: их строит runner
@@ -286,9 +290,15 @@ class PlannedBroadcast:
     # --- ключ и ссылка: только из ответа площадки (ТЗ §7.3)
     broadcast_id: str | None = None
     broadcast_url: str | None = None
+    stream_id: str | None = None
     stream_url: str | None = None
     stream_key: str | None = None
-    should_send_key: bool = False  # ключ должен дойти до стримера в этом запуске (require_key_delivery)
+    should_send_key: bool = False  # ключ должен дойти до стримера в этом запуске (decide_key_delivery)
+
+    # --- память планера: запись прошлых запусков (из неё читаются только результаты)
+    record: SlotRecord | None = None
+    confirmed_results: RecordResults | None = None   # подтверждение этого запуска (confirm_key); иначе — из записи
+    is_bootstrap_confirmed: bool = False             # первый запуск с памятью записал подтверждение без отправки
 
     # --- объекты запуска и допуск (admit). channel_object в production передаётся всегда;
     # None — только тесты без ChannelBook. key_form None — отправитель формы не проверяет (тесты, Noop).
@@ -398,22 +408,144 @@ class PlannedBroadcast:
         return self.form_answers is not None and self.form_answers.is_complete
 
     def take_new_key(self, created: CreatedBroadcast) -> None:
-        """Ключ получен в этом запуске: эфир создан или поток привязан — стример этого ключа не видел."""
+        """Ключ получен в этом запуске: эфир создан или поток привязан."""
         self.broadcast_id = created.broadcast_id
         self.broadcast_url = created.broadcast_url
+        self.stream_id = created.stream_id
         self.stream_url = created.stream_url
         self.stream_key = created.stream_key
-        self.require_key_delivery()
 
-    def require_key_delivery(self) -> None:
-        """Единственное место, где ставится should_send_key. Ровно четыре случая:
+    # --- память планера и правило отправки
 
-        эфир создан; найденному эфиру без потока поток привязан (оба — через take_new_key);
-        найденный эфир исправлен (UPDATE); ручной эфир без метки усыновлён — метка планера
-        проставлена, это исправление поля MARKER. Совпавший эфир с нашей меткой ключ не шлёт.
-        Задвоение строки у стримера допустимо: он берёт последнюю по дате, каналу и языку.
+    @property
+    def record_channel_id(self) -> str | None:
+        """Id канала на YouTube — ключ записи. Канал не READY или без ответа YouTube — записи нет.
+
+        Без объекта канала (только тесты без ChannelBook) — ключ канала из channels.json.
         """
-        self.should_send_key = True
+        if self.channel_object is None:
+            return self.channel.key
+        if self.channel_object.status is not ChannelStatus.READY or self.channel_object.info is None:
+            return None
+        return self.channel_object.info.youtube_channel_id
+
+    @property
+    def results(self) -> RecordResults:
+        """Результаты, которые знает объект: подтверждение этого запуска, иначе — из записи."""
+        if self.confirmed_results is not None:
+            return self.confirmed_results
+        return self.record.results if self.record is not None else RecordResults()
+
+    @property
+    def form_response_url(self) -> str:
+        """Адрес формы, куда уходит ответ; без объекта формы (тесты) — адрес из пакета."""
+        return self.key_form.structure.response_url if self.key_form is not None else self.form.url
+
+    @property
+    def answers_record(self) -> tuple[ConfirmedAnswer, ...]:
+        """Текущие ответы формы в каноническом виде (entry_id, вопрос, значение)."""
+        if self.form_answers is None:
+            return ()
+        return tuple(ConfirmedAnswer(*answer) for answer in self.form_answers.as_record())
+
+    def decide_key_delivery(self) -> None:
+        """ЕДИНСТВЕННОЕ правило отправки ключа в форму (инвариант 1a).
+
+        Ключ должен уйти, если объект допущен, не too_late, ключ и адрес потока взяты с площадки в этом
+        запуске и память не хранит подтверждение ровно этой тройки: тот же ключ, тот же адрес формы,
+        те же ответы. Вид действия (создан, привязан, исправлен, совпал, усыновлён) не важен; ошибка
+        другого шага отправку не отменяет. Полны ли ответы, решает is_key_ready_to_send: неполные —
+        ключ «должен был уйти и не ушёл».
+        """
+        self.refresh_form_answers()
+        self.should_send_key = (
+            self.is_admitted
+            and not self.is_too_late
+            and bool(self.stream_key)
+            and bool(self.stream_url)
+            and not self.results.has_confirmed(self.stream_key or "", self.form_response_url, self.answers_record)
+        )
+
+    def bootstrap_confirmation(self, now: datetime) -> bool:
+        """Первый запуск с памятью: эфир с меткой планера этого слота уже стоял — ключ считается переданным.
+
+        Только MATCH и UPDATE с найденным потоком, чьё название — slot_id; ручной эфир без метки
+        и созданные этим запуском идут по общему правилу. Ответы должны быть полными: их и запоминаем.
+        """
+        is_marked: bool = self.found_stream is not None and self.found_stream.title == self.slot_id
+        if not (self.is_admitted and not self.is_too_late and self.record is None and is_marked):
+            return False
+        if self.decision not in (Decision.MATCH, Decision.UPDATE) or not self.stream_key or not self.stream_url:
+            return False
+        answers: FormAnswers | None = self.refresh_form_answers()
+        if answers is not None and not answers.is_complete:
+            return False
+        self.confirm_key(now, is_bootstrap=True)
+        self.is_bootstrap_confirmed = True
+        return True
+
+    def confirm_key(self, now: datetime, *, is_bootstrap: bool = False) -> None:
+        """Форма подтвердила текущую тройку: ключ, адрес формы, ответы."""
+        self.confirmed_results = replace(
+            self.results,
+            confirmed_stream_key=self.stream_key,
+            confirmed_form_url=self.form_response_url,
+            confirmed_answers=self.answers_record,
+            confirmed_at=format_datetime_text(now.astimezone()),
+            is_bootstrap=is_bootstrap,
+        )
+
+    def to_record(self, now: datetime, stage: SlotStage) -> SlotRecord:
+        """Запись объекта: снимок для людей и результаты. Стадия не откатывается ниже достигнутого для этого ключа."""
+        channel_id: str | None = self.record_channel_id
+        if channel_id is None:
+            raise ValueError(f"no YouTube channel id for {self.slot_id}")
+        results: RecordResults = self._published_results(now)
+        reached: list[SlotStage] = [stage]
+        if results.stream_key:
+            reached.append(SlotStage.PUBLISHED)
+        if results.confirms_key(results.stream_key):
+            reached.append(SlotStage.KEY_CONFIRMED)
+        return SlotRecord(
+            slot_id=self.slot_id,
+            youtube_channel_id=channel_id,
+            slot_start_utc=self.slot.start.astimezone(timezone.utc).isoformat(),
+            stage=max(reached, key=lambda item: item.rank),
+            updated_at=format_datetime_text(now.astimezone()),
+            results=results,
+            snapshot=self._snapshot(),
+        )
+
+    def _published_results(self, now: datetime) -> RecordResults:
+        """Эфир, поток и ключ — взятые этим запуском; не взяты — прежние из записи."""
+        results: RecordResults = self.results
+        if not self.stream_key:
+            return results
+        is_same_key: bool = results.stream_key == self.stream_key and results.published_at is not None
+        return replace(
+            results,
+            broadcast_id=self.broadcast_id,
+            broadcast_url=self.broadcast_url,
+            stream_id=self.stream_id,
+            stream_url=self.stream_url,
+            stream_key=self.stream_key,
+            published_at=results.published_at if is_same_key else format_datetime_text(now.astimezone()),
+        )
+
+    def _snapshot(self) -> RecordSnapshot:
+        return RecordSnapshot(
+            date=self.date,
+            time=self.time,
+            language=self.language,
+            account_name=self.account_name,
+            handle=self.channel.handle,
+            title=self.expected.title,
+            form_url=self.form.url,
+            decision=self.decision.value,
+            admission_reasons=tuple(reason.text for reason in self.admission_reasons),
+            last_error=self.last_error,
+            warnings=tuple(f"{warning.step}:{warning.code}" for warning in self.warnings),
+        )
 
     def split_changed(self, changed: tuple[ChangedField, ...]) -> None:
         """Изменившиеся поля — на исправимые и только сообщаемые; решение по ним принимает вызывающий."""
@@ -426,6 +558,7 @@ class PlannedBroadcast:
             return
         self.broadcast_id = self.found.broadcast_id
         self.broadcast_url = broadcast_url_for(self.channel, self.found.broadcast_id)
+        self.stream_id = self.found_stream.stream_id
         self.stream_url = self.found_stream.ingestion_address
         self.stream_key = self.found_stream.stream_name
 
@@ -435,11 +568,12 @@ class PlannedBroadcast:
 
     @property
     def is_key_undelivered(self) -> bool:
-        """Ключ должен дойти до стримера, а до формы ещё не дошёл: финальный проход §7.5 и код выхода 1."""
+        """Ключ должен дойти до стримера, а до формы ещё не дошёл: код выхода 1 и «НЕ отправлен» в keys.txt."""
         return self.should_send_key and bool(self.stream_key) and not self.is_form_sent
 
     @property
     def has_kept_key(self) -> bool:
-        """Эфир с меткой планера совпал с пакетом: ключ уже уходил раньше, повторно не отправляется."""
-        is_match: bool = self.decision is Decision.MATCH
-        return is_match and not self.should_send_key and self.error is None and bool(self.stream_key)
+        """Память хранит подтверждение текущего ключа, и в этом запуске он повторно не отправлялся."""
+        if self.should_send_key or self.is_form_sent or self.error is not None:
+            return False
+        return self.results.confirms_key(self.stream_key)

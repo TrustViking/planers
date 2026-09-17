@@ -101,7 +101,8 @@ class FormState(str, Enum):
     """Только для ключа, который в этом запуске должен был дойти до стримера (§7.5)."""
 
     SENT = "sent"          # ответ формы подтверждён
-    FAILED = "failed"      # не подтверждён; повтора не будет
+    FAILED = "failed"      # не подтверждён
+    PLANNED = "planned"    # --dry-run: ключ ушёл бы в форму (память не хранит его подтверждения)
 
 
 _UNREADABLE_PACKAGE_STATUSES: Final[frozenset[PackageLineStatus]] = frozenset(
@@ -135,6 +136,7 @@ _ADMISSION_KIND_TEMPLATES: Final[dict[AdmissionKind, str]] = {
 _FORM_MARKS: Final[dict[FormState, str]] = {
     FormState.SENT: msg.FORM_MARK_SENT,
     FormState.FAILED: msg.FORM_MARK_FAILED,
+    FormState.PLANNED: msg.FORM_MARK_PLANNED,
 }
 
 
@@ -296,7 +298,7 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
         language=item.language,
         broadcast_url=item.broadcast_url or item.found_url,
         changed_fields=tuple(changed.value for changed in item.changed_fields),
-        form=None if is_dry_run else _form_state(item),
+        form=_form_state(item, is_dry_run=is_dry_run),
         form_error=item.last_error if item.should_send_key else None,
         error=item.error,
         title=item.expected.title,
@@ -532,10 +534,12 @@ def _add_if_different(found: list[tuple[str, str, str]], field: str, wanted: str
         found.append((field, wanted, actual))
 
 
-def _form_state(item: PlannedBroadcast) -> FormState | None:
-    """None — в этом запуске ключ в форму не шёл: эфир с меткой планера совпал (§7.5)."""
+def _form_state(item: PlannedBroadcast, *, is_dry_run: bool) -> FormState | None:
+    """None — в этом запуске ключ в форму не должен был идти: память хранит его подтверждение (§7.5)."""
     if not item.should_send_key or not item.stream_key:
         return None
+    if is_dry_run:
+        return FormState.PLANNED
     return FormState.SENT if item.is_form_sent else FormState.FAILED
 
 
@@ -792,7 +796,11 @@ def _fixed_text(outcome: PairOutcome, prefix: str, *, is_dry_run: bool) -> str:
 
 
 def _matched_text(outcome: PairOutcome, prefix: str) -> str:
-    return msg.OUTCOME_MATCHED.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE)
+    """Совпавший эфир, чей ключ ушёл (или ушёл бы) в форму: память не хранила его подтверждения."""
+    text: str = msg.OUTCOME_MATCHED.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE)
+    if outcome.form is None:
+        return text
+    return text + msg.OUTCOME_MATCHED_FORM.format(mark=form_mark(outcome.form, outcome.form_error))
 
 
 def _error_text(outcome: PairOutcome, prefix: str) -> str:

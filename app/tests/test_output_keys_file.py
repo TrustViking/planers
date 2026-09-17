@@ -15,6 +15,7 @@ from app.output.keys_file import (
 from app.paths import PlanerPaths
 from app.pipeline.plan import AdmissionKind, AdmissionReason, PlannedBroadcast
 from app.pipeline.reconciler import MarkedBroadcast, MarkerParts
+from app.records.slot_record import RecordResults, SlotRecord, SlotStage
 from app.platforms.base import CreatedBroadcast, StreamInfo, UpcomingBroadcast
 from app.tests.conftest import build_planned, build_slot
 from app.ui import messages_ru as msg
@@ -27,10 +28,12 @@ STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенерировано планером 13-09-2026 12:00.
 # Файл перезаписывается на каждом запуске — не править.
 # Строка «форма»:
-#   «отправлен в форму» — ключ у стримера;
-#   «в этом запуске в форму не отправлялся» — эфир уже стоял, ключ уходил раньше;
-#   «НЕ отправлен» — передайте ключ стримеру вручную;
-#   «НЕ отправлен: не допущено» — форма этот эфир не принимает (нет даты или варианта) или канал не подтверждён: эфир стоит, ключ стримеру не передан — передайте вручную.
+#   «отправлен в форму» — форма подтвердила ключ в этом запуске;
+#   «передан в форму» — форма подтвердила этот ключ раньше (память планера);
+#   «передан до появления памяти планера» — эфир уже стоял с меткой планера, когда память создавалась;
+#   «НЕ отправлен» — ключ должен был уйти и не ушёл: передайте его стримеру вручную;
+#   «НЕ отправлен: не допущено» — форма этот эфир не принимает (нет даты или варианта) или канал не подтверждён: эфир стоит, ключ стримеру не передан — передайте вручную;
+#   «нет подтверждения в памяти планера» — планер не знает, получил ли стример этот ключ.
 
 16-09-2026 19:00  uk  Канал UA @КаналUA
   ключ   xxxx-xxxx-xxxx-xxxx-xxxx
@@ -42,13 +45,13 @@ TZ_SAMPLE_KEYS: str = """# Ключи трансляций. Сгенериров
   ключ   yyyy-yyyy-yyyy-yyyy-yyyy
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=def456
-  форма  НЕ отправлен: форма недоступна (HTTP 503) — передайте стримеру вручную
+  форма  НЕ отправлен — форма недоступна (HTTP 503); передайте стримеру вручную
 
 17-09-2026 19:00  uk  Канал UA @КаналUA
   ключ   zzzz-zzzz-zzzz-zzzz-zzzz
   поток  rtmp://a.rtmp.youtube.com/live2
   эфир   https://www.youtube.com/watch?v=ghi789
-  форма  в этом запуске в форму не отправлялся: эфир уже стоял с этим ключом
+  форма  передан в форму 12-09-2026 20:00
 """
 
 
@@ -86,6 +89,19 @@ def _new_key(day: int, hour: int, language: str, channel: ChannelConfig, broadca
     return item
 
 
+def _confirmed(item: PlannedBroadcast, *, is_bootstrap: bool = False, at: str = "12-09-2026 20:00") -> PlannedBroadcast:
+    """Память хранит подтверждение текущего ключа объекта."""
+    item.record = SlotRecord(
+        slot_id=item.slot_id,
+        youtube_channel_id="UC1",
+        slot_start_utc=item.slot.start.isoformat(),
+        stage=SlotStage.KEY_CONFIRMED,
+        updated_at=at,
+        results=RecordResults(confirmed_stream_key=item.stream_key, confirmed_at=at, is_bootstrap=is_bootstrap),
+    )
+    return item
+
+
 def _found_key(day: int, hour: int, language: str, channel: ChannelConfig, broadcast_id: str, key: str) -> PlannedBroadcast:
     """Эфир найден сверкой: ключ — тот, что сейчас на площадке."""
     item: PlannedBroadcast = build_planned(build_slot(_start(day, hour), language), channel)
@@ -101,7 +117,8 @@ def test_render_matches_tz_sample() -> None:
     sent.form_sent_at = datetime(2026, 9, 13, 12, 0)
     failed: PlannedBroadcast = _new_key(16, 21, "ru", RU, "def456", "yyyy-yyyy-yyyy-yyyy-yyyy")
     failed.last_error = "transportFailed: HTTP 503"
-    kept: PlannedBroadcast = _found_key(17, 19, "uk", UA, "ghi789", "zzzz-zzzz-zzzz-zzzz-zzzz")
+    failed.should_send_key = True
+    kept: PlannedBroadcast = _confirmed(_found_key(17, 19, "uk", UA, "ghi789", "zzzz-zzzz-zzzz-zzzz-zzzz"))
     rows = [key_row_from_planned(kept), key_row_from_planned(failed), key_row_from_planned(sent)]
     assert render_keys_file(rows, "13-09-2026 12:00") == TZ_SAMPLE_KEYS
 
@@ -120,20 +137,23 @@ def test_object_without_key_shows_dashes() -> None:
     assert (row.stream_key, row.stream_url, row.broadcast_url) == ("-", "-", "-")
 
 
-def test_form_status_texts_speak_only_about_this_run() -> None:
+def test_form_status_texts_speak_about_this_run_then_the_memory() -> None:
     new: PlannedBroadcast = _new_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
+    new.should_send_key = True
     new.last_error = "notConfirmed: HTTP 200"
-    assert form_status_text(new) == "НЕ отправлен: форма не подтвердила запись ответа (HTTP 200) — передайте стримеру вручную"
+    assert form_status_text(new) == "НЕ отправлен — форма не подтвердила запись ответа (HTTP 200); передайте стримеру вручную"
     new.is_form_sent = True
     new.form_sent_at = datetime(2026, 9, 13, 12, 0)
     assert form_status_text(new) == "отправлен в форму 13-09-2026 12:00"
-    kept: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
-    assert form_status_text(kept) == "в этом запуске в форму не отправлялся: эфир уже стоял с этим ключом"
-    kept.require_key_delivery()                       # исправленный эфир: ключ прежний, но должен уйти
-    assert form_status_text(kept).startswith("НЕ отправлен: ")
+    found: PlannedBroadcast = _found_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
+    assert form_status_text(found) == "нет подтверждения в памяти планера"
+    assert form_status_text(_confirmed(found)) == "передан в форму 12-09-2026 20:00"
+    assert form_status_text(_confirmed(found, is_bootstrap=True)) == "передан до появления памяти планера"
+    found.stream_key = "wwww-wwww-wwww-wwww-wwww"         # подтверждение было про другой ключ
+    assert form_status_text(found) == "нет подтверждения в памяти планера"
 
 
-def test_status_row_does_not_look_into_the_journal() -> None:
+def test_status_row_reads_the_confirmation_from_memory() -> None:
     marked: MarkedBroadcast = MarkedBroadcast(
         channel=UA,
         broadcast=UpcomingBroadcast("abc123", _start(16, 19), "Эфир", "", "s1"),
@@ -141,10 +161,9 @@ def test_status_row_does_not_look_into_the_journal() -> None:
         parts=MarkerParts(date="16-09-2026", time="19:00", language="uk"),
     )
     row = key_row_from_marked(marked)
-    assert (row.form_status_text, row.stream_key) == (
-        "в этом запуске в форму не отправлялся: эфир уже стоял с этим ключом",
-        "xxxx-xxxx-xxxx-xxxx-xxxx",
-    )
+    assert (row.form_status_text, row.stream_key) == ("нет подтверждения в памяти планера", "xxxx-xxxx-xxxx-xxxx-xxxx")
+    confirmed = RecordResults(confirmed_stream_key="xxxx-xxxx-xxxx-xxxx-xxxx", confirmed_at="12-09-2026 20:00")
+    assert key_row_from_marked(marked, confirmed).form_status_text == "передан в форму 12-09-2026 20:00"
 
 
 def test_empty_file_has_only_comment_lines(planer_paths: PlanerPaths) -> None:
@@ -185,20 +204,24 @@ def test_not_admitted_key_says_why_it_was_not_sent() -> None:
 
 
 def test_header_quotes_the_real_form_lines() -> None:
-    """Тексты в кавычках шапки — ровно начала строк «форма», которые пишет файл, во всех четырёх состояниях."""
+    """Тексты в кавычках шапки — ровно начала строк «форма», которые пишет файл, во всех шести состояниях."""
     sent: PlannedBroadcast = _new_key(16, 19, "uk", UA, "abc123", "xxxx-xxxx-xxxx-xxxx-xxxx")
     sent.is_form_sent = True
     sent.form_sent_at = datetime(2026, 9, 13, 12, 0)
     failed: PlannedBroadcast = _new_key(16, 21, "ru", RU, "def456", "yyyy-yyyy-yyyy-yyyy-yyyy")
     failed.last_error = "transportFailed: HTTP 503"
-    kept: PlannedBroadcast = _found_key(17, 19, "uk", UA, "ghi789", "zzzz-zzzz-zzzz-zzzz-zzzz")
+    failed.should_send_key = True
+    kept: PlannedBroadcast = _confirmed(_found_key(17, 19, "uk", UA, "ghi789", "zzzz-zzzz-zzzz-zzzz-zzzz"))
+    bootstrap: PlannedBroadcast = _confirmed(_found_key(17, 21, "uk", UA, "jkl345", "vvvv-vvvv-vvvv-vvvv-vvvv"),
+                                             is_bootstrap=True)
+    unknown: PlannedBroadcast = _found_key(17, 22, "uk", UA, "mno678", "uuuu-uuuu-uuuu-uuuu-uuuu")
     blocked: PlannedBroadcast = _not_admitted(18, 20, "en", UA, "jkl012", "wwww-wwww-wwww-wwww-wwww")
-    items = (sent, kept, failed, blocked)
+    items = (sent, kept, failed, blocked, bootstrap, unknown)
     text: str = render_keys_file([key_row_from_planned(item) for item in items], "13-09-2026 12:00")
     lines: list[str] = text.splitlines()
     quoted: list[str] = [line.split("«")[1].split("»")[0] for line in lines[: len(msg.KEYS_FILE_HEADER)][3:]]
     form_values: list[str] = [line.removeprefix("  форма  ") for line in lines if line.startswith("  форма  ")]
-    assert len(quoted) == len(form_values) == 4
+    assert len(quoted) == len(form_values) == 6
     # каждой строке «форма» — ровно одна цитата шапки (самая длинная подходящая) и наоборот
     matched: list[str] = [max((lead for lead in quoted if value.startswith(lead)), key=len) for value in form_values]
     assert sorted(matched) == sorted(quoted)

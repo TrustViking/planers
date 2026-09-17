@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config.loader import ChannelConfig, PlanerConfig
-from app.package.model import FormSpec
+from app.package.model import FormSpec, PackageError, PackageErrorReason
 from app.output.report import FormState, OutcomeKind, PackageLineStatus, SkipKind, SkippedLine
 from app.paths import PlanerPaths
 from app.output.console import render_console
@@ -30,6 +30,9 @@ from app.platforms.base import (
 )
 from app.platforms.channel import Channel, ChannelStatus
 from app.platforms.fake import FakePlatform
+from app.records.record_store import RecordStore
+from app.records.slot_record import RecordResults, SlotRecord, SlotStage
+from app.tests.conftest import FIXED_NOW
 from app.output.progress import BroadcastStep
 from app.tests.conftest import FORM_SPEC, FakeFormSender, RecordingProgress, build_form_spec
 from app.tests.test_form_discovery import _FakeResponse, _FakeSession, build_html, build_payload, default_items
@@ -76,8 +79,15 @@ def _run(
     sender: FakeFormSender,
     now: datetime,
     rng: random.Random,
+    store: RecordStore | None = None,
 ) -> RunOutcome:
-    return run(mode, config, paths, platform, sender, now, rng)
+    """Без store — пустая память первого запуска (эфиры с меткой планера — уже переданные)."""
+    return run(mode, config, paths, platform, sender, now, rng, store=store)
+
+
+def _memory_without_confirmations() -> RecordStore:
+    """Память есть, но подтверждений в ней нет: стоящие эфиры не считаются переданными стримеру."""
+    return RecordStore.memory(is_new=False)
 
 
 def _report_text(outcome: RunOutcome) -> str:
@@ -129,23 +139,26 @@ def test_full_create_failure_is_an_error_and_sends_nothing(
     assert form_sender.calls == []
 
 
-def test_failed_form_is_reported_and_never_retried(
+def test_failed_form_is_reported_and_retried_next_run(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, now: datetime, rng: random.Random,
 ) -> None:
-    """Новый ключ не дошёл — код 1; следующий запуск видит тот же эфир с тем же ключом и в форму не шлёт."""
+    """Новый ключ не дошёл — код 1; подтверждения в памяти нет — следующий запуск отправляет его снова."""
     make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
     sender: FakeFormSender = FakeFormSender(confirmed=False, error="ошибка сети")
-    first: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    store: RecordStore = _memory_without_confirmations()
+    first: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng, store)
     assert first.exit_code == ExitCode.ERRORS
     assert first.report is not None and first.report.outcomes[0].form is FormState.FAILED
-    assert "форма  НЕ отправлен: отправка не удалась (ошибка сети) — передайте стримеру вручную" in planer_paths.keys_file.read_text(encoding="utf-8")
-    assert "повторно планер его не отправит" in _report_text(first)
-    second: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
-    assert len(sender.calls) == 1                      # повтора нет: ключ прежний
-    assert second.exit_code == ExitCode.OK
+    assert "форма  НЕ отправлен — отправка не удалась (ошибка сети); передайте стримеру вручную" in (
+        planer_paths.keys_file.read_text(encoding="utf-8")
+    )
+    assert "следующий запуск отправит его снова" in _report_text(first)
+    second: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng, store)
+    assert [call.stream_key for call in sender.calls] == ["fake-0001-0000-0000-0000"] * 2
+    assert second.exit_code == ExitCode.ERRORS
     assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.MATCHED
-    assert msg.KEY_FORM_KEPT in planer_paths.keys_file.read_text(encoding="utf-8")
+    assert second.report.outcomes[0].form is FormState.FAILED
 
 
 def test_processed_package_stays_in_bcast(
@@ -232,7 +245,7 @@ def test_matched_key_comes_from_the_platform(
     assert outcome.exit_code == ExitCode.OK
     keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
     assert PLATFORM_KEY in keys_text
-    assert msg.KEY_FORM_KEPT in keys_text
+    assert msg.KEY_FORM_BOOTSTRAP in keys_text            # первый запуск с памятью: эфир с меткой уже стоял
     assert form_sender.calls == [] and fake_platform.created == []
     assert outcome.report is not None
     [pair_outcome] = outcome.report.outcomes
@@ -441,12 +454,14 @@ def test_fix_keeps_key_and_url(
         "yt_ua", UK_START, "Старое название", spec["description"], marker=UK_SLOT,
         stream_key="abcd-abcd-abcd-abcd-abcd",
     )
-    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    outcome: RunOutcome = _run(
+        RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
+    )
     assert [call.broadcast_id for call in fake_platform.updated] == [found.broadcast_id]
     keys_text: str = planer_paths.keys_file.read_text(encoding="utf-8")
     assert "abcd-abcd-abcd-abcd-abcd" in keys_text and found.broadcast_id in keys_text
     assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.FIXED
-    # исправили — ключ прежний, но стример получает его в этом запуске (решение 15-09-2026)
+    # исправили — ключ прежний; подтверждения в памяти нет — стример получает его в этом запуске
     assert [(call.slot_id, call.stream_key) for call in form_sender.calls] == [(UK_SLOT, "abcd-abcd-abcd-abcd-abcd")]
     assert outcome.exit_code == ExitCode.OK
     assert "исправлено, ключ и ссылка прежние, ключ передан в форму" in _report_text(outcome)
@@ -818,8 +833,8 @@ def test_status_lists_marked_broadcasts_into_keys_file(
     lines: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").splitlines()
     blocks: list[str] = planer_paths.keys_file.read_text(encoding="utf-8").split("\n\n")[1:]
     assert len(lines) == len(msg.KEYS_FILE_HEADER) + 2 * 6   # шапка и два блока: пустая строка, заголовок, 4 поля
-    assert "  ключ   aaaa-aaaa-aaaa-aaaa-aaaa" in blocks[0] and msg.KEY_FORM_KEPT in blocks[0]
-    assert "  ключ   bbbb-bbbb-bbbb-bbbb-bbbb" in blocks[1] and msg.KEY_FORM_KEPT in blocks[1]
+    assert "  ключ   aaaa-aaaa-aaaa-aaaa-aaaa" in blocks[0] and msg.KEY_FORM_UNKNOWN in blocks[0]
+    assert "  ключ   bbbb-bbbb-bbbb-bbbb-bbbb" in blocks[1] and msg.KEY_FORM_UNKNOWN in blocks[1]
     assert outcome.report is not None
     assert [item.kind for item in outcome.report.outcomes] == [OutcomeKind.MATCHED, OutcomeKind.MATCHED]
 
@@ -846,7 +861,9 @@ def test_privacy_only_difference_is_fixed_and_key_goes_to_the_form(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT, stream_key=PLATFORM_KEY,
         privacy="private",
     )
-    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    outcome: RunOutcome = _run(
+        RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
+    )
     assert outcome.report is not None
     [pair] = outcome.report.outcomes
     assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("privacy",), FormState.SENT)
@@ -869,7 +886,9 @@ def test_category_fixed_on_the_video_counts_as_a_fix(
     fake_platform.seed_broadcast(
         "yt_ua", UK_START, spec["title"], spec["description"], marker=UK_SLOT, category_id="24",
     )
-    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    outcome: RunOutcome = _run(
+        RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
+    )
     assert outcome.report is not None
     [pair] = outcome.report.outcomes
     assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("category",), FormState.SENT)
@@ -1019,7 +1038,8 @@ def test_full_run_reports_progress_in_step_order(
     )
     progress: RecordingProgress = RecordingProgress()
     outcome: RunOutcome = run(
-        RunMode.FULL, make_config(), planer_paths, fake_platform, form_sender, now, rng, progress=progress
+        RunMode.FULL, make_config(), planer_paths, fake_platform, form_sender, now, rng, progress=progress,
+        store=_memory_without_confirmations(),
     )
     assert outcome.exit_code == ExitCode.OK
     assert progress.calls == [
@@ -1096,7 +1116,8 @@ def test_missing_thumbnail_alone_resends_the_broadcast(
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
     make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = _seed_uk(fake_platform, spec, **_placeholder_overrides())
-    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    store: RecordStore = _memory_without_confirmations()
+    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, store)
     assert outcome.report is not None
     [pair] = outcome.report.outcomes
     assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("thumbnail",), FormState.SENT)
@@ -1110,8 +1131,8 @@ def test_missing_thumbnail_alone_resends_the_broadcast(
     assert not any("обложка" in line and "вернули" in line for line in console)   # не «вернули к пакету»
     [change] = pair.field_changes
     assert (change.name, change.before, change.after) == ("thumbnail", msg.THUMBNAIL_BEFORE, msg.THUMBNAIL_AFTER)
-    # следующий запуск: картинка — уже своя обложка, эфир совпадает, ключ повторно не уходит
-    second: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    # следующий запуск: картинка — уже своя обложка, эфир совпадает, подтверждение в памяти — ключ не уходит
+    second: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, store)
     assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.MATCHED
     assert len(form_sender.calls) == 1
 
@@ -1153,7 +1174,9 @@ def test_privacy_fixed_at_video_resource_resends_the_broadcast_once(
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
     make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = _seed_uk(fake_platform, spec, picture="aaaaaaaaaaaa", privacy=None)
-    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    outcome: RunOutcome = _run(
+        RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
+    )
     assert outcome.report is not None
     [pair] = outcome.report.outcomes
     assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("privacy",), FormState.SENT)
@@ -1170,7 +1193,9 @@ def test_upload_limit_on_resend_keeps_update_and_key(
     make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = _seed_uk(fake_platform, spec, **_placeholder_overrides())
     fake_platform.fail_thumbnail[found.broadcast_id] = PlatformError("uploadRateLimitExceeded", "HTTP 429: limit")
-    outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    outcome: RunOutcome = _run(
+        RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
+    )
     assert outcome.exit_code == ExitCode.OK and outcome.report is not None
     assert [call.broadcast_id for call in fake_platform.updated] == [found.broadcast_id]
     assert [call.stream_key for call in form_sender.calls] == [PLATFORM_KEY]
@@ -1357,6 +1382,7 @@ NICK_CONFIG_CHANNELS: tuple[tuple[str, list[str]], ...] = ((NICK_KEY, ["en"]),)
 def _form_with_dates(tmp_path: Path, *dates: str) -> KeyForm:
     """Тренировочная форма в разметке FB_PUBLIC_LOAD_DATA_, в «Время стрима» — только эти даты."""
     items: list[Any] = default_items()
+    items[0][4][0][1] = [["Украинский ( Ukranian)"], ["Русский ( Russian)"], ["Английский ( English)"]]
     items[2][4][0][1] = [[f"{date} Дата стрима (время стрима указано в объявлении)"] for date in dates]
     session: _FakeSession = _FakeSession(_FakeResponse(build_html(build_payload(items))))
     structure: FormStructure = FormDiscovery(session, tmp_path / "form", datetime(2027, 3, 16, 12, 0)).structure(
@@ -1467,7 +1493,7 @@ def test_failed_send_of_one_object_does_not_stop_the_next(
     assert sender.calls == ["17-03-2027_1900_en", "17-03-2027_2100_en"]
     assert outcome.exit_code == ExitCode.ERRORS                 # первый ключ не дошёл
     keys: str = planer_paths.keys_file.read_text(encoding="utf-8")
-    assert "форма  НЕ отправлен: форма не подтвердила" in keys and "форма  отправлен в форму" in keys
+    assert "форма  НЕ отправлен — форма не подтвердила" in keys and "форма  отправлен в форму" in keys
 
 
 def test_incomplete_answers_after_publication_skip_the_post(
@@ -1496,7 +1522,7 @@ def test_incomplete_answers_after_publication_skip_the_post(
     assert len(fake_platform.created) == 1 and sender.calls == []
     assert any(message.startswith("form_send_skipped slot_id=17-03-2027_1900_en") for message in caplog.messages)
     assert outcome.exit_code == ExitCode.ERRORS
-    assert "НЕ отправлен: в форме нет нужного варианта ответа" in planer_paths.keys_file.read_text(encoding="utf-8")
+    assert "НЕ отправлен — в форме нет нужного варианта ответа" in planer_paths.keys_file.read_text(encoding="utf-8")
 
 
 def test_dry_run_shows_admission_and_sends_nothing(
@@ -1530,3 +1556,298 @@ def test_dry_run_shows_admission_and_sends_nothing(
         for message in caplog.messages
     )
     assert sum(1 for message in caplog.messages if message.startswith("slot_admitted ")) == 2
+
+
+# --- задача 5m-C: память планера и одно правило отправки ключа
+
+UK_KEY: str = "yt_ua"                     # без ChannelBook ключ записи — ключ канала (тесты)
+
+
+class _CrashingSender(FakeFormSender):
+    """Обрыв посреди отправки: исключение до подтверждения формы."""
+
+    def send(self, planned: PlannedBroadcast) -> FormSendResult:
+        super().send(planned)
+        raise RuntimeError("обрыв до подтверждения")
+
+
+def _open_store(paths: PlanerPaths, *, read_only: bool = False) -> RecordStore:
+    return RecordStore.open(paths.records_file, read_only=read_only, now_local=FIXED_NOW)
+
+
+def _run_with_memory(
+    mode: RunMode,
+    paths: PlanerPaths,
+    config: PlanerConfig,
+    platform: FakePlatform,
+    sender: FakeFormSender,
+    now: datetime,
+    rng: random.Random,
+) -> RunOutcome:
+    """Как main: память открыта на запуск (в --dry-run и --status — только чтение) и закрыта после него."""
+    store: RecordStore = _open_store(paths, read_only=mode is not RunMode.FULL)
+    try:
+        return run(mode, config, paths, platform, sender, now, rng, store=store)
+    finally:
+        store.close()
+
+
+def _stored(paths: PlanerPaths, slot_id: str) -> SlotRecord | None:
+    store: RecordStore = _open_store(paths, read_only=True)
+    try:
+        return store.find(slot_id, UK_KEY)
+    finally:
+        store.close()
+
+
+def _uk_package(make_package: PackageFactory, make_slot: SlotFactory, paths: PlanerPaths, **kwargs: Any) -> Path:
+    return make_package(paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk", **kwargs)])
+
+
+def test_interrupted_send_is_finished_by_the_next_run(
+    tmp_path: Path, planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    """а) эфир создан, запуск оборвался до подтверждения формы — следующий запуск отправляет ключ ровно раз."""
+    _uk_package(make_package, make_slot, planer_paths)
+    form: KeyForm = _form_with_dates(tmp_path, "17.03.2027")
+    crashing: _CrashingSender = _CrashingSender(key_form=form)
+    with pytest.raises(RuntimeError):
+        _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, crashing, now, rng)
+    after_crash: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert after_crash is not None and after_crash.stage is SlotStage.PUBLISHED
+    assert after_crash.results.stream_key == "fake-0001-0000-0000-0000"
+    sender: FakeFormSender = FakeFormSender(key_form=form)
+    outcome: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    assert outcome.report is not None and outcome.report.outcomes[0].kind is OutcomeKind.MATCHED
+    assert [call.stream_key for call in sender.calls] == ["fake-0001-0000-0000-0000"]
+    assert outcome.report.outcomes[0].form is FormState.SENT
+    assert "; ключ передан в форму" in _report_text(outcome)
+    confirmed: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert confirmed is not None and confirmed.stage is SlotStage.KEY_CONFIRMED
+    assert len(fake_platform.created) == 1
+    third: FakeFormSender = FakeFormSender(key_form=form)
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, third, now, rng)
+    assert third.calls == []
+
+
+def test_confirmed_match_sends_nothing(
+    tmp_path: Path, planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    """б) подтверждённый MATCH — ни одного POST."""
+    _uk_package(make_package, make_slot, planer_paths)
+    sender: FakeFormSender = FakeFormSender(key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    second: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    assert len(sender.calls) == 1 and second.exit_code == ExitCode.OK
+    assert "передан в форму 16-03-2027" in planer_paths.keys_file.read_text(encoding="utf-8")
+    assert msg.WARNING_KEPT_KEY in _report_text(second)
+
+
+def test_update_sends_only_when_answers_change(
+    tmp_path: Path, planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    """в) исправлен с теми же ответами — POST нет; изменилось название канала в ответах — POST."""
+    make_package(planer_paths.bcast_dir, generated_at="13-09-2026 10:15", slots=[make_slot("17-03-2027", "19:00", "uk")])
+    sender: FakeFormSender = FakeFormSender(key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    make_package(
+        planer_paths.bcast_dir, generated_at="14-09-2026 10:15",
+        slots=[make_slot("17-03-2027", "19:00", "uk", title="Новое название эфира")],
+    )
+    second: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.FIXED
+    assert len(fake_platform.updated) == 1 and len(sender.calls) == 1
+    make_package(
+        planer_paths.bcast_dir, generated_at="15-09-2026 10:15",
+        slots=[make_slot("17-03-2027", "19:00", "uk", title="Ещё одно название")],
+    )
+    base: PlanerConfig = make_config()
+    renamed: PlanerConfig = replace(
+        base, channels=(replace(base.channels[0], account_name="Новое имя канала"), *base.channels[1:])
+    )
+    third: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, renamed, fake_platform, sender, now, rng)
+    assert third.report is not None and third.report.outcomes[0].kind is OutcomeKind.FIXED
+    assert [call.account_name for call in sender.calls] == ["yt_ua", "Новое имя канала"]
+    assert {call.stream_key for call in sender.calls} == {"fake-0001-0000-0000-0000"}
+
+
+def test_broadcast_removed_by_hand_is_recreated_and_its_new_key_sent(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime,
+    rng: random.Random,
+) -> None:
+    """г) эфир удалён на площадке между запусками — создан новый, новый ключ отправлен."""
+    _uk_package(make_package, make_slot, planer_paths)
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    fake_platform.remove_broadcast(UK_KEY, fake_platform.created[0].broadcast_id)
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert [call.stream_key for call in form_sender.calls] == ["fake-0001-0000-0000-0000", "fake-0002-0000-0000-0000"]
+    record: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert record is not None and record.results.confirmed_stream_key == "fake-0002-0000-0000-0000"
+
+
+def test_first_run_with_memory_bootstraps_marked_broadcasts(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime,
+    rng: random.Random,
+) -> None:
+    """д) базы нет: эфир с меткой — «передан до памяти», POST нет; ручной (усыновление) и новый — POST."""
+    marked, manual, new = (
+        make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "uk"), make_slot("19-03-2027", "19:00", "uk")
+    )
+    make_package(planer_paths.bcast_dir, slots=[marked, manual, new])
+    fake_platform.seed_broadcast(
+        UK_KEY, UK_START, marked["title"], marked["description"], marker=UK_SLOT, stream_key=PLATFORM_KEY
+    )
+    fake_platform.seed_broadcast(
+        UK_KEY, datetime.fromisoformat("2027-03-18T19:00:00+02:00"), manual["title"], manual["description"],
+        marker="ручной ключ", stream_key="mmmm-mmmm-mmmm-mmmm-mmmm",
+    )
+    assert not planer_paths.records_file.exists()
+    outcome: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert sorted(call.slot_id for call in form_sender.calls) == ["18-03-2027_1900_uk", "19-03-2027_1900_uk"]
+    record: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert record is not None and record.stage is SlotStage.KEY_CONFIRMED and record.results.is_bootstrap
+    keys: str = planer_paths.keys_file.read_text(encoding="utf-8")
+    assert keys.split(f"{PLATFORM_KEY}\n", 1)[1].split("\n\n", 1)[0].endswith(msg.KEY_FORM_BOOTSTRAP)
+    created_line: str = msg.WARNING_RECORDS_CREATED.format(path=planer_paths.records_file, count=1)
+    assert outcome.report is not None and created_line in outcome.report.run_warnings
+    assert f"  {created_line}" in render_console(outcome.report, root=planer_paths.root).splitlines()
+    second: FakeFormSender = FakeFormSender()
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, second, now, rng)
+    assert second.calls == []                          # второй запуск подряд — ни одного POST
+
+
+def test_error_after_the_key_was_taken_does_not_stop_the_send(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime,
+    rng: random.Random, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """е) превью пропало из пакета после создания; сбой update после привязки потока — ключ всё равно ушёл."""
+    import app.pipeline.runner as runner_module
+
+    def _missing_preview(package: Any, name: str) -> bytes:
+        if "17-03-2027" in name:
+            raise PackageError(PackageErrorReason.PREVIEW_MISSING, name)
+        return b"x"
+
+    monkeypatch.setattr(runner_module, "read_preview", _missing_preview)
+    uk: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
+    ru: dict[str, Any] = make_slot("18-03-2027", "19:00", "ru")
+    make_package(planer_paths.bcast_dir, slots=[uk, ru])
+    bare: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ru", datetime.fromisoformat("2027-03-18T19:00:00+02:00"), "Старое название", ru["description"]
+    )
+    fake_platform.fail_update[bare.broadcast_id] = PlatformError("backendError", "HTTP 503")
+    outcome: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert outcome.report is not None
+    kinds = {item.date: item.kind for item in outcome.report.outcomes if item.date}
+    assert kinds == {"17-03-2027": OutcomeKind.ERROR, "18-03-2027": OutcomeKind.ERROR}
+    assert sorted(call.slot_id for call in form_sender.calls) == [UK_SLOT, "18-03-2027_1900_ru"]
+    assert len(fake_platform.created) == 1 and len(fake_platform.attached) == 1
+
+
+def test_slot_admitted_later_sends_the_key_of_its_standing_broadcast(
+    tmp_path: Path, planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    """ж) 17-09: 18-03 не допущен (нет даты) → владелец формы добавил дату → MATCH без подтверждения → ключ ушёл."""
+    make_package(planer_paths.bcast_dir, slots=_nick_slots(make_slot))
+    fake_platform.seed_broadcast(
+        NICK_KEY, datetime.fromisoformat("2027-03-18T20:00:00+02:00"), "Эфир 18-03-2027_2000_en", "Описание эфира",
+        marker="18-03-2027_2000_en", stream_key=PLATFORM_KEY,
+    )
+    config: PlanerConfig = make_config(NICK_CONFIG_CHANNELS)
+    _run_with_memory(RunMode.FULL, planer_paths, config, fake_platform, FakeFormSender(), now, rng)   # память создана
+    only_17: FakeFormSender = FakeFormSender(key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    first: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, config, fake_platform, only_17, now, rng)
+    assert first.exit_code == ExitCode.ERRORS and "18-03-2027_2000_en" not in [call.slot_id for call in only_17.calls]
+    both: FakeFormSender = FakeFormSender(key_form=_form_with_dates(tmp_path, "17.03.2027", "18.03.2027"))
+    second: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, config, fake_platform, both, now, rng)
+    assert [call.stream_key for call in both.calls if call.slot_id == "18-03-2027_2000_en"] == [PLATFORM_KEY]
+    assert second.report is not None
+    [nick] = [item for item in second.report.outcomes if item.date == "18-03-2027"]
+    assert (nick.kind, nick.form) == (OutcomeKind.MATCHED, FormState.SENT)
+
+
+def test_new_form_address_sends_standing_keys_there(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime,
+    rng: random.Random,
+) -> None:
+    """з) адрес формы сменился (переход на боевую) — ключи стоящих эфиров уходят в новую форму."""
+    battle_url: str = "https://forms.gle/BattleFormCCC"
+    make_package(planer_paths.bcast_dir, generated_at="13-09-2026 10:15", slots=[make_slot("17-03-2027", "19:00", "uk")])
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    make_package(
+        planer_paths.bcast_dir, generated_at="14-09-2026 10:15", form={**FORM_SPEC, "url": battle_url},
+        slots=[make_slot("17-03-2027", "19:00", "uk")],
+    )
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert [(call.form_url, call.stream_key) for call in form_sender.calls] == [
+        (FORM_SPEC["url"], "fake-0001-0000-0000-0000"), (battle_url, "fake-0001-0000-0000-0000")
+    ]
+
+
+def test_dry_run_reads_memory_and_writes_nothing(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    """и) dry-run: базы нет — не создаётся; есть — не меняется; «ключ будет передан» — по записям."""
+    make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("18-03-2027", "19:00", "uk")])
+    # без обложек: две одинаковые свои обложки одного канала читались бы как заглушка (правило дублей)
+    config: PlanerConfig = make_config(set_thumbnail=False)
+    _run_with_memory(RunMode.DRY_RUN, planer_paths, config, fake_platform, FakeFormSender(), now, rng)
+    assert not planer_paths.records_file.exists()
+    failing: _PartialFormSender = _PartialFormSender("17-03-2027_1900_uk")      # 18-03 форма не подтвердила
+    _run_with_memory(RunMode.FULL, planer_paths, config, fake_platform, failing, now, rng)
+    before: bytes = planer_paths.records_file.read_bytes()
+    sender: FakeFormSender = FakeFormSender()
+    outcome: RunOutcome = _run_with_memory(RunMode.DRY_RUN, planer_paths, config, fake_platform, sender, now, rng)
+    assert planer_paths.records_file.read_bytes() == before and sender.calls == []
+    assert outcome.report is not None
+    forms = {item.date: item.form for item in outcome.report.outcomes}
+    assert forms == {"17-03-2027": None, "18-03-2027": FormState.PLANNED}
+    assert f"- 18-03-2027 19:00 uk -> yt_ua @yt_ua — https://www.youtube.com/watch?v=fakebc00002; {msg.FORM_MARK_PLANNED}{msg.OUTCOME_DRY_RUN_SUFFIX}" in (
+        _report_text(outcome).splitlines()
+    )
+
+
+def test_old_records_are_cleaned_by_keep_days(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime,
+    rng: random.Random, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """к) записи слотов старше keep_days удаляются в полном запуске."""
+    store: RecordStore = _open_store(planer_paths)
+    for slot_id, start in (("01-01-2027_1900_uk", "2027-01-01T17:00:00+00:00"), ("10-03-2027_1900_uk", "2027-03-10T17:00:00+00:00")):
+        store.save(SlotRecord(slot_id, UK_KEY, start, SlotStage.KEY_CONFIRMED, "01-01-2027 12:00", RecordResults()))
+    store.close()
+    _uk_package(make_package, make_slot, planer_paths)
+    with caplog.at_level("INFO"):
+        _run_with_memory(RunMode.FULL, planer_paths, make_config(keep_days=30), fake_platform, form_sender, now, rng)
+    assert _stored(planer_paths, "01-01-2027_1900_uk") is None
+    assert _stored(planer_paths, "10-03-2027_1900_uk") is not None
+    assert _stored(planer_paths, UK_SLOT) is not None
+    assert "records_cleaned removed=1" in caplog.messages
+
+
+def test_record_log_lines_follow_the_object(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory,
+    make_config: ConfigFactory, fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime,
+    rng: random.Random, caplog: pytest.LogCaptureFixture,
+) -> None:
+    _uk_package(make_package, make_slot, planer_paths)
+    with caplog.at_level("INFO"):
+        _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    names: list[str] = [
+        message.split(" ", 1)[0] + (" " + message.rsplit("stage=", 1)[1] if message.startswith("record_saved") else "")
+        for message in caplog.messages
+        if message.startswith(("broadcast_created", "record_saved", "form_send "))
+    ]
+    assert names == [
+        "record_saved admitted", "broadcast_created", "record_saved published", "form_send", "record_saved key_confirmed"
+    ]

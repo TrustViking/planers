@@ -16,6 +16,7 @@ from app.main import run_cli
 from app.paths import ROOT_ENV_VAR, PlanerPaths
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
 from app.platforms.fake import FAKE_TOKEN_TEXT, FakePlatform
+from app.records.record_store import RecordStore
 from app.tests.conftest import FakeFormSender
 from app.ui import messages_ru as msg
 from app.version import APP_VERSION
@@ -644,3 +645,68 @@ def test_crashed_run_writes_the_traceback_to_the_log(
     log: str = _log_text(planer_root)
     assert "| run_crashed " in log and "Traceback (most recent call last)" in log
     assert "RuntimeError: сломалось внутри" in log and "| run_finished exit_code=1" in log
+
+
+@pytest.fixture
+def opened_stores(monkeypatch: pytest.MonkeyPatch) -> list[RecordStore]:
+    """Каждая память, которую открыл main: после запуска она должна быть закрыта."""
+    opened: list[RecordStore] = []
+    original = RecordStore.open.__func__   # type: ignore[attr-defined]
+
+    def _open(cls: type[RecordStore], path: Path, *, read_only: bool, now_local: Any) -> RecordStore:
+        store: RecordStore = original(cls, path, read_only=read_only, now_local=now_local)
+        opened.append(store)
+        return store
+
+    monkeypatch.setattr(RecordStore, "open", classmethod(_open))
+    return opened
+
+
+def test_memory_is_opened_for_the_run_and_closed(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    opened_stores: list[RecordStore],
+) -> None:
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    assert run_cli(["--dry-run"]) == 0
+    assert not (planer_root / "secrets" / "planer.sqlite3").exists()        # dry-run память не создаёт
+    assert run_cli([]) == 0
+    assert (planer_root / "secrets" / "planer.sqlite3").is_file()
+    assert [(store.is_read_only, store.is_closed) for store in opened_stores] == [(True, True), (False, True)]
+
+
+def test_memory_is_closed_when_the_run_is_interrupted(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    opened_stores: list[RecordStore],
+) -> None:
+    _write_config(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    fake_platform_in_main.tokens_missing = {UA_KEY}
+    fake_platform_in_main.fail_login[UA_KEY] = KeyboardInterrupt()  # type: ignore[assignment]
+    assert run_cli([]) == 1
+    [store] = opened_stores
+    assert store.is_closed
+    assert "| run_interrupted" in _log_text(planer_root)
+
+
+def test_memory_is_closed_when_the_run_crashes(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    opened_stores: list[RecordStore],
+) -> None:
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    fake_platform_in_main.fail_list[UA_KEY] = RuntimeError("сломалось в сверке")  # type: ignore[assignment]
+    assert run_cli([]) == 1
+    [store] = opened_stores
+    assert store.is_closed
+    log: str = _log_text(planer_root)
+    assert "| run_crashed " in log and "RuntimeError: сломалось в сверке" in log

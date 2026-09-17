@@ -25,6 +25,7 @@ from app.pipeline.plan import (
 from app.form.base import FormError
 from app.form.key_form import KeyForm
 from app.platforms.channel import Channel, ChannelStatus
+from app.records.slot_record import SlotRecord, SlotStage
 from app.tests.test_form_key_form import training_key_form
 from app.ui import messages_ru as msg
 from app.platforms.base import BroadcastFacts, CreatedBroadcast, PlatformLimits, StreamInfo, UpcomingBroadcast
@@ -285,26 +286,16 @@ def test_new_key_waits_for_the_form(
 ) -> None:
     item: PlannedBroadcast = build_planned(make_slot_object(now + timedelta(days=1), "uk"), make_config().channels[0])
     item.take_new_key(CREATED)
-    assert (item.broadcast_id, item.stream_key, item.should_send_key) == ("newbc", CREATED.stream_key, True)
-    assert item.is_key_undelivered is True
+    assert (item.broadcast_id, item.stream_id, item.stream_key, item.should_send_key) == (
+        "newbc", "S9", CREATED.stream_key, False
+    )
+    item.decide_key_delivery()
+    assert item.should_send_key is True and item.is_key_undelivered is True
     item.is_form_sent = True
     assert item.is_key_undelivered is False
 
 
-def test_found_key_waits_for_the_form_once_delivery_is_required(
-    make_config: ConfigFactory,
-    make_slot_object: SlotFactory,
-    now: datetime,
-) -> None:
-    """Исправленный или усыновлённый эфир: ключ прежний, но стример должен получить его в этом запуске."""
-    item: PlannedBroadcast = _with_found_key(
-        build_planned(make_slot_object(now + timedelta(days=1), "uk"), make_config().channels[0])
-    )
-    item.require_key_delivery()
-    assert item.is_key_undelivered is True
-
-
-def test_kept_key_is_only_a_match_without_delivery(
+def test_kept_key_needs_a_confirmation_of_the_current_key(
     make_config: ConfigFactory,
     make_slot_object: SlotFactory,
     now: datetime,
@@ -312,14 +303,13 @@ def test_kept_key_is_only_a_match_without_delivery(
     item: PlannedBroadcast = _with_found_key(
         build_planned(make_slot_object(now + timedelta(days=1), "uk"), make_config().channels[0])
     )
-    for decision, expected in ((Decision.MATCH, True), (Decision.UPDATE, False), (Decision.TOO_LATE, False)):
-        item.decision = decision
-        assert item.has_kept_key is expected
-    item.decision = Decision.MATCH
+    assert item.has_kept_key is False                  # памяти о ключе нет
+    item.confirm_key(now)
+    assert item.has_kept_key is True
     item.error = OutcomeError(origin="youtube", code="forbidden")
     assert item.has_kept_key is False                  # ошибка — это не прежний ключ
     item.error = None
-    item.take_new_key(CREATED)                         # привязка потока: ключ уходит в форму
+    item.take_new_key(CREATED)                         # привязка потока: ключ новый
     assert item.has_kept_key is False
 
 
@@ -420,9 +410,10 @@ def test_refreshed_answers_with_key_and_url_are_complete(tmp_path: Path) -> None
     item: PlannedBroadcast = _admission_item()
     item.admit(None, training_key_form(tmp_path), None)
     item.take_new_key(CREATED)
-    assert not item.is_key_ready_to_send                  # ответы ещё без ключа и адреса
-    answers = item.refresh_form_answers()
-    assert answers is not None and answers.is_complete and item.form_answers is answers
+    assert not item.is_key_ready_to_send                  # решения ещё нет, ответы без ключа и адреса
+    item.decide_key_delivery()
+    answers = item.form_answers
+    assert answers is not None and answers.is_complete
     assert item.is_key_ready_to_send
     item.is_form_sent = True
     assert not item.is_key_ready_to_send
@@ -442,4 +433,157 @@ def test_stream_url_not_in_options_makes_answers_incomplete(tmp_path: Path) -> N
 def test_object_built_directly_is_admitted_without_form() -> None:
     item: PlannedBroadcast = _admission_item()
     item.take_new_key(CREATED)
+    item.decide_key_delivery()
     assert item.is_admitted and item.form_answers is None and item.is_key_ready_to_send
+
+
+# --- память планера: одно правило отправки ключа (decide_key_delivery)
+
+MEMORY_NOW: datetime = datetime(2026, 9, 13, 12, 0, tzinfo=timezone(timedelta(hours=3)))
+FOUND_KEY: str = "fkey-fkey-fkey-fkey-fkey"
+
+
+def _memory_item(tmp_path: Path, *, found: bool = True, decision: Decision = Decision.MATCH) -> PlannedBroadcast:
+    """Допущенный объект тренировочной формы; found — эфир с меткой планера уже стоит на канале."""
+    item: PlannedBroadcast = _admission_item()
+    item.admit(None, training_key_form(tmp_path), None)
+    if found:
+        item.found = UpcomingBroadcast("fbc", item.slot.start, item.slot.title, "", "fs")
+        item.found_stream = StreamInfo("fs", item.slot_id, "rtmp://a.rtmp.youtube.com/live2", FOUND_KEY)
+        item.take_found_key()
+        item.decision = decision
+    return item
+
+
+def _remember(item: PlannedBroadcast) -> PlannedBroadcast:
+    """Прошлый запуск: форма подтвердила текущую тройку объекта — запись в памяти."""
+    item.refresh_form_answers()
+    item.confirm_key(MEMORY_NOW)
+    item.record = item.to_record(MEMORY_NOW, SlotStage.KEY_CONFIRMED)
+    item.confirmed_results = None
+    return item
+
+
+def _decided(item: PlannedBroadcast) -> bool:
+    item.decide_key_delivery()
+    return item.should_send_key
+
+
+def test_created_key_goes(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _memory_item(tmp_path, found=False)
+    item.take_new_key(CREATED)
+    assert _decided(item)
+
+
+def test_matched_and_confirmed_key_does_not_go(tmp_path: Path) -> None:
+    assert not _decided(_remember(_memory_item(tmp_path)))
+
+
+def test_matched_without_confirmation_goes(tmp_path: Path) -> None:
+    """Обрыв, прошлая отправка не прошла или объект не был допущен — подтверждения нет."""
+    assert _decided(_memory_item(tmp_path))
+
+
+def test_updated_with_the_same_answers_does_not_go(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _remember(_memory_item(tmp_path, decision=Decision.UPDATE))
+    assert not _decided(item)
+
+
+def test_updated_with_other_answers_goes(tmp_path: Path) -> None:
+    """Название канала выровняли — ответ формы другой: ключ прежний, но уходит."""
+    item: PlannedBroadcast = _remember(_memory_item(tmp_path, decision=Decision.UPDATE))
+    item.channel = replace(item.channel, account_name="Новое название")
+    assert _decided(item)
+
+
+def test_recreated_broadcast_has_a_new_key_that_goes(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _remember(_memory_item(tmp_path))
+    item.found = item.found_stream = None
+    item.take_new_key(CREATED)
+    assert _decided(item)
+
+
+def test_other_form_address_makes_the_key_go(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _remember(_memory_item(tmp_path))
+    item.key_form = replace(
+        item.key_form, structure=replace(item.key_form.structure, response_url="https://docs.google.com/forms/d/e/BATTLE/formResponse")
+    )
+    assert _decided(item)
+
+
+def test_too_late_and_not_admitted_keys_do_not_go(tmp_path: Path) -> None:
+    late: PlannedBroadcast = _memory_item(tmp_path)
+    late.is_too_late = True
+    assert not _decided(late)
+    blocked: PlannedBroadcast = _memory_item(tmp_path)
+    blocked.admission_reasons = (AdmissionReason(AdmissionKind.FORM_FIELD, "missingOption", "date", "дата"),)
+    assert not _decided(blocked)
+
+
+def test_key_without_stream_url_does_not_go(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _memory_item(tmp_path)
+    item.stream_url = None
+    assert not _decided(item)
+
+
+def test_error_of_another_step_does_not_cancel_the_key(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _memory_item(tmp_path, found=False)
+    item.take_new_key(CREATED)
+    item.decision = Decision.ERROR
+    item.error = OutcomeError(origin="package", code="preview_missing")
+    assert _decided(item)
+
+
+def test_incomplete_answers_still_mean_the_key_must_go(tmp_path: Path) -> None:
+    """Адреса потока нет среди вариантов: ключ должен уйти, но готов не был — «НЕ отправлен»."""
+    item: PlannedBroadcast = _memory_item(tmp_path, found=False)
+    item.take_new_key(replace(CREATED, stream_url="rtmp://b.rtmp.youtube.com/live2"))
+    assert _decided(item) and not item.is_key_ready_to_send and item.is_key_undelivered
+
+
+def test_bootstrap_confirms_marked_broadcast_without_sending(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _memory_item(tmp_path, decision=Decision.UPDATE)
+    assert item.bootstrap_confirmation(MEMORY_NOW)
+    assert item.is_bootstrap_confirmed and item.results.is_bootstrap
+    assert not _decided(item)
+    assert item.to_record(MEMORY_NOW, SlotStage.ADMITTED).stage is SlotStage.KEY_CONFIRMED
+
+
+def test_bootstrap_skips_unmarked_created_known_and_blocked(tmp_path: Path) -> None:
+    unmarked: PlannedBroadcast = _memory_item(tmp_path)
+    unmarked.found_stream = replace(unmarked.found_stream, title="ручной ключ")
+    assert not unmarked.bootstrap_confirmation(MEMORY_NOW) and _decided(unmarked)
+    created: PlannedBroadcast = _memory_item(tmp_path, found=False)
+    created.take_new_key(CREATED)
+    assert not created.bootstrap_confirmation(MEMORY_NOW)
+    known: PlannedBroadcast = _memory_item(tmp_path)
+    known.record = replace(_remember(_memory_item(tmp_path)).record)
+    assert not known.bootstrap_confirmation(MEMORY_NOW)
+    late: PlannedBroadcast = _memory_item(tmp_path)
+    late.is_too_late = True
+    assert not late.bootstrap_confirmation(MEMORY_NOW)
+
+
+def test_record_carries_results_and_keeps_the_confirmation(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _remember(_memory_item(tmp_path))
+    record: SlotRecord = item.to_record(MEMORY_NOW, SlotStage.ADMITTED)
+    assert record.youtube_channel_id == "yt_all"                       # без объекта канала — ключ канала (тесты)
+    assert record.slot_start_utc == "2026-09-13T16:00:00+00:00"
+    assert record.stage is SlotStage.KEY_CONFIRMED                     # не откатывается для того же ключа
+    assert (record.results.stream_key, record.results.stream_id, record.results.confirmed_stream_key) == (
+        FOUND_KEY, "fs", FOUND_KEY
+    )
+    assert record.snapshot is not None and record.snapshot.decision == "match"
+    item.found = item.found_stream = None
+    item.take_new_key(CREATED)                                         # эфир создан заново
+    renewed: SlotRecord = item.to_record(MEMORY_NOW, SlotStage.PUBLISHED)
+    assert renewed.stage is SlotStage.PUBLISHED and renewed.results.stream_key == CREATED.stream_key
+    assert renewed.results.confirmed_stream_key == FOUND_KEY           # прежнее подтверждение — до нового
+
+
+def test_record_needs_a_ready_channel(tmp_path: Path) -> None:
+    item: PlannedBroadcast = _memory_item(tmp_path)
+    item.channel_object = Channel(config=item.channel, token_file=Path("t.json"), status=ChannelStatus.FAILED)
+    assert item.record_channel_id is None
+    with pytest.raises(ValueError):
+        item.to_record(MEMORY_NOW, SlotStage.ADMITTED)

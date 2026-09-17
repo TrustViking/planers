@@ -36,6 +36,7 @@ from app.pipeline.plan import WARNING_STEP_THUMBNAIL, Decision, OutcomeError, Ou
 from app.pipeline.selection import Selection, build_planned
 from app.platforms.base import CreatedBroadcast, PlatformNotice, PlatformNoticeKind, StreamInfo, UpcomingBroadcast
 from app.platforms.fake import FakePlatform
+from app.records.slot_record import RecordResults, SlotRecord, SlotStage
 from app.tests.conftest import build_config, build_slot
 from app.tests.conftest import build_planned as build_planned_object
 from app.ui import messages_ru as msg
@@ -56,7 +57,7 @@ TZ_SAMPLE_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 13-09-2026 12:
 
 ## Создано (2)
 - 16-09-2026 19:00 uk -> Канал UA — эфир создан, ключ передан в форму
-- 18-09-2026 19:00 uk -> Канал UA — эфир создан, ключ в форму НЕ передан — форма не подтвердила запись ответа (notConfirmed); повторно планер его не отправит, передайте ключ стримеру из keys.txt вручную
+- 18-09-2026 19:00 uk -> Канал UA — эфир создан, ключ в форму НЕ передан — форма не подтвердила запись ответа (notConfirmed); следующий запуск отправит его снова, а пока передайте ключ стримеру из keys.txt вручную
 
 ## Исправлено (1)
 - 17-09-2026 19:00 uk -> Канал UA — на YouTube отличалось: описание; исправлено, ключ и ссылка прежние, ключ передан в форму
@@ -360,8 +361,21 @@ def test_undated_notices_are_deduplicated_by_channel_and_title() -> None:
     assert build_warning_lines([], (), [notice]) == lines[:1]
 
 
+def _remembered(item: PlannedBroadcast) -> PlannedBroadcast:
+    """Память хранит подтверждение текущего ключа."""
+    item.record = SlotRecord(
+        slot_id=item.slot_id, youtube_channel_id="UC1", slot_start_utc=item.slot.start.isoformat(),
+        stage=SlotStage.KEY_CONFIRMED, updated_at="12-09-2026 20:00",
+        results=RecordResults(confirmed_stream_key=item.stream_key, confirmed_at="12-09-2026 20:00"),
+    )
+    return item
+
+
 def test_kept_key_warning_is_written_once_per_run() -> None:
-    kept: list[PlannedBroadcast] = [_with_found_key(17, Decision.MATCH), _with_found_key(18, Decision.UPDATE)]
+    kept: list[PlannedBroadcast] = [
+        _remembered(_with_found_key(17, Decision.MATCH)), _remembered(_with_found_key(18, Decision.UPDATE))
+    ]
+    assert msg.WARNING_KEPT_KEY not in build_warning_lines([_with_found_key(21, Decision.MATCH)])   # памяти нет
     created: PlannedBroadcast = _with_new_key(19, Decision.CREATE)
     assert build_warning_lines([*kept, created]).count(msg.WARNING_KEPT_KEY) == 1
     assert msg.WARNING_KEPT_KEY not in build_warning_lines([created])

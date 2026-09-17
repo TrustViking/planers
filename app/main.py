@@ -10,6 +10,8 @@
 только по каналам READY (app/platforms/verified.py). После фазы входов браузер не открывается.
 --status и --check: проверка без браузера → фаза входов по всем каналам → работа. --auth: вход без проверки
 при старте; прежний токен остаётся, пока новый вход не подтверждён.
+Память планера (secrets\\planer.sqlite3, app/records) открывается перед run и закрывается после него —
+в том числе при обрыве и падении; в --dry-run и --status — только чтение.
 Обрыв (Ctrl+C) и любое необработанное исключение ловятся в run_cli: строка в лог и в консоль, код 1.
 """
 
@@ -52,6 +54,7 @@ from app.platforms.channel import Channel, ChannelBindingError, ChannelBook, Cha
 from app.platforms.channel_sync import ChannelSync
 from app.platforms.verified import VerifiedPlatform
 from app.platforms.youtube import YouTubePlatform
+from app.records.record_store import RecordStore
 from app.ui import messages_ru as msg
 from app.version import APP_VERSION
 
@@ -425,18 +428,26 @@ def _run_pipeline(
     now_utc: datetime,
     channel_warnings: Sequence[str],
 ) -> int:
-    outcome: RunOutcome = run(
-        mode,
-        dependencies.config,
-        paths,
-        dependencies.platform,
-        build_form_sender(paths, now_utc, dependencies.rng),
-        now_utc,
-        dependencies.rng,
-        progress=ConsoleProgress(),
-        channel_warnings=channel_warnings,
-        logins=dependencies.book,
+    store: RecordStore = RecordStore.open(
+        paths.records_file, read_only=mode is not RunMode.FULL, now_local=now_utc.astimezone()
     )
+    try:
+        outcome: RunOutcome = run(
+            mode,
+            dependencies.config,
+            paths,
+            dependencies.platform,
+            build_form_sender(paths, now_utc, dependencies.rng),
+            now_utc,
+            dependencies.rng,
+            progress=ConsoleProgress(),
+            channel_warnings=channel_warnings,
+            logins=dependencies.book,
+            store=store,
+        )
+    finally:
+        # обрыв и падение проходят сюда же: память закрыта до того, как _run_guarded запишет причину
+        store.close()
     channel_order: tuple[str, ...] = tuple(channel.key for channel in dependencies.config.channels)
     _print_outcome(outcome, paths, log_path, channel_order)
     return outcome.exit_code

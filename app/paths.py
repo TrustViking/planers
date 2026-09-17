@@ -1,7 +1,7 @@
 """Корень планера и его папки (ТЗ §9): рядом с exe (frozen) или корень репо (dev).
 
 Владелец видит в корне только своё: secrets\\ (каналы, настройки и ключи доступа),
-bcast\\ (пакеты), keystreams\\ (ключи потоков), logs\\ (логи и отчёты).
+bcast\\ (пакеты), keystreams\\ (ключи потоков), logs\\ (логи и отчёты). Память планера — secrets\\planer.sqlite3.
 """
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ class PlanerPaths:
     channels_previous_file: Path   # secrets\channels.previous.json — channels.json до выравнивания планером
     channels_passport_file: Path   # secrets\channels_passport.json — ник ↔ id YouTube ↔ файл токена; пишет планер
     client_secret_file: Path     # secrets\client_secret.json — паспорт программы (ТЗ §5.3)
+    records_file: Path           # secrets\planer.sqlite3 — память планера: что сделано на YouTube и в форме
     bcast_dir: Path              # bcast\ — пакеты броадкастера (ТЗ §7.1)
     keystreams_dir: Path
     keys_file: Path
@@ -61,6 +62,7 @@ def build_paths(root: Path) -> PlanerPaths:
         channels_previous_file=secrets_dir / "channels.previous.json",
         channels_passport_file=secrets_dir / "channels_passport.json",
         client_secret_file=secrets_dir / "client_secret.json",
+        records_file=secrets_dir / "planer.sqlite3",
         bcast_dir=root / "bcast",
         keystreams_dir=keystreams_dir,
         keys_file=keystreams_dir / "keys.txt",

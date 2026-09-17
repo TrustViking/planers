@@ -165,6 +165,21 @@ WARNING_TOKEN_SAVE_FAILED: Final[str] = (
     "канал «{account_name}» {handle}: вход выполнен, но файл токена не записан ({error}) — "
     "в этом запуске канал работает, при следующем запуске планер снова предложит вход"
 )
+# Память планера (app/records/record_store.py).
+WARNING_RECORDS_CREATED: Final[str] = (
+    "Создана память планера ({path}): {count} эфиров с меткой планера записаны как уже переданные стримеру"
+)
+WARNING_RECORDS_BROKEN: Final[str] = (
+    "память планера {path} не читалась — файл переименован в {renamed}, создана новая; "
+    "эфиры с меткой планера записаны как уже переданные стримеру"
+)
+WARNING_RECORDS_BROKEN_READ_ONLY: Final[str] = (
+    "память планера {path} не читается — в этом режиме планер работает без неё; обычный запуск создаст новую"
+)
+WARNING_RECORDS_WRITE_FAILED: Final[str] = (
+    "память планера {path} не записывается ({error}) — работа продолжается, но подтверждения этого запуска "
+    "следующий запуск не увидит и может отправить ключи повторно"
+)
 WARNING_PASSPORT_UNREADABLE: Final[str] = (
     "паспорт каналов {path} не читается ({error}) — он будет записан заново; "
     "канал с новым ником до его первой проверки по старому паспорту не узнаётся"
@@ -235,6 +250,7 @@ OUTCOME_FIXED: Final[str] = "{prefix} — на YouTube отличалось: {wh
 OUTCOME_FIXED_FORM: Final[str] = ", {mark}"
 OUTCOME_FIX_PLANNED: Final[str] = "{prefix} — на YouTube отличается: {what}; будет исправлено, ключ уйдёт в форму"
 OUTCOME_MATCHED: Final[str] = "{prefix} — {url}"
+OUTCOME_MATCHED_FORM: Final[str] = "; {mark}"
 OUTCOME_NO_STREAM: Final[str] = (
     "{prefix} — эфир на канале есть ({url}), но к нему не привязан поток: ключ взять неоткуда. "
     "Привяжите поток в YouTube Studio или удалите эфир — планер создаст его заново"
@@ -277,7 +293,7 @@ STREAM_DESCRIPTION_PLACEHOLDER: Final[str] = "; заглушка обложки 
 WARNING_FORM_DIAGNOSTIC: Final[str] = "ответ формы сохранён для разбора: {path}"
 # Постоянные особенности площадки — только в отчёте, разделом «Особенности площадки» (ТЗ §5.6).
 WARNING_KEPT_KEY: Final[str] = (
-    "эфир с меткой планера совпал с пакетом — его ключ уже уходил в форму раньше и повторно не отправляется. "
+    "ключ совпавшего эфира форма уже подтверждала раньше (память планера) — повторно он не отправляется. "
     "Если стример ключа не получил — передайте его из keys.txt вручную или удалите эфир на YouTube: "
     "планер создаст его заново с новым ключом и отправит"
 )
@@ -358,8 +374,10 @@ YOUTUBE_REASON_TEXT: Final[dict[str, str]] = {
 OUTCOME_PLANER_ERROR: Final[str] = "{prefix} — {text}"
 OUTCOME_DRY_RUN_SUFFIX: Final[str] = " — не выполнено (dry-run)"
 FORM_MARK_SENT: Final[str] = "ключ передан в форму"
+FORM_MARK_PLANNED: Final[str] = "ключ будет передан в форму"
 FORM_MARK_FAILED: Final[str] = (
-    "ключ в форму НЕ передан — {reason}; повторно планер его не отправит, передайте ключ стримеру из keys.txt вручную"
+    "ключ в форму НЕ передан — {reason}; следующий запуск отправит его снова, "
+    "а пока передайте ключ стримеру из keys.txt вручную"
 )
 # ключи — коды из app/form/base.py
 FORM_REASON_TEXT: Final[dict[str, str]] = {
@@ -507,18 +525,22 @@ PROGRESS_REPORT: Final[str] = "пишу отчёт"
 # --- файл ключей (ТЗ §5.5): блок на стрим, ключ — первой строкой блока
 # Начала строк «форма» — одни и те же в шапке файла и в самих строках.
 KEY_FORM_SENT_LEAD: Final[str] = "отправлен в форму"
-KEY_FORM_KEPT_LEAD: Final[str] = "в этом запуске в форму не отправлялся"
+KEY_FORM_CONFIRMED_LEAD: Final[str] = "передан в форму"
+KEY_FORM_BOOTSTRAP_LEAD: Final[str] = "передан до появления памяти планера"
 KEY_FORM_FAILED_LEAD: Final[str] = "НЕ отправлен"
 KEY_FORM_NOT_ADMITTED_LEAD: Final[str] = KEY_FORM_FAILED_LEAD + ": не допущено"
+KEY_FORM_UNKNOWN_LEAD: Final[str] = "нет подтверждения в памяти планера"
 KEYS_FILE_HEADER: Final[tuple[str, ...]] = (
     "# Ключи трансляций. Сгенерировано планером {generated_at}.",
     "# Файл перезаписывается на каждом запуске — не править.",
     "# Строка «форма»:",
-    "#   «" + KEY_FORM_SENT_LEAD + "» — ключ у стримера;",
-    "#   «" + KEY_FORM_KEPT_LEAD + "» — эфир уже стоял, ключ уходил раньше;",
-    "#   «" + KEY_FORM_FAILED_LEAD + "» — передайте ключ стримеру вручную;",
+    "#   «" + KEY_FORM_SENT_LEAD + "» — форма подтвердила ключ в этом запуске;",
+    "#   «" + KEY_FORM_CONFIRMED_LEAD + "» — форма подтвердила этот ключ раньше (память планера);",
+    "#   «" + KEY_FORM_BOOTSTRAP_LEAD + "» — эфир уже стоял с меткой планера, когда память создавалась;",
+    "#   «" + KEY_FORM_FAILED_LEAD + "» — ключ должен был уйти и не ушёл: передайте его стримеру вручную;",
     "#   «" + KEY_FORM_NOT_ADMITTED_LEAD + "» — форма этот эфир не принимает (нет даты или варианта) "
-    "или канал не подтверждён: эфир стоит, ключ стримеру не передан — передайте вручную.",
+    "или канал не подтверждён: эфир стоит, ключ стримеру не передан — передайте вручную;",
+    "#   «" + KEY_FORM_UNKNOWN_LEAD + "» — планер не знает, получил ли стример этот ключ.",
 )
 KEYS_BLOCK_TITLE: Final[str] = "{date} {time}  {language}  {account_name} {handle}"
 KEYS_BLOCK_KEY: Final[str] = "  ключ   {value}"
@@ -526,6 +548,8 @@ KEYS_BLOCK_STREAM: Final[str] = "  поток  {value}"
 KEYS_BLOCK_BROADCAST: Final[str] = "  эфир   {value}"
 KEYS_BLOCK_FORM: Final[str] = "  форма  {value}"
 KEY_FORM_SENT: Final[str] = KEY_FORM_SENT_LEAD + " {sent_at}"
-KEY_FORM_KEPT: Final[str] = KEY_FORM_KEPT_LEAD + ": эфир уже стоял с этим ключом"
-KEY_FORM_FAILED: Final[str] = KEY_FORM_FAILED_LEAD + ": {reason} — передайте стримеру вручную"
+KEY_FORM_CONFIRMED: Final[str] = KEY_FORM_CONFIRMED_LEAD + " {confirmed_at}"
+KEY_FORM_BOOTSTRAP: Final[str] = KEY_FORM_BOOTSTRAP_LEAD
+KEY_FORM_FAILED: Final[str] = KEY_FORM_FAILED_LEAD + " — {reason}; передайте стримеру вручную"
 KEY_FORM_NOT_ADMITTED: Final[str] = KEY_FORM_NOT_ADMITTED_LEAD + " — {reasons}"
+KEY_FORM_UNKNOWN: Final[str] = KEY_FORM_UNKNOWN_LEAD

@@ -71,6 +71,10 @@ class FormAnswers:
     def is_complete(self) -> bool:
         return not self.missing and not self.pending
 
+    def as_record(self) -> tuple[tuple[str, str, str], ...]:
+        """Канонический вид для сравнения и памяти планера: (entry_id, вопрос, значение) по порядку ответов."""
+        return tuple((answer.question.entry_id, answer.question.title, answer.value) for answer in self.answers)
+
     def error(self) -> FormError | None:
         """Первая причина не отправлять — та же, что давала отправка до объекта-формы."""
         if self.missing:

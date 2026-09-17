@@ -1,8 +1,8 @@
 """Файл ключей keystreams\\keys.txt (ТЗ §5.5): производный, перегенерируется при каждом запуске.
 
 Строки строятся из объекта запланированного эфира, а в --status — из того, что нашлось
-на площадке: там объектов нет, есть эфиры с маркером планера. Журнал не читается:
-статус формы говорит только о том, что планер сделал в этом запуске (ТЗ §5.5).
+на площадке: там объектов нет, есть эфиры с маркером планера. Строка «форма» — что сделано в этом
+запуске, а если ничего — что знает память планера о подтверждении текущего ключа (ТЗ §5.5).
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from app.output.report import admission_texts, form_reason_text
 from app.paths import PlanerPaths
 from app.pipeline.plan import PlannedBroadcast
 from app.pipeline.reconciler import MarkedBroadcast
+from app.records.slot_record import RecordResults
 from app.platforms.base import broadcast_url_for
 from app.ui import messages_ru as msg
 
@@ -38,7 +39,7 @@ class KeyRow:
 
 
 def form_status_text(item: PlannedBroadcast) -> str:
-    """Только этот запуск: передан сейчас, не допущен, должен был уйти и не ушёл, или в этом запуске не отправлялся."""
+    """Передан сейчас, не допущен, должен был уйти и не ушёл — иначе что знает память о текущем ключе."""
     if not item.is_admitted:
         return msg.KEY_FORM_NOT_ADMITTED.format(
             reasons=msg.NOT_ADMITTED_REASON_JOINER.join(admission_texts(item.admission_reasons))
@@ -49,7 +50,16 @@ def form_status_text(item: PlannedBroadcast) -> str:
         )
     if item.should_send_key:
         return msg.KEY_FORM_FAILED.format(reason=form_reason_text(item.last_error))
-    return msg.KEY_FORM_KEPT
+    return confirmation_text(item.results, item.stream_key)
+
+
+def confirmation_text(results: RecordResults | None, stream_key: str | None) -> str:
+    """Подтверждение из памяти — только если оно про этот ключ."""
+    if results is None or not results.confirms_key(stream_key):
+        return msg.KEY_FORM_UNKNOWN
+    if results.is_bootstrap:
+        return msg.KEY_FORM_BOOTSTRAP
+    return msg.KEY_FORM_CONFIRMED.format(confirmed_at=results.confirmed_at or MISSING_VALUE)
 
 
 def key_row_from_planned(item: PlannedBroadcast) -> KeyRow:
@@ -67,15 +77,15 @@ def key_row_from_planned(item: PlannedBroadcast) -> KeyRow:
     )
 
 
-def key_row_from_marked(marked: MarkedBroadcast) -> KeyRow:
-    """--status: ключ с площадки; в форму этот режим ничего не передаёт."""
+def key_row_from_marked(marked: MarkedBroadcast, results: RecordResults | None = None) -> KeyRow:
+    """--status: ключ с площадки; в форму этот режим ничего не передаёт, строка «форма» — из памяти."""
     return KeyRow(
         language=marked.parts.language,
         date=marked.parts.date,
         time=marked.parts.time,
         account_name=marked.channel.account_name,
         handle=marked.channel.handle,
-        form_status_text=msg.KEY_FORM_KEPT,
+        form_status_text=confirmation_text(results, marked.stream.stream_name),
         stream_url=marked.stream.ingestion_address,
         stream_key=marked.stream.stream_name,
         broadcast_url=broadcast_url_for(marked.channel, marked.broadcast.broadcast_id),

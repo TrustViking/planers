@@ -1,5 +1,5 @@
-"""Оркестрация запуска (ТЗ §4): bcast → формы → объекты → входы → допуск → сверка → по объекту: действия и форма
-→ keys.txt → отчёт.
+"""Оркестрация запуска (ТЗ §4): bcast → формы → объекты → входы → допуск → записи памяти → сверка
+→ по объекту: действия, запись, решение о ключе, форма, запись подтверждения → keys.txt → отчёт → чистка памяти.
 
 main.py только разбирает флаги, строит зависимости и печатает результат.
 Рабочая единица — PlannedBroadcast: один эфир одного слота на одном канале.
@@ -8,14 +8,16 @@ main.py только разбирает флаги, строит зависим�
 Допуск — после входов: каждый объект получает объект своего канала и своей формы и сам решает (PlannedBroadcast.admit).
 Не допущенный объект на площадке ничего не создаёт и в форму ничего не шлёт, но остаётся в отчёте и keys.txt.
 Ключ уходит в форму сразу после действий по своему объекту — обрыв запуска не теряет уже созданные ключи (§7.5).
-Истина об эфирах — на площадке: планер не держит своей памяти о прошлых запусках.
+Истина об эфирах и ключах — на площадке. Память планера (app/records) — только о том, что форма уже подтвердила:
+из неё объект читает результаты, задания из неё не берутся. Должен ли ключ уйти, решает объект
+(PlannedBroadcast.decide_key_delivery); ошибка другого шага отправку уже взятого ключа не отменяет.
 """
 from __future__ import annotations
 
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum, IntEnum
 from pathlib import Path
 from typing import Final, Protocol
@@ -73,7 +75,10 @@ from app.pipeline.plan import (
     PlannedBroadcast,
 )
 from app.platforms.channel import Channel
-from app.pipeline.reconciler import MarkedScan, OrphanBroadcast, Reconciler, split_marker
+from app.records.record_store import RecordStore
+from app.records.slot_record import RecordResults, SlotRecord, SlotStage
+from app.ui import messages_ru as msg
+from app.pipeline.reconciler import MarkedBroadcast, MarkedScan, OrphanBroadcast, Reconciler, split_marker
 from app.pipeline.selection import Selection, build_planned
 from app.platforms.base import (
     BroadcastFacts,
@@ -154,6 +159,7 @@ class _RunContext:
     channel_warnings: tuple[str, ...]   # сверка каналов при старте (ChannelSync.run)
     progress: RunProgress
     logins: ChannelLogins | None        # None — входов нет (тесты без ChannelBook)
+    store: RecordStore                  # память планера; read_only в --dry-run и --status
 
     @property
     def now_local(self) -> datetime:
@@ -186,13 +192,17 @@ def run(
     progress: RunProgress = NoProgress(),
     channel_warnings: Sequence[str] = (),
     logins: ChannelLogins | None = None,
+    store: RecordStore | None = None,
 ) -> RunOutcome:
     """channel_warnings — предупреждения сверки каналов при старте: в отчёт и консоль вместе с прочими.
 
     logins — фаза входов: каналы с объектами (в --status — все каналы) входят до первого обращения к площадке.
+    store — память планера; открывает и закрывает её main. Без неё (тесты) — пустая память в оперативной
+    памяти, как у первого запуска.
     """
     context: _RunContext = _RunContext(
-        mode, config, paths, platform, form_sender, now_utc, rng, notice, [], tuple(channel_warnings), progress, logins
+        mode, config, paths, platform, form_sender, now_utc, rng, notice, [], tuple(channel_warnings), progress, logins,
+        store if store is not None else RecordStore.memory(is_new=True),
     )
     if mode is RunMode.STATUS:
         return _run_status(context)
@@ -217,16 +227,20 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     # к площадке обращаемся только по каналам, у которых есть объекты (и too_late): входы — все до сверки
     _log_in(context, [item.channel for item in selection.planned])
     _admit_all(context, selection.planned)
+    _load_records(context, selection.planned)
     orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
         selection.planned,
         frozenset(scan.slot_map),
     )
+    memory_warnings: list[str] = _bootstrap_records(context, selection.planned)
     # замечания площадки (эфир без времени старта) — данными, в отчёт и консоль одним путём
     notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
     keys_path: Path | None = None
     extra_outcomes: list[PairOutcome] = []
     if context.is_full:
         keys_path, extra_outcomes = _execute_full(context, selection)
+    else:
+        _decide_without_actions(selection.planned)
     outcomes: list[PairOutcome] = [
         outcome_from_planned(item, is_dry_run=not context.is_full)
         for item in selection.planned
@@ -243,7 +257,10 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         skipped=build_skipped_lines(scan, selection, context.config),
         mismatches=build_mismatch_lines(selection.planned, context.platform.limits),
         warnings=build_warning_lines(
-            selection.planned, context.form_diagnostics, notices, context.channel_warnings
+            selection.planned,
+            context.form_diagnostics,
+            notices,
+            [*context.channel_warnings, *memory_warnings, *context.store.take_warnings()],
         ),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
@@ -273,6 +290,51 @@ def _admit_all(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> Non
         item.admit(channel_object, key_form, failure)
         if not item.is_too_late:
             _log_admission(item)
+
+
+def _load_records(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> None:
+    """Каждому объекту подтверждённого канала — его запись из памяти (обратно — только результаты)."""
+    for item in planned:
+        channel_id: str | None = item.record_channel_id
+        if channel_id is not None:
+            item.record = context.store.find(item.slot_id, channel_id)
+
+
+def _bootstrap_records(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[str]:
+    """Первый запуск с памятью: стоящие эфиры с меткой планера записываются как уже переданные стримеру."""
+    if not context.store.is_new:
+        return []
+    count: int = 0
+    for item in planned:
+        if not item.bootstrap_confirmation(context.now_utc):
+            continue
+        count += 1
+        LOGGER.info(
+            'record_bootstrap slot_id=%s channel="%s" handle=%s broadcast_id=%s stream_key=%s',
+            item.slot_id,
+            item.channel.account_name,
+            item.channel.handle,
+            item.broadcast_id,
+            mask_stream_key(item.stream_key),
+        )
+        _save_record(context, item, SlotStage.KEY_CONFIRMED)
+    if count == 0 or context.store.path is None:
+        return []
+    return [msg.WARNING_RECORDS_CREATED.format(path=context.store.path, count=count)]
+
+
+def _decide_without_actions(planned: Sequence[PlannedBroadcast]) -> None:
+    """--dry-run: решение о ключе — по записям памяти, чтобы «отправим ключ» было правдой."""
+    for item in planned:
+        if item.stream_key:
+            item.decide_key_delivery()
+
+
+def _save_record(context: _RunContext, item: PlannedBroadcast, stage: SlotStage) -> None:
+    """Запись объекта; канал без id YouTube — записи нет. Сбой базы — предупреждение хранилища, объект идёт дальше."""
+    if item.record_channel_id is None:
+        return
+    context.store.save(item.to_record(context.now_utc, stage))
 
 
 def _form_for(context: _RunContext, spec: FormSpec) -> tuple[KeyForm | None, FormError | None]:
@@ -331,6 +393,9 @@ def _execute_full(
     """По объекту: действия → его ключ в форму; затем keys.txt (§4, §7.5)."""
     executor: _Executor = _Executor(context)
     for item in selection.planned:
+        if item.is_admitted and not item.is_too_late:
+            _save_record(context, item, SlotStage.ADMITTED)
+    for item in selection.planned:
         executor.execute(item)
     keys_path, outcomes = _write_keys(
         context,
@@ -347,7 +412,7 @@ def _run_status(context: _RunContext) -> RunOutcome:
         context.config.channels
     )
     notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
-    rows: list[KeyRow] = [key_row_from_marked(item) for item in marked.broadcasts]
+    rows: list[KeyRow] = [key_row_from_marked(item, _marked_results(context, item)) for item in marked.broadcasts]
     outcomes: list[PairOutcome] = [outcome_from_marked(item) for item in marked.broadcasts]
     outcomes.extend(platform_error_outcome(failure.channel, failure.error) for failure in marked.failures)
     keys_path, keys_errors = _write_keys(context, rows)
@@ -356,11 +421,23 @@ def _run_status(context: _RunContext) -> RunOutcome:
         mode=RunMode.STATUS,
         generated_at_text=context.generated_at_text,
         outcomes=outcomes,
-        warnings=build_warning_lines((), (), notices, context.channel_warnings),
+        warnings=build_warning_lines((), (), notices, [*context.channel_warnings, *context.store.take_warnings()]),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )
     return _complete(context, report, has_errors=_has_error_outcomes(outcomes))
+
+
+def _marked_results(context: _RunContext, marked: MarkedBroadcast) -> RecordResults | None:
+    """--status: подтверждение из памяти для строки «форма» в keys.txt."""
+    channel_id: str | None = marked.channel.key
+    if context.logins is not None:
+        channel: Channel = context.logins.channel(marked.channel)
+        channel_id = channel.info.youtube_channel_id if channel.info is not None else None
+    if channel_id is None:
+        return None
+    record: SlotRecord | None = context.store.find(marked.stream.title, channel_id)
+    return record.results if record is not None else None
 
 
 def _complete(context: _RunContext, report: RunReport, *, has_errors: bool) -> RunOutcome:
@@ -369,10 +446,19 @@ def _complete(context: _RunContext, report: RunReport, *, has_errors: bool) -> R
     if context.mode is not RunMode.DRY_RUN:
         # Сначала чистка, потом отчёт: свой же отчёт под неё не попадает (§5.7).
         cleanup_expired(context.paths, context.config.settings.keep_days, context.now_utc)
+    if context.is_full:
+        _clean_records(context)
     report_path: Path = write_report(context.paths, text, context.now_local)
     exit_code: ExitCode = ExitCode.ERRORS if has_errors else ExitCode.OK
     LOGGER.info("run_report mode=%s outcomes=%d exit_code=%d", report.mode.value, len(report.outcomes), int(exit_code))
     return RunOutcome(report=report, exit_code=int(exit_code), report_path=report_path)
+
+
+def _clean_records(context: _RunContext) -> None:
+    """Записи слотов старше keep_days — тот же срок, что у файлов в bcast\\ и logs\\."""
+    border: datetime = context.now_utc - timedelta(days=context.config.settings.keep_days)
+    removed: int = context.store.delete_started_before(border)
+    LOGGER.info("records_cleaned removed=%d", removed)
 
 
 def _has_error_outcomes(outcomes: Sequence[PairOutcome]) -> bool:
@@ -481,7 +567,7 @@ def _required_text(value: str | None, name: str) -> str:
 
 
 def _mark_video_fixes(item: PlannedBroadcast, fixes: VideoFixes) -> None:
-    """Категория и видимость, исправленные у ресурса видео, — это исправление эфира: UPDATE и ключ в форму.
+    """Категория и видимость, исправленные у ресурса видео, — это исправление эфира: UPDATE.
 
     Категорию список эфиров YouTube не возвращает, поэтому её расхождение видно только здесь.
     """
@@ -496,7 +582,6 @@ def _mark_video_fixes(item: PlannedBroadcast, fixes: VideoFixes) -> None:
     item.changed_fields = tuple(name for name in ChangedField if name in (*item.changed_fields, *added))
     if item.decision is Decision.MATCH:
         item.decision = Decision.UPDATE
-    item.require_key_delivery()
     LOGGER.info(
         'video_fields_fixed slot_id=%s channel="%s" handle=%s fields=%s',
         item.slot_id,
@@ -515,7 +600,7 @@ class _Executor:
         self._resent: set[tuple[str, str]] = set()   # (slot_id, channel.key): эфир уже переотправлен в этом запуске
 
     def execute(self, item: PlannedBroadcast) -> None:
-        """Действия по объекту и сразу его ключ в форму; объект с ошибкой ключ не отправляет."""
+        """Действия по объекту и сразу его ключ: ошибка шага отправку уже взятого ключа не отменяет."""
         try:
             self._dispatch(item)
             self._finish(item)
@@ -529,17 +614,27 @@ class _Executor:
             item.error = OutcomeError(origin=ERROR_ORIGIN_PACKAGE, code=error.reason.value, message=error.detail)
             item.last_error = error.detail
             item.decision = Decision.ERROR
-        else:
-            self._send_key(item)
+        self._deliver_key(item)
+
+    def _deliver_key(self, item: PlannedBroadcast) -> None:
+        """Ключ взят с площадки: записать → объект решает → в форму → записать подтверждение."""
+        if not item.stream_key or not item.is_admitted or item.is_too_late:
+            return
+        _save_record(self._context, item, SlotStage.PUBLISHED)
+        item.decide_key_delivery()
+        if not item.should_send_key:
+            return
+        self._send_key(item)
+        if item.is_form_sent:
+            item.confirm_key(self._context.now_utc)
+            _save_record(self._context, item, SlotStage.KEY_CONFIRMED)
 
     def _send_key(self, item: PlannedBroadcast) -> None:
-        """Ключ этого объекта — в форму сейчас, если он должен дойти до стримера (should_send_key, §7.5).
+        """Ключ этого объекта — в форму сейчас (should_send_key уже решён объектом, §7.5).
 
-        Ответы достраивает сам объект (ключ и адрес потока); неполные — без POST, причина в last_error.
+        Ответы достроены объектом (ключ и адрес потока); неполные — без POST, причина в last_error.
         """
-        if not item.should_send_key or not item.stream_key or item.is_form_sent:
-            return
-        answers: FormAnswers | None = item.refresh_form_answers()
+        answers: FormAnswers | None = item.form_answers
         if not item.is_key_ready_to_send:
             error: FormError | None = answers.error() if answers is not None else None
             if error is not None:
@@ -583,7 +678,7 @@ class _Executor:
             return
         if item.decision is Decision.UPDATE:
             self._fix(item)
-        # MATCH: ключ и ссылку сверка уже взяла с площадки, действий нет; ключ в форму не идёт
+        # MATCH: ключ и ссылку сверка уже взяла с площадки, действий нет; уйдёт ли ключ — решает объект
 
     def _create(self, item: PlannedBroadcast) -> None:
         self._context.progress.broadcast_step_started(item, BroadcastStep.CREATE)
@@ -627,7 +722,6 @@ class _Executor:
         """Исправляемый эфир переотправляется целиком: тексты, время и категория, метка, обложка; видимость — в _finish."""
         broadcast_id: str = item.found.broadcast_id if item.found else ""
         self._resend(item, broadcast_id, with_marker=True)
-        item.require_key_delivery()
 
     def _resend(self, item: PlannedBroadcast, broadcast_id: str, *, with_marker: bool) -> None:
         """Одна переотправка на эфир за запуск: liveBroadcasts.update, метка (если отличалась), обложка из пакета."""

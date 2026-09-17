@@ -139,10 +139,13 @@ exit /b 0
 
 :copy_local_data
 rem LOCAL build only: developer data next to the exe, from there Inno Setup takes it into the installer.
-rem secrets\* is client_secret.json, channels.json, planer.json and <account_name>.token.json
+rem secrets\* is client_secret.json, channels.json, planer.json, the passport and <handle>.token.json
 rem of every channel already authorized.
 mkdir "%DIST_APP%\secrets" >nul 2>&1
 copy /Y "%ROOT%\secrets\*" "%DIST_APP%\secrets\" >nul
+rem planer.sqlite3 is the planer memory of THIS machine: another installation must start its own,
+rem a copied memory would report keys as already confirmed by the form.
+del /Q "%DIST_APP%\secrets\planer.sqlite3*" >nul 2>&1
 if not exist "%DIST_APP%\secrets\client_secret.json" (
   echo [ERROR] secrets\ was not copied to "%DIST_APP%\secrets".
   exit /b 1
