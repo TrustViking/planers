@@ -30,8 +30,10 @@ from app.platforms.base import (
 )
 from app.google.auth import AuthError, AuthErrorReason
 from app.platforms.youtube import (
+    DEFAULT_BROADCAST_FLAG,
     ERROR_AUTH,
     ERROR_LOGIN_REQUIRED,
+    ERROR_TRANSPORT,
     RETRY_POLICY,
     YOUTUBE_STREAM_KEY_PATTERN,
     ErrorBehavior,
@@ -310,6 +312,40 @@ def test_broadcast_without_start_is_skipped(
     # в лог — INFO, только диагностика: данных для владельца в записи лога больше нет
     [record] = [record for record in caplog.records if "broadcast_without_start" in record.getMessage()]
     assert record.levelname == "INFO" and "Эфир B1" in record.getMessage()
+
+
+def test_broadcast_without_start_logs_what_the_platform_sent(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Прогоны 18-09-2026: isDefaultBroadcast не пришёл — в строке видно, что именно прислала площадка."""
+    item: dict[str, Any] = _broadcast_item("B1", "2027-03-17T17:00:00Z")
+    item["snippet"].pop("scheduledStartTime")
+    item["snippet"]["publishedAt"] = "2026-05-01T10:00:00Z"
+    item["status"] = {"lifeCycleStatus": "ready", "privacyStatus": "unlisted"}
+    item["contentDetails"] = {"boundStreamId": "S9"}
+    item["snippet"].pop(DEFAULT_BROADCAST_FLAG, None)
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
+    with caplog.at_level("INFO"):
+        platform.list_upcoming(CHANNEL)
+    [message] = [record.getMessage() for record in caplog.records if "broadcast_without_start" in record.getMessage()]
+    assert message.endswith(
+        "is_default=- lifecycle=ready privacy=unlisted bound_stream_id=S9 published_at=2026-05-01T10:00:00Z"
+    )
+
+
+def test_broadcast_without_start_shows_false_default_flag_as_is(
+    platform: YouTubePlatform,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    item: dict[str, Any] = {"id": "B1", "snippet": {"title": "Эфир B1", DEFAULT_BROADCAST_FLAG: False}}
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": [item]}]))
+    with caplog.at_level("INFO"):
+        platform.list_upcoming(CHANNEL)
+    [message] = [record.getMessage() for record in caplog.records if "broadcast_without_start" in record.getMessage()]
+    assert "is_default=False lifecycle=- privacy=- bound_stream_id=- published_at=-" in message
 
 
 def test_undated_broadcast_becomes_one_notice_taken_once(
@@ -1505,3 +1541,77 @@ def test_thumbnail_refusal_is_remembered_without_network(
     assert refusal is not None and refusal.code == "uploadRateLimitExceeded"
     assert platform.thumbnail_refusal(OTHER_CHANNEL) is None
     assert len(service.calls) == 1                            # вопрос об отказе к сети не ходит
+
+
+# --- 5n-B: создающий вызов не повторяется вслепую (прогон 18-09-2026 15:29, liveBroadcasts.insert Oktavian.X)
+
+
+def _unknown_outcome_failures() -> list[Exception]:
+    """Отказы, по которым не видно, создан ли объект: обрыв связи и 5xx."""
+    return [
+        ConnectionResetError("connection reset by peer"),
+        _http_error(503, "backendError", "x"),
+        _http_error(500, "somethingNew", "x"),
+    ]
+
+
+@pytest.mark.parametrize("failure", _unknown_outcome_failures())
+def test_broadcast_insert_with_unknown_outcome_is_not_retried(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, failure: Exception
+) -> None:
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(liveBroadcasts=[failure]))
+    with pytest.raises(PlatformError) as raised:
+        platform.create_broadcast(CHANNEL, _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
+    assert raised.value.code == ERROR_TRANSPORT
+    assert [(call["resource"], call["method"]) for call in service.calls] == [("liveBroadcasts", "insert")]
+    assert clock.sleeps == []
+
+
+@pytest.mark.parametrize("failure", _unknown_outcome_failures())
+def test_stream_insert_with_unknown_outcome_is_not_retried(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, failure: Exception
+) -> None:
+    """Эфир создан, поток — неизвестно: второго потока не заводим; эфир без потока доделает следующий запуск."""
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(liveBroadcasts=[{"id": "B1"}], liveStreams=[failure])
+    )
+    with pytest.raises(PlatformError) as raised:
+        platform.create_broadcast(CHANNEL, _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
+    assert raised.value.code == ERROR_TRANSPORT
+    assert [(call["resource"], call["method"]) for call in service.calls] == [
+        ("liveBroadcasts", "insert"),
+        ("liveStreams", "insert"),
+    ]
+    assert clock.sleeps == []
+
+
+@pytest.mark.parametrize("resource", ["liveBroadcasts", "liveStreams"])
+def test_rate_limit_on_creating_call_is_still_retried(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, resource: str
+) -> None:
+    """Лимит частоты — сервер явно отклонил запрос, объект не создан: повтор безопасен."""
+    limit: HttpError = _http_error(403, "rateLimitExceeded", "slow down")
+    broadcasts: list[Any] = [{"id": "B1"}, {"id": "B1"}]
+    streams: list[Any] = [_stream_response()]
+    if resource == "liveBroadcasts":
+        broadcasts.insert(0, limit)
+    else:
+        streams.insert(0, limit)
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(liveBroadcasts=broadcasts, liveStreams=streams)
+    )
+    created: CreatedBroadcast = platform.create_broadcast(CHANNEL, _spec(datetime(2027, 3, 17, 17, 0, tzinfo=timezone.utc)))
+    assert created.stream_key == GOOD_KEY
+    inserts: list[str] = [call["resource"] for call in service.calls if call["method"] == "insert"]
+    assert inserts.count(resource) == 2
+    assert clock.sleeps == _expected_delays(1)
+
+
+def test_connection_drop_on_reading_call_is_retried_as_before(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock
+) -> None:
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(liveBroadcasts=[ConnectionResetError("reset"), {"items": []}])
+    )
+    assert platform.list_upcoming(CHANNEL) == []
+    assert len(service.calls) == 2 and clock.sleeps == _expected_delays(1)

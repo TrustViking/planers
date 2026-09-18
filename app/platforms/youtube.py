@@ -142,8 +142,15 @@ REASON_BEHAVIORS: Final[dict[str, ErrorBehavior]] = {
     ERROR_BAD_RESPONSE: ErrorBehavior.CALL,
     ERROR_UNEXPECTED_KEY: ErrorBehavior.CALL,
     ERROR_CHANNEL_NOT_FOUND: ErrorBehavior.CALL,   # совпадает с причиной Google channelNotFound
+    ERROR_TRANSPORT: ErrorBehavior.RETRY,          # обрыв связи: ответа нет вовсе
 }
 THUMBNAIL_OPERATION: Final[str] = "thumbnails.set"   # операция загрузки обложки: отказ по ней помнится за запуск
+BROADCAST_INSERT_OPERATION: Final[str] = "liveBroadcasts.insert"
+STREAM_INSERT_OPERATION: Final[str] = "liveStreams.insert"
+# Создающие, неидемпотентные вызовы: дошёл запрос, а ответ потерялся — повтор завёл бы второй эфир или поток.
+# Отказ с неизвестным исходом (обрыв связи, 5xx) у них не повторяется (_is_unknown_outcome): объект остаётся
+# несозданным, эфир доделает следующий запуск. Явный отказ сервера (лимит частоты) повторяется как у всех.
+CREATING_OPERATIONS: Final[frozenset[str]] = frozenset({BROADCAST_INSERT_OPERATION, STREAM_INSERT_OPERATION})
 # Пара (операция, причина) главнее причины: forbidden у обложки — канал не подтверждён, у прочих — разовый отказ.
 OPERATION_REASON_BEHAVIORS: Final[dict[tuple[str, str], ErrorBehavior]] = {
     (THUMBNAIL_OPERATION, "forbidden"): ErrorBehavior.OPERATION,
@@ -153,16 +160,26 @@ RefusalKey = tuple[str | None, str | None]
 
 
 def _error_behavior(operation: str, http_status: int | None, reason: str) -> ErrorBehavior:
-    """Единственное место решения. Причины нет в таблицах — по HTTP-коду: 5xx и 429 повторяем, прочее — нет."""
+    """Единственное место решения. Причины нет в таблицах — по HTTP-коду: 5xx и 429 повторяем, прочее — нет.
+
+    Создающий вызов с неизвестным исходом (обрыв связи, 5xx) не повторяется: CALL.
+    """
     paired: ErrorBehavior | None = OPERATION_REASON_BEHAVIORS.get((operation, reason))
     if paired is not None:
         return paired
+    if operation in CREATING_OPERATIONS and _is_unknown_outcome(http_status, reason):
+        return ErrorBehavior.CALL
     known: ErrorBehavior | None = REASON_BEHAVIORS.get(reason)
     if known is not None:
         return known
     if http_status is not None and (http_status >= HTTP_SERVER_ERROR_MIN or http_status == HTTP_TOO_MANY_REQUESTS):
         return ErrorBehavior.RETRY
     return ErrorBehavior.CALL
+
+
+def _is_unknown_outcome(http_status: int | None, reason: str) -> bool:
+    """Неизвестно, выполнил ли YouTube запрос: связь оборвалась или сервер ответил 5xx."""
+    return reason == ERROR_TRANSPORT or (http_status is not None and http_status >= HTTP_SERVER_ERROR_MIN)
 
 
 def _refusal_key(behavior: ErrorBehavior, channel_key: str, operation: str) -> RefusalKey | None:
@@ -352,7 +369,7 @@ class YouTubePlatform:
         """§7.4: insert эфира → insert потока → bind. Оборвалось — доделает следующий запуск."""
         response: dict[str, Any] = self._execute(
             channel,
-            "liveBroadcasts.insert",
+            BROADCAST_INSERT_OPERATION,
             lambda service: service.liveBroadcasts().insert(
                 part=BROADCAST_INSERT_PARTS,
                 body=_broadcast_body(spec),
@@ -563,7 +580,7 @@ class YouTubePlatform:
         """liveStreams.insert → проверка ключа → bind. Один поток на эфир (§7.4)."""
         response: dict[str, Any] = self._execute(
             channel,
-            "liveStreams.insert",
+            STREAM_INSERT_OPERATION,
             lambda service: service.liveStreams().insert(
                 part=STREAM_PARTS,
                 body=_stream_body(channel, spec, placeholder_sha),
@@ -688,7 +705,7 @@ class YouTubePlatform:
             except OSError as error:
                 failure = _Failure(
                     PlatformError(ERROR_TRANSPORT, f"{operation} on {channel.account_name}: {error}"),
-                    ErrorBehavior.RETRY,
+                    _error_behavior(operation, None, ERROR_TRANSPORT),
                     None,
                 )
             else:
@@ -757,9 +774,10 @@ class YouTubePlatform:
     def _refuse(self, channel: ChannelConfig, operation: str, failure: _Failure) -> PlatformError:
         """Окончательный отказ: запомнить по поведению и вернуть ошибку для raise."""
         error: PlatformError = failure.error
-        is_server_side: bool = failure.http_status is None or failure.http_status >= HTTP_SERVER_ERROR_MIN
-        if failure.behavior is ErrorBehavior.RETRY and is_server_side:
-            # 5xx и сеть после всех попыток — «YouTube недоступен»; лимит частоты сохраняет свою причину
+        is_unknown: bool = _is_unknown_outcome(failure.http_status, error.code)
+        if failure.behavior in (ErrorBehavior.RETRY, ErrorBehavior.CALL) and is_unknown:
+            # 5xx и сеть (после всех попыток или без повтора у создающего вызова) — «YouTube недоступен»;
+            # лимит частоты сохраняет свою причину
             error = PlatformError(ERROR_TRANSPORT, error.message)
         LOGGER.warning(
             'youtube_refused operation=%s channel="%s" handle=%s http_status=%s reason=%s behavior=%s message="%s"',
@@ -950,6 +968,32 @@ def _broadcasts_from_page(
     return broadcasts, notices
 
 
+def _log_undated_broadcast(item: dict[str, Any], channel: ChannelConfig, start_text: Any) -> None:
+    """Что площадка прислала об эфире без времени старта — как есть: что это за объекты, пока неизвестно."""
+    snippet: dict[str, Any] = _mapping(item, "snippet")
+    status: dict[str, Any] = _mapping(item, "status")
+    details: dict[str, Any] = _mapping(item, "contentDetails")
+    LOGGER.info(
+        'broadcast_without_start channel="%s" handle=%s broadcast_id=%s title=%r value=%r '
+        "is_default=%s lifecycle=%s privacy=%s bound_stream_id=%s published_at=%s",
+        channel.account_name,
+        channel.handle,
+        _text(item, "id"),
+        snippet.get("title"),
+        start_text,
+        _raw_or_missing(snippet, DEFAULT_BROADCAST_FLAG),
+        _raw_or_missing(status, "lifeCycleStatus"),
+        _raw_or_missing(status, "privacyStatus"),
+        _raw_or_missing(details, "boundStreamId"),
+        _raw_or_missing(snippet, "publishedAt"),
+    )
+
+
+def _raw_or_missing(raw: dict[str, Any], key: str) -> Any:
+    """Значение поля как пришло; поля нет — LOG_MISSING (строка лога остаётся key=value)."""
+    return raw[key] if key in raw else LOG_MISSING
+
+
 def _broadcast_from_item(item: dict[str, Any], channel: ChannelConfig) -> UpcomingBroadcast | PlatformNotice | None:
     """Эфир без разбираемого времени старта сверять не с чем: вместо эфира — замечание для владельца.
 
@@ -970,14 +1014,7 @@ def _broadcast_from_item(item: dict[str, Any], channel: ChannelConfig) -> Upcomi
         return None
     if start_utc is None:
         # лог — только диагностика; владельцу факт уходит данными (PlatformNotice → take_notices)
-        LOGGER.info(
-            'broadcast_without_start channel="%s" handle=%s broadcast_id=%s title=%r value=%r',
-            channel.account_name,
-            channel.handle,
-            broadcast_id,
-            snippet.get("title"),
-            start_text,
-        )
+        _log_undated_broadcast(item, channel, start_text)
         return PlatformNotice(
             kind=PlatformNoticeKind.UNDATED_BROADCAST,
             account_name=channel.account_name,

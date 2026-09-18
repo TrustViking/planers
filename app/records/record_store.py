@@ -3,7 +3,8 @@
 Таблица slots: одна строка на (slot_id, youtube_channel_id), колонки поиска и record_json (SlotRecord).
 Таблица meta: schema_version и created_utc — когда память появилась (ISO-8601 UTC): эфиры с меткой планера,
 созданные на площадке раньше, считаются уже переданными стримеру (PlannedBroadcast.bootstrap_confirmation).
-У базы без created_utc строка пишется при первом открытии на запись — текущим временем. Сбой базы не валит запуск: не открылась — файл переименовывается
+У базы без created_utc строка пишется при первом открытии на запись: в базе уже есть записи — самым ранним
+updated_at (память старше, чем это открытие), база пустая — текущим временем. Сбой базы не валит запуск: не открылась — файл переименовывается
 в planer.sqlite3.broken-<DD-MM-YYYY_HHMMSS> (не удаляется) и создаётся новая; не записалось — WARNING
 и одна строка предупреждения за запуск, объект работает дальше. read_only (--dry-run, --status) —
 на диск ничего не пишется: файла нет — пустая база в памяти.
@@ -16,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
-from app.core.dates import FILE_STAMP_FORMAT
+from app.core.dates import FILE_STAMP_FORMAT, parse_local_datetime_text_utc
 from app.observability.logging_setup import get_logger
 from app.records.slot_record import SlotRecord, SlotStage
 from app.ui import messages_ru as msg
@@ -50,6 +51,9 @@ UPSERT_SQL: Final[str] = (
 DELETE_SQL: Final[str] = "DELETE FROM slots WHERE slot_start_utc < ?"
 HAS_SLOTS_SQL: Final[str] = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'slots'"
 META_CREATED_UTC: Final[str] = "created_utc"
+SELECT_UPDATED_AT_SQL: Final[str] = "SELECT updated_at FROM slots"
+CREATED_SOURCE_RECORDS: Final[str] = "min_updated_at"   # source= в records_created_utc_initialized
+CREATED_SOURCE_NOW: Final[str] = "now"
 SELECT_META_SQL: Final[str] = "SELECT value FROM meta WHERE key = ?"
 INSERT_META_SQL: Final[str] = "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)"
 
@@ -126,7 +130,7 @@ class RecordStore:
             if connection.execute(HAS_SLOTS_SQL).fetchone() is None:
                 connection.close()
                 return cls.memory(is_new=True, path=path, read_only=True, created_utc=now_utc)
-            created_utc: datetime = _read_created_utc(connection) or now_utc
+            created_utc: datetime = _read_created_utc(connection) or _initial_created_utc(connection, now_utc)[0]
             return cls(connection, path, is_new=False, read_only=True, created_utc=created_utc)
         except sqlite3.DatabaseError as error:
             if connection is not None:
@@ -239,7 +243,8 @@ class RecordStore:
 def _connect_writable(path: Path, now_utc: datetime, *, is_new: bool) -> tuple[sqlite3.Connection, datetime]:
     """Открыть и проверить: не база — sqlite3.DatabaseError (соединение закрыто, файл можно переименовать).
 
-    Нет created_utc — записать now_utc (у существующей базы — строкой лога).
+    Нет created_utc — записать самый ранний updated_at записей или, у пустой базы, now_utc
+    (у существующей базы — строкой лога с источником).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     connection: sqlite3.Connection = sqlite3.connect(path)
@@ -247,15 +252,32 @@ def _connect_writable(path: Path, now_utc: datetime, *, is_new: bool) -> tuple[s
         _create_schema(connection)
         created_utc: datetime | None = _read_created_utc(connection)
         if created_utc is None:
-            created_utc = now_utc
+            created_utc, source = _initial_created_utc(connection, now_utc)
             with connection:
-                connection.execute(INSERT_META_SQL, (META_CREATED_UTC, now_utc.isoformat()))
+                connection.execute(INSERT_META_SQL, (META_CREATED_UTC, created_utc.isoformat()))
             if not is_new:
-                LOGGER.info("records_created_utc_initialized value=%s", now_utc.isoformat())
+                LOGGER.info("records_created_utc_initialized value=%s source=%s", created_utc.isoformat(), source)
     except sqlite3.DatabaseError:
         connection.close()
         raise
     return connection, created_utc
+
+
+def _initial_created_utc(connection: sqlite3.Connection, now_utc: datetime) -> tuple[datetime, str]:
+    """Когда появилась память, если meta этого не хранит: записи старше этого открытия — по самой ранней.
+
+    Отметка «сейчас» у непустой базы сдвинула бы границу bootstrap_confirmation вперёд и молча записала бы
+    ключи эфиров, созданных после настоящего появления памяти, как уже переданные стримеру.
+    """
+    moments: list[datetime] = []
+    for (text,) in connection.execute(SELECT_UPDATED_AT_SQL):
+        try:
+            moments.append(parse_local_datetime_text_utc(text))
+        except (TypeError, ValueError):
+            continue            # неразборчивая строка — не повод сдвигать отметку
+    if moments:
+        return min(moments), CREATED_SOURCE_RECORDS
+    return now_utc, CREATED_SOURCE_NOW
 
 
 def _read_created_utc(connection: sqlite3.Connection) -> datetime | None:

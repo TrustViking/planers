@@ -628,14 +628,15 @@ def test_expected_and_actual_log_lines_share_keys(
     lines: dict[str, str] = {
         message.split(" ", 1)[0]: message
         for message in caplog.messages
-        if message.startswith(("broadcast_expected", "broadcast_actual", "broadcast_facts"))
+        if message.startswith(("broadcast_expected", "broadcast_found", "broadcast_facts"))
     }
-    assert set(lines) == {"broadcast_expected", "broadcast_actual", "broadcast_facts"}
+    assert set(lines) == {"broadcast_expected", "broadcast_found", "broadcast_facts"}
+    assert not any(message.startswith("broadcast_actual") for message in caplog.messages)   # 5n-B: имя сменилось
     keys: dict[str, list[str]] = {
         name: re.findall(r"(?:^| )([a-z_]+)=", message)
         for name, message in lines.items()
     }
-    assert keys["broadcast_expected"] == keys["broadcast_actual"]
+    assert keys["broadcast_expected"] == keys["broadcast_found"]
     assert keys["broadcast_facts"][:2] == keys["broadcast_expected"][:2]   # slot_id, channel
     assert "description_head" in keys["broadcast_expected"]
     assert "made_for_kids" in keys["broadcast_facts"]

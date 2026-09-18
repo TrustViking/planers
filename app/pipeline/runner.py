@@ -104,7 +104,7 @@ ERROR_ORIGIN_PACKAGE: Final[str] = "package"
 ERROR_CODE_KEYS_WRITE: Final[str] = "keysWriteFailed"
 MISSING_FIELD: Final[str] = "-"
 DESCRIPTION_HEAD_CHARS: Final[int] = 80
-# Ключи строк broadcast_expected и broadcast_actual — один набор на обе.
+# Ключи строк broadcast_expected и broadcast_found — один набор на обе.
 SPEC_LOG_KEYS: Final[tuple[str, ...]] = (
     "start",
     "marker",
@@ -541,7 +541,7 @@ def _write_keys(context: _RunContext, rows: list[KeyRow]) -> tuple[Path | None, 
 
 
 def _describe_spec(spec: BroadcastSpec | None) -> dict[str, object]:
-    """Набор ключей для broadcast_expected и broadcast_actual — считается здесь, в одном месте."""
+    """Набор ключей для broadcast_expected и broadcast_found — считается здесь, в одном месте."""
     if spec is None:
         return {key: MISSING_FIELD for key in SPEC_LOG_KEYS}
     return {
@@ -600,9 +600,11 @@ def _log_line(item: PlannedBroadcast, fields: dict[str, object]) -> str:
 
 
 def _log_broadcast_fields(item: PlannedBroadcast) -> None:
-    """Что хотели, что было в списке эфиров и что лежит на платформе — для разбора расхождений."""
+    """Что хотели (expected), каким эфир нашёлся в списке эфиров до правки (found) и что лежит на платформе
+    после действий (facts) — для разбора расхождений. found — не состояние после правки: это facts.
+    """
     LOGGER.info("broadcast_expected %s", _log_line(item, _describe_spec(item.expected)))
-    LOGGER.info("broadcast_actual %s", _log_line(item, _describe_spec(item.actual)))
+    LOGGER.info("broadcast_found %s", _log_line(item, _describe_spec(item.actual)))
     if item.facts is not None:
         LOGGER.info("broadcast_facts %s", _log_line(item, _describe_facts(item.facts)))
 

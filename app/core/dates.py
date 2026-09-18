@@ -1,7 +1,7 @@
 """Форматы дат и времени планера — единственный источник (ТЗ §5)."""
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from typing import Final
 
 DATE_FORMAT: Final[str] = "%d-%m-%Y"
@@ -31,6 +31,11 @@ def format_time(value: time) -> str:
 def parse_datetime_text(text: str) -> datetime:
     """DD-MM-YYYY HH:MM → naive datetime (местное время; только для сортировки и отчёта)."""
     return datetime.strptime(text, DATETIME_FORMAT)
+
+
+def parse_local_datetime_text_utc(text: str) -> datetime:
+    """DD-MM-YYYY HH:MM местного времени машины (так пишутся моменты в памяти планера) → момент в UTC."""
+    return parse_datetime_text(text).astimezone(timezone.utc)
 
 
 def format_datetime_text(value: datetime) -> str:

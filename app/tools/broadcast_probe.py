@@ -3,17 +3,24 @@
 Запуск из корня репо:
   .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --channel Osvald.X
   .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --channel Osvald.X --remove HxTFRJslx2k
+  .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --dump-undated [--channel Osvald.X]
 
 Список читается с broadcastType=all: видны и постоянные эфиры («Начать эфир сейчас»), которых planer
 не запрашивает. --remove удаляет ровно один эфир по идентификатору и только если у эфира НЕТ времени
 старта: эфиры планера этим инструментом не трогаются (инвариант 7). Подтверждение — с клавиатуры.
+--dump-undated — по каждому каналу channels.json (или по одному из --channel) тем же запросом, что planer
+(liveBroadcasts.list без broadcastType), выгружает сырой элемент ответа каждого эфира без scheduledStartTime
+целиком в logs\\{DD-MM-YYYY}_{HHMMSS}_undated_broadcast_{broadcast_id}.json; ключи потоков, если попадутся, —
+маской. Ничего не удаляет.
 Вспомогательный инструмент разработки, в поставку не входит.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -21,8 +28,9 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from app.config.loader import ChannelConfig, ConfigError, PlanerConfig, load_planer_config
+from app.core.dates import FILE_STAMP_FORMAT
 from app.google.auth import AuthError, load_credentials, save_token, token_file_for
-from app.observability.logging_setup import get_logger
+from app.observability.logging_setup import get_logger, mask_stream_key
 from app.paths import PlanerPaths, build_paths, resolve_root
 
 LOGGER = get_logger("tools.broadcast_probe")
@@ -40,6 +48,9 @@ CONFIRM_WORD: Final[str] = "удалить"
 MISSING: Final[str] = "-"
 CHANNELS_KEY: Final[str] = "channels"
 PROGRAM_DESCRIPTION: Final[str] = "Эфиры канала в upcoming и удаление эфира без времени старта"
+UNDATED_DUMP_TEMPLATE: Final[str] = "{stamp}_undated_broadcast_{broadcast_id}.json"
+STREAM_KEY_FIELD: Final[str] = "streamName"      # ключ потока в ответах YouTube: в файле — маской
+JSON_INDENT: Final[int] = 2
 
 
 @dataclass(frozen=True)
@@ -69,6 +80,8 @@ class BroadcastRow:
 def main(argv: list[str] | None = None) -> int:
     args: argparse.Namespace = _parse_args(argv)
     paths: PlanerPaths = build_paths(resolve_root())
+    if args.dump_undated:
+        return _dump_undated(paths, args.channel)
     try:
         channel: ChannelConfig = _channel(paths, args.channel)
         service: Any = _service(paths, channel)
@@ -84,9 +97,17 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(description=PROGRAM_DESCRIPTION)
-    parser.add_argument("--channel", required=True, help="ник канала (handle) как в secrets\\channels.json")
+    parser.add_argument("--channel", default="", help="ник канала (handle) как в secrets\\channels.json")
     parser.add_argument("--remove", default="", help="идентификатор эфира без времени старта, который надо удалить")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--dump-undated",
+        action="store_true",
+        help="выгрузить сырые элементы эфиров без времени старта по всем каналам (или по --channel) в logs\\",
+    )
+    args: argparse.Namespace = parser.parse_args(argv)
+    if not args.dump_undated and not args.channel:
+        parser.error("нужен --channel (или --dump-undated)")
+    return args
 
 
 def _channel(paths: PlanerPaths, handle: str) -> ChannelConfig:
@@ -195,6 +216,72 @@ def _refusal(found: BroadcastRow | None, broadcast_id: str) -> str | None:
     if found.life_cycle == LIFE_CYCLE_LIVE:
         return f"эфир {broadcast_id} сейчас в эфире — сначала завершите его в Студии"
     return None
+
+
+def _dump_undated(paths: PlanerPaths, handle: str) -> int:
+    """По каждому каналу — сырые элементы эфиров без времени старта, как пришли; сбой канала — строка и дальше."""
+    try:
+        config: PlanerConfig = load_planer_config(paths.config_file, paths.channels_file)
+        channels: list[ChannelConfig] = [_channel(paths, handle)] if handle else list(config.channels)
+    except ConfigError as error:
+        print(f"ОТКАЗ: {error}")
+        return EXIT_REFUSED
+    stamp: str = datetime.now().strftime(FILE_STAMP_FORMAT)
+    paths.logs_dir.mkdir(parents=True, exist_ok=True)
+    failed: bool = False
+    for channel in channels:
+        try:
+            items: list[dict[str, Any]] = _list_raw_items(_service(paths, channel))
+        except (AuthError, HttpError, OSError) as error:
+            print(f"ОТКАЗ: {channel.account_name} {channel.handle} — {error}")
+            failed = True
+            continue
+        undated: list[dict[str, Any]] = [item for item in items if not _raw_start(item)]
+        print(f"Канал {channel.account_name} {channel.handle}: эфиров {len(items)}, без времени старта {len(undated)}")
+        for item in undated:
+            print(f"  {_write_undated(paths, stamp, item)}")
+    return EXIT_REFUSED if failed else EXIT_OK
+
+
+def _list_raw_items(service: Any) -> list[dict[str, Any]]:
+    """Тот же запрос, что у planer (broadcastType по умолчанию), — элементы ответа без разбора."""
+    items: list[dict[str, Any]] = []
+    page_token: str | None = None
+    while True:
+        response: dict[str, Any] = service.liveBroadcasts().list(
+            part=BROADCAST_PARTS,
+            broadcastStatus=BROADCAST_STATUS,
+            maxResults=MAX_RESULTS,
+            pageToken=page_token,
+        ).execute()
+        items.extend(item for item in response.get("items", []) if isinstance(item, dict))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return items
+
+
+def _raw_start(item: dict[str, Any]) -> Any:
+    snippet: Any = item.get("snippet")
+    return snippet.get("scheduledStartTime") if isinstance(snippet, dict) else None
+
+
+def _write_undated(paths: PlanerPaths, stamp: str, item: dict[str, Any]) -> Path:
+    path: Path = paths.logs_dir / UNDATED_DUMP_TEMPLATE.format(stamp=stamp, broadcast_id=item.get("id", MISSING))
+    text: str = json.dumps(_masked(item), ensure_ascii=False, indent=JSON_INDENT)
+    path.write_text(text + "\n", encoding="utf-8")
+    return path
+
+
+def _masked(value: Any) -> Any:
+    """Копия ответа с ключами потоков под маской; всё остальное — как пришло."""
+    if isinstance(value, dict):
+        return {
+            key: mask_stream_key(item) if key == STREAM_KEY_FIELD and isinstance(item, str) else _masked(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_masked(item) for item in value]
+    return value
 
 
 if __name__ == "__main__":

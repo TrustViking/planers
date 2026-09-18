@@ -17,6 +17,7 @@ from app.core.dates import (
     format_time,
     parse_date,
     parse_datetime_text,
+    parse_local_datetime_text_utc,
     parse_iso_start,
     parse_time,
 )
@@ -60,3 +61,10 @@ def test_parse_iso_start_rejects_naive() -> None:
 
 def test_format_now_local_is_parseable() -> None:
     assert isinstance(parse_datetime_text(format_now_local()), datetime)
+
+
+def test_local_text_becomes_the_same_moment_in_utc() -> None:
+    """Моменты памяти планера — местное DD-MM-YYYY HH:MM; created_utc — ISO-8601 UTC (5n-B)."""
+    moment: datetime = datetime(2026, 9, 17, 16, 39).astimezone()      # местное время машины
+    parsed: datetime = parse_local_datetime_text_utc(format_datetime_text(moment))
+    assert parsed.tzinfo is timezone.utc and parsed == moment
