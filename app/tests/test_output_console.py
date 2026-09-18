@@ -9,6 +9,8 @@ from typing import Any
 from app.config.loader import PlanerConfig
 from app.output.console import render_console
 from app.output.report import (
+    ExitReason,
+    ExitReasonKind,
     FieldChange,
     FormState,
     OutcomeKind,
@@ -16,6 +18,7 @@ from app.output.report import (
     PairOutcome,
     ReportPackageLine,
     RunMode,
+    RunExit,
     RunReport,
     RunTotals,
     SkipKind,
@@ -46,7 +49,9 @@ RESTORED_WARNING: str = (
 )
 
 # Макет задачи 5e: блоки сверху вниз, пустой блок не печатается, каналы — в порядке channels.json.
-SAMPLE_CONSOLE: str = f"""Итог: опубликовано 2, исправлено 1, уже стояло 1, не допущено 0, не публиковали 2, ошибок 0
+SAMPLE_CONSOLE: str = f"""Итог по эфирам (всего 4): опубликовано 2, исправлено 1, уже стояло 1, не допущено 0, ошибок 0.
+Слоты вне работы: 2 — нет канала для языка en.
+Код выхода 1 — не всё выполнено: ключ не дошёл до стримера 1.
 
 ======================= ВНИМАНИЕ =======================
   ключ не дошёл до стримера: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — форма недоступна (HTTP 503)
@@ -121,6 +126,7 @@ def _sample_report(**overrides: Any) -> RunReport:
         ],
         warnings=[RESTORED_WARNING, UNDATED_WARNING, msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY],
         keys_file_path="keystreams\\keys.txt",
+        run_exit=RunExit(1, (ExitReason(ExitReasonKind.KEY_UNDELIVERED, 1),)),
     )
     values.update(overrides)
     return RunReport(**values)
@@ -148,7 +154,7 @@ def test_console_has_no_title_it_is_printed_by_main_at_start() -> None:
     """Шапку печатает main при старте: в итоговом тексте её нет, иначе в прогоне было бы два заголовка."""
     for mode in RunMode:
         text: str = _render(_sample_report(mode=mode))
-        assert text.splitlines()[0].startswith("Итог: ")
+        assert text.splitlines()[0].startswith("Итог по эфирам ")
         assert "Planer " not in text
 
 
@@ -165,7 +171,8 @@ def test_empty_blocks_are_not_printed_at_all() -> None:
     """Нули видны в «Итоге»; пустого раздела нет."""
     text: str = _render(_sample_report(outcomes=[], skipped=[], warnings=[]))
     lines: list[str] = text.splitlines()
-    assert lines[0] == "Итог: опубликовано 0, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0"
+    assert lines[0] == "Итог по эфирам (всего 0): опубликовано 0, исправлено 0, уже стояло 0, не допущено 0, ошибок 0."
+    assert not any(line.startswith("Слоты вне работы") for line in lines)     # пропусков нет — строки нет
     assert _block_titles(text) == []
 
 
@@ -210,7 +217,7 @@ def test_settings_only_fix_has_no_tail_in_fixed_and_is_named_in_attention() -> N
     lines: list[str] = text.splitlines()
     fixed: list[str] = text.split("ИСПРАВИЛИ (1)")[1].split("\n\n")[0].splitlines()[1:]
     assert fixed == ["  Osvald.X @Osvald.X (trustviorel@gmail.com)", "    18-03-2027  20:00  ru  Второй эфир"]
-    assert lines[0] == "Итог: опубликовано 0, исправлено 1, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0"
+    assert lines[0] == "Итог по эфирам (всего 1): опубликовано 0, исправлено 1, уже стояло 0, не допущено 0, ошибок 0."
     assert "  вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — видимость: было private, стало unlisted" in lines
     assert text.count("видимость") == 1
 
@@ -265,7 +272,7 @@ def test_dry_run_speaks_of_intent_and_has_no_keys_block() -> None:
     )
     text: str = _render(report)
     lines: list[str] = text.splitlines()
-    assert lines[0] == "Итог: опубликуем 1, исправим 1, уже стояло 0, не допущено 0, не публиковали 2, ошибок 0"
+    assert lines[0] == "Итог по эфирам (всего 2): опубликуем 1, исправим 1, уже стояло 0, не допущено 0, ошибок 0."
     assert _block_titles(text) == ["ВНИМАНИЕ", "ОПУБЛИКУЕМ (1)", "ИСПРАВИМ (1)", "НЕ ПУБЛИКОВАЛИ (2)"]
     assert "    18-03-2027  20:00  ru  Второй эфир — будет обновлено: описание" in lines
     assert "  вернём к пакету: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — видимость: сейчас private, будет unlisted" in lines
@@ -287,7 +294,8 @@ def test_status_prints_total_attention_and_matched_only() -> None:
     )
     text: str = _render(report)
     lines: list[str] = text.splitlines()
-    assert lines[0] == "Итог: уже стояло 1, ошибок 1"
+    # сбой канала — не эфир: в «Итог по эфирам» не входит, он — во ВНИМАНИЕ и в причинах кода выхода
+    assert lines[0] == "Итог по эфирам (всего 1): уже стояло 1, ошибок 0."
     assert _block_titles(text) == ["ВНИМАНИЕ", "УЖЕ СТОЯЛО (1)"]
     assert f"  ошибка: Test RU — YouTube: {msg.YOUTUBE_REASON_TEXT['quotaExceeded']} (quotaExceeded)" in lines
     assert "квота исчерпана" not in text          # сообщение Google заменено текстом причины
@@ -344,14 +352,17 @@ def test_console_and_report_use_the_same_totals(
     totals: RunTotals = build_totals(outcome.report)
     console: str = render_console(outcome.report, root=planer_paths.root, report_path=outcome.report_path)
     report_text: str = outcome.report_path.read_text(encoding="utf-8")
-    console_total: str = msg.CONSOLE_TOTAL.format(
-        created=totals.created, fixed=totals.fixed, matched=totals.matched, skipped=totals.skipped, errors=totals.errors,
-        not_admitted=totals.not_admitted,
-    )
-    assert console.splitlines()[0] == console_total
-    # в отчёте — те же слова и числа, плюс файл ключей
-    assert f"{console_total}. Файл ключей: " in report_text
+    summary: list[str] = console.splitlines()[:3]
+    assert summary == [
+        "Итог по эфирам (всего 2): опубликовано 1, исправлено 0, уже стояло 0, не допущено 0, ошибок 1.",
+        "Слоты вне работы: 1 — нет канала для языка hu.",
+        "Код выхода 1 — не всё выполнено: ошибок по эфирам 1.",
+    ]
+    # в отчёте — те же строки подряд, плюс файл ключей
+    keys_line: str = msg.REPORT_TOTAL_KEYS_FILE.format(path=outcome.report.keys_file_path)
+    assert "\n".join([*summary, keys_line]) in report_text
     assert (totals.created, totals.skipped, totals.errors) == (1, 1, 1)
+    assert totals.created + totals.fixed + totals.matched + totals.not_admitted + totals.errors == totals.broadcasts
     assert "    17-03-2027  19:00  uk  Эфир 17-03-2027_1900_uk" in console.splitlines()
     assert f"  отчёт   {Path('logs') / outcome.report_path.name}" in console
 
@@ -364,24 +375,32 @@ def test_not_admitted_objects_are_attention_lines_only() -> None:
             PairOutcome(
                 OutcomeKind.NOT_ADMITTED, account_name="Nick Moss", handle="@NickMoss85",
                 date="18-03-2027", time="20:00", language="en", stream_key="abcd-abcd-abcd-abcd-wxyz",
-                admission_texts=("в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» — нужен владельцу формы",),
+                broadcast_url="https://www.youtube.com/watch?v=qJjIZCbP89s",
+                admission_texts=("в форме в вопросе «Время стрима ( Stream time )» нет варианта «18.03.2027»",),
+                admission_actions=(msg.ADMISSION_ACTION_MISSING_OPTION,),
             ),
             PairOutcome(
                 OutcomeKind.NOT_ADMITTED, account_name="Nick Moss", handle="@NickMoss85",
                 date="19-03-2027", time="20:00", language="en",
-                admission_texts=("форма не прочиталась: нет скрипта",),
+                admission_texts=(msg.ADMISSION_FORM_UNREADABLE.format(text="нет скрипта"),),
+                admission_actions=(msg.ADMISSION_ACTION_FORM_UNREADABLE,),
             ),
         ],
     )
     lines: list[str] = render_console(report, root=Path("root")).splitlines()
-    assert lines[0].startswith("Итог: опубликовано 0, исправлено 0, уже стояло 0, не допущено 2,")
+    assert lines[0] == "Итог по эфирам (всего 2): опубликовано 0, исправлено 0, уже стояло 0, не допущено 2, ошибок 0."
     assert lines[1:] == [
         "",
         lines[2],
-        "  не допущено: 18-03-2027 20:00 en -> Nick Moss @NickMoss85 — в форме нет варианта «Время стрима "
-        "( Stream time ): 18.03.2027» — нужен владельцу формы; эфир на канале есть — ключ стримеру не передан",
-        "  не допущено: 19-03-2027 20:00 en -> Nick Moss @NickMoss85 — форма не прочиталась: нет скрипта; эфира нет",
+        "  не допущено: 18-03-2027 20:00 en -> Nick Moss @NickMoss85 — в форме в вопросе «Время стрима "
+        "( Stream time )» нет варианта «18.03.2027»: эфир на канале есть (https://www.youtube.com/watch?v=qJjIZCbP89s), "
+        "но не исправлялся, ключ стримеру не передан. Добавьте вариант в форму — планер передаст ключ "
+        "на следующем запуске.",
+        "  не допущено: 19-03-2027 20:00 en -> Nick Moss @NickMoss85 — форма ключей не прочиталась (нет скрипта): "
+        "эфир не создан, ключ стримеру не передан. Проверьте, что форма открывается по ссылке из пакета — "
+        "планер создаст эфир на следующем запуске.",
     ]
+    assert "нужен владельцу формы" not in "\n".join(lines)
     assert msg.CONSOLE_BLOCK_ATTENTION in lines[2] and "→" not in "\n".join(lines)
 
 

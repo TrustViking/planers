@@ -29,26 +29,24 @@ from app.output.report import (
     RunMode,
     RunReport,
     RunTotals,
+    SkipGroup,
     SkipKind,
     SkippedLine,
-    admission_reasons_text,
     build_totals,
     channel_text,
     display_path,
     error_texts,
     form_reason_text,
+    not_admitted_text,
     outcome_prefix,
     package_problem_texts,
+    skip_groups,
+    summary_lines,
     unfixed_text,
 )
 from app.pipeline.plan import ChangedField
 from app.ui import messages_ru as msg
 
-_TOTALS: Final[dict[RunMode, str]] = {
-    RunMode.FULL: msg.CONSOLE_TOTAL,
-    RunMode.DRY_RUN: msg.CONSOLE_TOTAL_DRY_RUN,
-    RunMode.STATUS: msg.CONSOLE_TOTAL_STATUS,
-}
 # Тексты и обложка эфира правятся по пакету штатно; к норме «возвращают» только настройки — они идут во «Внимание».
 _CONTENT_FIELDS: Final[frozenset[str]] = frozenset(
     {ChangedField.TITLE.value, ChangedField.DESCRIPTION.value, ChangedField.THUMBNAIL.value}
@@ -72,16 +70,7 @@ def render_console(
     channel_order — ключи каналов (ChannelConfig.key) в порядке channels.json.
     """
     totals: RunTotals = build_totals(report)
-    lines: list[str] = [
-        _TOTALS[report.mode].format(
-            created=totals.created,
-            fixed=totals.fixed,
-            matched=totals.matched,
-            skipped=totals.skipped,
-            errors=totals.errors,
-            not_admitted=totals.not_admitted,
-        ),
-    ]
+    lines: list[str] = summary_lines(report, totals)
     _append_block(lines, _rule(msg.CONSOLE_BLOCK_ATTENTION), _attention_lines(report))
     for title, body in _broadcast_blocks(report, totals, channel_order):
         _append_block(lines, title, body)
@@ -251,22 +240,15 @@ def _skipped_lines(skipped: list[SkippedLine]) -> list[str]:
 
 
 def _skip_groups(skipped: list[SkippedLine]) -> list[tuple[str, list[SkippedLine]]]:
-    groups: list[tuple[str, list[SkippedLine]]] = []
-    past: list[SkippedLine] = [line for line in skipped if line.kind is SkipKind.PAST]
-    if past:
-        groups.append((msg.CONSOLE_SKIP_GROUP_PAST, past))
-    too_late: list[SkippedLine] = [line for line in skipped if line.kind is SkipKind.TOO_LATE]
-    if too_late:
-        groups.append((msg.CONSOLE_SKIP_GROUP_TOO_LATE.format(minutes=too_late[0].minutes), too_late))
-    no_channel: list[SkippedLine] = [line for line in skipped if line.kind is SkipKind.NO_CHANNEL]
-    for language in sorted({line.language for line in no_channel}):
-        groups.append(
-            (
-                msg.CONSOLE_SKIP_GROUP_NO_CHANNEL.format(language=language),
-                [line for line in no_channel if line.language == language],
-            )
-        )
-    return groups
+    return [(_skip_group_title(group), list(group.lines)) for group in skip_groups(skipped)]
+
+
+def _skip_group_title(group: SkipGroup) -> str:
+    if group.kind is SkipKind.PAST:
+        return msg.CONSOLE_SKIP_GROUP_PAST
+    if group.kind is SkipKind.TOO_LATE:
+        return msg.CONSOLE_SKIP_GROUP_TOO_LATE.format(minutes=group.minutes)
+    return msg.CONSOLE_SKIP_GROUP_NO_CHANNEL.format(language=group.language)
 
 
 def _attention_lines(report: RunReport) -> list[str]:
@@ -289,22 +271,12 @@ def _attention_lines(report: RunReport) -> list[str]:
 
 
 def _not_admitted_lines(report: RunReport) -> list[str]:
-    """Строка на не допущенный объект: коротко по сути; полный отказ канала — строкой ошибки выше, один раз."""
+    """Строка на не допущенный объект — тем же текстом, что в отчёте; полный отказ канала — строкой ошибки, один раз."""
     return [
-        msg.CONSOLE_ATTENTION_NOT_ADMITTED.format(
-            prefix=outcome_prefix(outcome),
-            reasons=admission_reasons_text(outcome),
-            tail=_not_admitted_tail(outcome),
-        )
+        msg.CONSOLE_ATTENTION_NOT_ADMITTED.format(text=not_admitted_text(outcome))
         for outcome in report.outcomes
         if outcome.kind is OutcomeKind.NOT_ADMITTED
     ]
-
-
-def _not_admitted_tail(outcome: PairOutcome) -> str:
-    if not outcome.is_channel_ready:
-        return msg.NOT_ADMITTED_TAIL_CHANNEL
-    return msg.CONSOLE_NOT_ADMITTED_TAIL_KEY if outcome.stream_key else msg.CONSOLE_NOT_ADMITTED_TAIL_NO_KEY
 
 
 def _restored_lines(report: RunReport) -> list[str]:

@@ -293,7 +293,8 @@ WARNING_AMBIGUOUS: Final[str] = (
     "планер не выбирает и не удаляет — оставьте один: {urls}"
 )
 WARNING_UNDATED_BROADCAST: Final[str] = (
-    "эфир без времени старта: {channel} — «{title}»; у эфира нет запланированного времени, планер его не видит"
+    "На канале {channel} есть эфир без даты и времени — «{title}». Планер такие эфиры со слотами не сверяет "
+    "и не трогает; если он лишний — удалите его в Студии."
 )
 AMBIGUOUS_URL_JOINER: Final[str] = ", "
 # Описание ключа потока в Студии (Создать -> Управление ключами трансляции); зрителям не видно.
@@ -446,15 +447,37 @@ REPORT_SECTION_NOT_DELIVERED: Final[str] = "## Ключ не дошёл до с�
 REPORT_SECTION_NOT_ADMITTED: Final[str] = "## Не допущено к публикации ({count})"
 REPORT_SECTION_NOTES: Final[str] = "## Особенности площадки — так устроена площадка, это не про этот запуск"
 NOT_DELIVERED_LINE: Final[str] = "{prefix} — {reason}; эфир на канале стоит — передайте ключ стримеру из keys.txt вручную"
-# Не допущено к публикации (PlannedBroadcast.admit): причины коротко, затем что с эфиром на канале.
-NOT_ADMITTED_LINE: Final[str] = "{prefix} — {reasons}; {tail}"
+# Не допущено к публикации (PlannedBroadcast.admit), одинаково в отчёте и консоли (report.not_admitted_text):
+# чего не хватает — что из-за этого не сделано — что делать и что планер сделает сам.
+NOT_ADMITTED_LINE: Final[str] = "{prefix} — {problems}: {consequence}. {actions} — {next_run}."
 NOT_ADMITTED_REASON_JOINER: Final[str] = "; "
-NOT_ADMITTED_TAIL_BROADCAST: Final[str] = "эфир на канале: {url}"
-NOT_ADMITTED_TAIL_NO_BROADCAST: Final[str] = "эфира на канале нет"
-NOT_ADMITTED_TAIL_CHANNEL: Final[str] = "канал не подтверждён — эфиры на нём не проверялись"
-ADMISSION_MISSING_OPTION: Final[str] = "в форме нет варианта «{text}» — нужен владельцу формы"
-ADMISSION_REQUIRED_MISSING: Final[str] = "в форме обязательный вопрос без ответа: {text}"
-ADMISSION_FORM_UNREADABLE: Final[str] = "форма не прочиталась: {text}"
+NOT_ADMITTED_CONSEQUENCE_NO_BROADCAST: Final[str] = "эфир не создан, ключ стримеру не передан"
+NOT_ADMITTED_CONSEQUENCE_BROADCAST: Final[str] = "эфир на канале есть ({url}), но не исправлялся, ключ стримеру не передан"
+NOT_ADMITTED_CONSEQUENCE_BROADCAST_NO_URL: Final[str] = "эфир на канале есть, но не исправлялся, ключ стримеру не передан"
+NOT_ADMITTED_CONSEQUENCE_CHANNEL: Final[str] = "эфиры на канале не проверялись, ключ стримеру не передан"
+NOT_ADMITTED_NEXT_NO_BROADCAST: Final[str] = "планер создаст эфир на следующем запуске"
+NOT_ADMITTED_NEXT_BROADCAST: Final[str] = "планер передаст ключ на следующем запуске"
+NOT_ADMITTED_NEXT_CHANNEL: Final[str] = "планер проверит канал на следующем запуске"
+# Чего не хватает (keys.txt цитирует их же) и что делать — по каждой причине недопуска свой текст.
+ADMISSION_MISSING_OPTION: Final[str] = "в форме в вопросе «{question}» нет варианта «{value}»"
+ADMISSION_ACTION_MISSING_OPTION: Final[str] = "добавьте вариант в форму"
+ADMISSION_MISSING_PACKAGE_TEXT: Final[str] = "в пакете нет текста ответа на вопрос формы «{question}»"
+ADMISSION_ACTION_MISSING_PACKAGE_TEXT: Final[str] = "сообщите оператору: текст варианта должен прийти в пакете"
+ADMISSION_REQUIRED_MISSING: Final[str] = "в форме обязательный вопрос «{question}», на который у планера нет ответа"
+ADMISSION_ACTION_REQUIRED_MISSING: Final[str] = "сделайте этот вопрос в форме необязательным или сообщите оператору"
+ADMISSION_FORM_UNREADABLE: Final[str] = "форма ключей не прочиталась ({text})"
+ADMISSION_ACTION_FORM_UNREADABLE: Final[str] = "проверьте, что форма открывается по ссылке из пакета"
+# ключи — значения ChannelStatus; полный текст отказа или сбоя канала — строкой ошибки, один раз на канал
+ADMISSION_CHANNEL_PROBLEM: Final[dict[str, str]] = {
+    "refused": "канал не подтверждён: при входе выбран другой канал (подробности — в строке ошибки канала)",
+    "failed": "канал не проверен: YouTube не ответил (подробности — в строке ошибки канала)",
+    "needs_login": "вход в канал не выполнен",
+}
+ADMISSION_CHANNEL_ACTION: Final[dict[str, str]] = {
+    "refused": "при входе выберите в браузере нужный канал",
+    "failed": "если сбой повторяется — перешлите отчёт оператору",
+    "needs_login": "войдите в канал, когда планер откроет браузер",
+}
 # ключи — значения ChannelStatus (app/platforms/channel.py); полный текст отказа канала — в «Ошибки»
 ADMISSION_CHANNEL_TEXT: Final[dict[str, str]] = {
     "refused": "не тот канал",
@@ -468,21 +491,37 @@ CONSOLE_TITLE_DRY_RUN: Final[str] = (
     "Planer {version} — {generated_at} — dry-run: ничего не создано и в форму не отправлено"
 )
 CONSOLE_TITLE_STATUS: Final[str] = "Planer {version} — {generated_at} — --status: эфиры планера на каналах"
-CONSOLE_TOTAL: Final[str] = (
-    "Итог: опубликовано {created}, исправлено {fixed}, уже стояло {matched}, не допущено {not_admitted}, "
-    "не публиковали {skipped}, ошибок {errors}"
+# «Итог» — одинаково в консоли и в отчёте (report.summary_lines); отчёт добавляет строку файла ключей.
+# Первая строка — пары «слот × канал»: слагаемые в сумме дают число в скобках.
+SUMMARY_BROADCASTS: Final[str] = (
+    "Итог по эфирам (всего {total}): опубликовано {created}, исправлено {fixed}, уже стояло {matched}, "
+    "не допущено {not_admitted}, ошибок {errors}."
 )
-CONSOLE_TOTAL_DRY_RUN: Final[str] = (
-    "Итог: опубликуем {created}, исправим {fixed}, уже стояло {matched}, не допущено {not_admitted}, "
-    "не публиковали {skipped}, ошибок {errors}"
+SUMMARY_BROADCASTS_DRY_RUN: Final[str] = (
+    "Итог по эфирам (всего {total}): опубликуем {created}, исправим {fixed}, уже стояло {matched}, "
+    "не допущено {not_admitted}, ошибок {errors}."
 )
-CONSOLE_TOTAL_STATUS: Final[str] = "Итог: уже стояло {matched}, ошибок {errors}"
-# Итог отчёта — те же слова, что в консоли, плюс файл ключей.
-REPORT_TOTAL_END: Final[str] = ".{keys_file}"
-REPORT_TOTAL: Final[str] = CONSOLE_TOTAL + REPORT_TOTAL_END
-REPORT_TOTAL_DRY_RUN: Final[str] = CONSOLE_TOTAL_DRY_RUN + REPORT_TOTAL_END
-REPORT_STATUS_TOTAL: Final[str] = CONSOLE_TOTAL_STATUS + REPORT_TOTAL_END
-REPORT_TOTAL_KEYS_FILE: Final[str] = " Файл ключей: {path}"
+SUMMARY_BROADCASTS_STATUS: Final[str] = "Итог по эфирам (всего {total}): уже стояло {matched}, ошибок {errors}."
+# Слоты, которые до пар не дошли (раздел «Пропущено»); строка — только если такие есть.
+SUMMARY_SLOTS_OUT: Final[str] = "Слоты вне работы: {count} — {reasons}."
+SUMMARY_SLOTS_REASON: Final[dict[str, str]] = {
+    "past": "время старта уже прошло",
+    "too_late": "до старта меньше {minutes} минут",
+    "no_channel": "нет канала для языка {language}",
+}
+SUMMARY_SLOTS_REASON_COUNTED: Final[str] = "{reason} {count}"
+SUMMARY_SEPARATOR: Final[str] = ", "
+# Код выхода и его причины — из runner (RunExit), одни и те же в консоли, отчёте и строке run_report.
+SUMMARY_EXIT_OK: Final[str] = "Код выхода {code} — выполнено всё."
+SUMMARY_EXIT_FAILED: Final[str] = "Код выхода {code} — не всё выполнено: {reasons}."
+EXIT_REASON_TEXT: Final[dict[str, str]] = {
+    "errors": "ошибок по эфирам {count}",
+    "failures": "ошибок каналов и файлов планера {count}",
+    "key_undelivered": "ключ не дошёл до стримера {count}",
+    "not_admitted": "не допущено к публикации {count}",
+    "packages": "пакетов не прочитано {count}",
+}
+REPORT_TOTAL_KEYS_FILE: Final[str] = "Файл ключей: {path}"
 # Разделитель блока: название посередине строки фиксированной ширины из CONSOLE_RULE_CHAR.
 CONSOLE_RULE_WIDTH: Final[int] = 56
 CONSOLE_RULE_CHAR: Final[str] = "="
@@ -509,9 +548,7 @@ CONSOLE_SKIP_GROUP_TOO_LATE: Final[str] = "  до старта меньше {min
 CONSOLE_SKIP_GROUP_NO_CHANNEL: Final[str] = "  нет канала для языка {language}"
 CONSOLE_ATTENTION_ERROR: Final[str] = "  ошибка: {text}"
 CONSOLE_ATTENTION_NOT_DELIVERED: Final[str] = "  ключ не дошёл до стримера: {prefix} — {reason}"
-CONSOLE_ATTENTION_NOT_ADMITTED: Final[str] = "  не допущено: {prefix} — {reasons}; {tail}"
-CONSOLE_NOT_ADMITTED_TAIL_KEY: Final[str] = "эфир на канале есть — ключ стримеру не передан"
-CONSOLE_NOT_ADMITTED_TAIL_NO_KEY: Final[str] = "эфира нет"
+CONSOLE_ATTENTION_NOT_ADMITTED: Final[str] = "  не допущено: {text}"
 CONSOLE_ATTENTION_PACKAGE: Final[str] = "  пакет: {text}"
 CONSOLE_ATTENTION_TEXT: Final[str] = "  {text}"
 CONSOLE_ATTENTION_RESTORED: Final[str] = "  вернули к пакету: {prefix} — {field}: было {before}, стало {after}"

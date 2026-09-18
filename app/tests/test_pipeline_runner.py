@@ -870,9 +870,9 @@ def test_privacy_only_difference_is_fixed_and_key_goes_to_the_form(
     [pair] = outcome.report.outcomes
     assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("privacy",), FormState.SENT)
     assert [call.stream_key for call in form_sender.calls] == [PLATFORM_KEY]
-    # исправляемый эфир переотправляется целиком: один liveBroadcasts.update и обложка из пакета
-    assert [call.broadcast_id for call in fake_platform.updated] == [found.broadcast_id]
-    assert [call.broadcast_id for call in fake_platform.thumbnails] == [found.broadcast_id]
+    # видимость — поле видео: её правит videos.update, liveBroadcasts.update и обложка не нужны
+    assert fake_platform.updated == [] and fake_platform.thumbnails == []
+    assert fake_platform.settings_calls == [found.broadcast_id]
     [listed] = fake_platform.list_upcoming(make_config().channels[0])
     assert (listed.broadcast_id, listed.privacy_status) == (found.broadcast_id, "public")
     assert outcome.exit_code == ExitCode.OK
@@ -936,7 +936,7 @@ def test_manual_broadcast_is_adopted_marked_and_its_key_sent(
     assert [call.stream_key for call in form_sender.calls] == [PLATFORM_KEY]
     assert first.report is not None and first.report.outcomes[0].changed_fields == ("marker",)
     assert fake_platform.created == []
-    assert [call.broadcast_id for call in fake_platform.updated] == [manual.broadcast_id]   # переотправка целиком
+    assert fake_platform.updated == []      # разошлась только метка: liveStreams.update, без liveBroadcasts.update
     # со следующего запуска видно, что ключ уходил: наша метка, MATCH, ключ повторно не шлём
     second: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert second.report is not None and second.report.outcomes[0].kind is OutcomeKind.MATCHED
@@ -1111,7 +1111,7 @@ def _placeholder_overrides() -> dict[str, Any]:
     return {"picture": placeholder, "stream_description": PLACEHOLDER_TOKEN.format(sha=placeholder)}
 
 
-def test_missing_thumbnail_alone_resends_the_broadcast(
+def test_missing_thumbnail_alone_sets_only_the_thumbnail(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
@@ -1123,7 +1123,8 @@ def test_missing_thumbnail_alone_resends_the_broadcast(
     assert outcome.report is not None
     [pair] = outcome.report.outcomes
     assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("thumbnail",), FormState.SENT)
-    assert [call.broadcast_id for call in fake_platform.updated] == [found.broadcast_id]
+    # прогон 18-09-2026 14:04: только обложка — thumbnails.set, ни одного liveBroadcasts.update
+    assert fake_platform.updated == []
     [thumbnail] = fake_platform.thumbnails
     assert (thumbnail.broadcast_id, thumbnail.preview) == (found.broadcast_id, b"x")   # превью слота из пакета
     assert [call.stream_key for call in form_sender.calls] == [PLATFORM_KEY]
@@ -1139,7 +1140,7 @@ def test_missing_thumbnail_alone_resends_the_broadcast(
     assert len(form_sender.calls) == 1
 
 
-def test_title_fix_also_resends_the_thumbnail(
+def test_title_fix_calls_update_and_leaves_the_own_thumbnail(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
@@ -1151,9 +1152,11 @@ def test_title_fix_also_resends_the_thumbnail(
     )
     outcome: RunOutcome = _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert outcome.report is not None and outcome.report.outcomes[0].changed_fields == ("title",)
+    assert outcome.report.outcomes[0].kind is OutcomeKind.FIXED
     assert [call.broadcast_id for call in fake_platform.updated] == [found.broadcast_id]
-    assert [call.broadcast_id for call in fake_platform.thumbnails] == [found.broadcast_id]
-    assert fake_platform.pictures[found.broadcast_id] == picture_sha(b"x")
+    # своя обложка совпадает — thumbnails.set не нужен
+    assert fake_platform.thumbnails == []
+    assert fake_platform.pictures[found.broadcast_id] == "aaaaaaaaaaaa"
 
 
 def test_matching_broadcast_is_not_touched(
@@ -1168,11 +1171,11 @@ def test_matching_broadcast_is_not_touched(
     assert fake_platform.updated == [] and fake_platform.thumbnails == [] and form_sender.calls == []
 
 
-def test_privacy_fixed_at_video_resource_resends_the_broadcast_once(
+def test_privacy_fixed_at_video_resource_needs_no_other_calls(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
-    """Список эфиров видимость не вернул — MATCH; ресурс видео её исправил — UPDATE и одна переотправка."""
+    """Список эфиров видимость не вернул — MATCH; ресурс видео её исправил — UPDATE без других вызовов."""
     spec: dict[str, Any] = make_slot("17-03-2027", "19:00", "uk")
     make_package(planer_paths.bcast_dir, slots=[spec])
     found: UpcomingBroadcast = _seed_uk(fake_platform, spec, picture="aaaaaaaaaaaa", privacy=None)
@@ -1182,12 +1185,11 @@ def test_privacy_fixed_at_video_resource_resends_the_broadcast_once(
     assert outcome.report is not None
     [pair] = outcome.report.outcomes
     assert (pair.kind, pair.changed_fields, pair.form) == (OutcomeKind.FIXED, ("privacy",), FormState.SENT)
-    assert [call.broadcast_id for call in fake_platform.updated] == [found.broadcast_id]
-    assert [call.broadcast_id for call in fake_platform.thumbnails] == [found.broadcast_id]
+    assert fake_platform.updated == [] and fake_platform.thumbnails == []
     assert fake_platform.settings_calls == [found.broadcast_id]      # настройки видео — одним проходом
 
 
-def test_upload_limit_on_resend_keeps_update_and_key(
+def test_upload_limit_on_thumbnail_fix_keeps_the_key(
     planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
 ) -> None:
@@ -1199,7 +1201,8 @@ def test_upload_limit_on_resend_keeps_update_and_key(
         RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
     )
     assert outcome.exit_code == ExitCode.OK and outcome.report is not None
-    assert [call.broadcast_id for call in fake_platform.updated] == [found.broadcast_id]
+    assert fake_platform.updated == []
+    assert fake_platform.thumbnail_attempts == [found.broadcast_id]
     assert [call.stream_key for call in form_sender.calls] == [PLATFORM_KEY]
     assert any(msg.THUMBNAIL_REASON_TEXT["uploadRateLimitExceeded"] in line for line in outcome.report.warnings)
 
@@ -1337,7 +1340,7 @@ def test_channel_without_login_after_the_phase_is_an_error_not_a_browser(
     ]
     not_admitted = [item for item in outcome.report.outcomes if item.kind is OutcomeKind.NOT_ADMITTED]
     assert [(item.account_name, item.admission_texts) for item in not_admitted] == [
-        ("yt_ua", (msg.ADMISSION_CHANNEL_TEXT["failed"],))
+        ("yt_ua", (msg.ADMISSION_CHANNEL_PROBLEM["failed"],))
     ]
     assert [call.channel_id for call in fake_platform.created] == ["yt_ru"]
 
@@ -1425,10 +1428,13 @@ def test_slot_without_date_in_form_is_not_published_and_keys_go_right_after_acti
     assert (blocked.date, blocked.time, blocked.form) == ("18-03-2027", "20:00", None)
     text: str = _report_text(outcome)
     assert "## Не допущено к публикации (1)" in text
+    # эталон задачи 5n-A: чего не хватает — что не сделано — что делать
     assert (
-        "- 18-03-2027 20:00 en -> nick @nick — в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» "
-        "— нужен владельцу формы; эфира на канале нет"
+        "- 18-03-2027 20:00 en -> nick @nick — в форме в вопросе «Время стрима ( Stream time )» нет варианта "
+        "«18.03.2027»: эфир не создан, ключ стримеру не передан. Добавьте вариант в форму — планер создаст эфир "
+        "на следующем запуске."
     ) in text.splitlines()
+    assert "нужен владельцу формы" not in text
     assert text.index("## Не допущено к публикации") < text.index("## Создано")
     assert "## Ошибки" not in text
     assert "18-03-2027" not in planer_paths.keys_file.read_text(encoding="utf-8")   # эфира нет — и ключа нет
@@ -1461,16 +1467,16 @@ def test_existing_broadcast_of_a_not_admitted_slot_keeps_its_key_out_of_the_form
     block: str = keys.split("18-03-2027 20:00  en  nick @nick\n", 1)[1].split("\n\n", 1)[0]
     assert f"  ключ   {PLATFORM_KEY}" in block
     assert (
-        "  форма  НЕ отправлен: не допущено — в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» "
-        "— нужен владельцу формы"
+        "  форма  НЕ отправлен: не допущено — в форме в вопросе «Время стрима ( Stream time )» нет варианта "
+        "«18.03.2027»"
     ) in block
-    assert "эфир на канале: https://www.youtube.com/watch?v=fakebc00001" in _report_text(outcome)
+    assert "эфир на канале есть (https://www.youtube.com/watch?v=fakebc00001)" in _report_text(outcome)
     assert outcome.report is not None
     console: str = render_console(outcome.report, root=planer_paths.root)
-    assert (
-        "  не допущено: 18-03-2027 20:00 en -> nick @nick — в форме нет варианта «Время стрима ( Stream time ): "
-        "18.03.2027» — нужен владельцу формы; эфир на канале есть — ключ стримеру не передан"
-    ) in console.splitlines()
+    # консоль и отчёт — одним текстом
+    [report_line] = [line for line in _report_text(outcome).splitlines() if line.startswith("- 18-03-2027 20:00 en")]
+    assert f"  не допущено: {report_line[2:]}" in console.splitlines()
+    assert "нужен владельцу формы" not in console
     assert "не допущено 1" in console.splitlines()[0]
 
 
@@ -1548,7 +1554,10 @@ def test_dry_run_shows_admission_and_sends_nothing(
     assert outcome.report is not None and outcome.exit_code == ExitCode.ERRORS
     kinds = [item.kind for item in outcome.report.outcomes]
     assert kinds.count(OutcomeKind.NOT_ADMITTED) == 1 and kinds.count(OutcomeKind.CREATED) == 2
-    assert "Итог: опубликуем 2, исправим 0, уже стояло 0, не допущено 1," in _report_text(outcome)
+    report_text: str = _report_text(outcome)
+    assert "Итог по эфирам (всего 3): опубликуем 2, исправим 0, уже стояло 0, не допущено 1, ошибок 0." in report_text
+    assert "Код выхода 1 — не всё выполнено: не допущено к публикации 1." in report_text
+    assert "run_report mode=dry_run outcomes=3 exit_code=1 reason=not_admitted:1" in caplog.messages
     assert "slot_not_admitted slot_id=18-03-2027_2000_en" in "\n".join(caplog.messages)
     assert any(
         message.startswith(
@@ -2019,11 +2028,10 @@ def test_refused_thumbnails_skip_empty_resends(
     outcome: RunOutcome = _run(
         RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng, _memory_without_confirmations()
     )
-    assert [call.broadcast_id for call in fake_platform.updated] == [refused.broadcast_id, with_title.broadcast_id]
+    # только обложка — liveBroadcasts.update не зовётся никогда; ещё и название — update без загрузки
+    assert [call.broadcast_id for call in fake_platform.updated] == [with_title.broadcast_id]
     assert fake_platform.thumbnail_attempts == [refused.broadcast_id]
-    skipped: list[str] = _record_lines(caplog, "broadcast_fix_skipped")
-    assert len(skipped) == 1
-    assert only_cover.broadcast_id in skipped[0] and "reason=uploadRateLimitExceeded" in skipped[0]
+    assert only_cover.broadcast_id not in fake_platform.thumbnail_attempts
     assert outcome.report is not None
     kinds: dict[str | None, tuple[OutcomeKind, tuple[str, ...], tuple[str, ...]]] = {
         pair.date: (pair.kind, pair.changed_fields, pair.unfixed_fields) for pair in outcome.report.outcomes
@@ -2059,7 +2067,7 @@ def test_thumbnail_set_by_planer_is_remembered_over_a_stale_picture(
     renewed: UpcomingBroadcast = _seed_spec(fake_platform, spec, PLATFORM_KEY)
     third: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     assert third.report is not None
-    assert [call.broadcast_id for call in fake_platform.updated] == [renewed.broadcast_id]
+    assert fake_platform.updated == []        # разошлась только обложка
     assert fake_platform.thumbnail_attempts[-1] == renewed.broadcast_id
     stored: SlotRecord | None = _stored(planer_paths, UK_SLOT)
     assert stored is not None and stored.results.thumbnail_broadcast_id == renewed.broadcast_id

@@ -18,6 +18,7 @@ from app.config.loader import ChannelConfig, Platform, PlanerConfig
 from app.core.dates import FILE_STAMP_FORMAT
 from app.core.text import normalize_title
 from app.form.base import FORM_CODE_MISSING_OPTION, FORM_CODE_NOT_CONFIRMED, FORM_CODE_REQUIRED_MISSING
+from app.form.key_form import MISSING_VALUE as KEY_FORM_MISSING_VALUE
 from app.package.bcast import AcceptedPackage, BcastScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
@@ -52,6 +53,7 @@ from app.version import APP_VERSION
 REPORT_FILE_TEMPLATE: Final[str] = "{stamp}_report.md"
 REPORT_ENCODING: Final[str] = "utf-8"
 MISSING_VALUE: Final[str] = "-"
+LOG_NO_REASON: Final[str] = "none"    # reason= в строке run_report при коде выхода 0
 # OutcomeError.origin для сбоев самого планера; расшифровка — PLANER_ERROR_TEXT в messages_ru.
 PLANER_ORIGIN: Final[str] = "planer"
 MISMATCH_HEAD_CHARS: Final[int] = 200   # описание в отчёт целиком не выводится
@@ -119,19 +121,15 @@ _SKIP_TEMPLATES: Final[dict[SkipKind, str]] = {
     SkipKind.TOO_LATE: msg.SKIP_TOO_LATE,
     SkipKind.NO_CHANNEL: msg.SKIP_NO_CHANNEL,
 }
-_REPORT_TOTALS: Final[dict[RunMode, str]] = {
-    RunMode.FULL: msg.REPORT_TOTAL,
-    RunMode.DRY_RUN: msg.REPORT_TOTAL_DRY_RUN,
-    RunMode.STATUS: msg.REPORT_STATUS_TOTAL,
+_SUMMARY_BROADCASTS: Final[dict[RunMode, str]] = {
+    RunMode.FULL: msg.SUMMARY_BROADCASTS,
+    RunMode.DRY_RUN: msg.SUMMARY_BROADCASTS_DRY_RUN,
+    RunMode.STATUS: msg.SUMMARY_BROADCASTS_STATUS,
 }
-# Короткая причина недопуска для владельца: FORM_FIELD — по коду, прочие — по виду.
-_ADMISSION_FIELD_TEMPLATES: Final[dict[str, str]] = {
-    FORM_CODE_MISSING_OPTION: msg.ADMISSION_MISSING_OPTION,
-    FORM_CODE_REQUIRED_MISSING: msg.ADMISSION_REQUIRED_MISSING,
-}
-_ADMISSION_KIND_TEMPLATES: Final[dict[AdmissionKind, str]] = {
-    AdmissionKind.FORM_UNREADABLE: msg.ADMISSION_FORM_UNREADABLE,
-    AdmissionKind.CHANNEL: "{text}",
+# Причина недопуска словами владельца: чего не хватает и что делать. FORM_FIELD — по коду, прочие — по виду.
+_ADMISSION_FIELD_TEXTS: Final[dict[str, tuple[str, str]]] = {
+    FORM_CODE_MISSING_OPTION: (msg.ADMISSION_MISSING_OPTION, msg.ADMISSION_ACTION_MISSING_OPTION),
+    FORM_CODE_REQUIRED_MISSING: (msg.ADMISSION_REQUIRED_MISSING, msg.ADMISSION_ACTION_REQUIRED_MISSING),
 }
 _FORM_MARKS: Final[dict[FormState, str]] = {
     FormState.SENT: msg.FORM_MARK_SENT,
@@ -175,9 +173,15 @@ class PairOutcome:
     stream_key: str | None = None          # полный ключ; маскирует консоль
     field_changes: tuple[FieldChange, ...] = ()   # было и стало по исправленным полям
     handle: str = ""                       # ник канала; пусто — строка не о канале (файл ключей)
-    admission_texts: tuple[str, ...] = ()  # NOT_ADMITTED: короткие причины недопуска
+    admission_texts: tuple[str, ...] = ()  # NOT_ADMITTED: чего не хватает — по причине недопуска
+    admission_actions: tuple[str, ...] = ()  # NOT_ADMITTED: что делать владельцу — по той же причине
     is_channel_ready: bool = True          # NOT_ADMITTED: False — канал не подтверждён, эфиры не проверялись
     unfixed_fields: tuple[str, ...] = ()   # значения ChangedField: надо было исправить, не удалось
+
+    @property
+    def is_broadcast(self) -> bool:
+        """Исход пары «слот × канал»; сбой канала или самого планера слота не имеет."""
+        return self.date is not None
 
 
 @dataclass(frozen=True)
@@ -202,6 +206,50 @@ class OrphanLine:
     handle: str = ""
 
 
+class ExitReasonKind(str, Enum):
+    """Почему код выхода 1; значения — идентификаторы строки run_report и ключи EXIT_REASON_TEXT."""
+
+    ERRORS = "errors"                    # ошибки по эфирам
+    FAILURES = "failures"                # сбой канала или файла планера (исход без слота)
+    KEY_UNDELIVERED = "key_undelivered"  # ключ должен был уйти в форму и не ушёл
+    NOT_ADMITTED = "not_admitted"        # не допущено к публикации
+    PACKAGES = "packages"                # пакет не прочитан
+
+
+@dataclass(frozen=True)
+class ExitReason:
+    kind: ExitReasonKind
+    count: int
+
+
+@dataclass(frozen=True)
+class RunExit:
+    """Код выхода запуска и его причины — одно решение для консоли, отчёта и лога (runner.decide_exit)."""
+
+    code: int
+    reasons: tuple[ExitReason, ...] = ()
+
+    @property
+    def log_text(self) -> str:
+        return ",".join(f"{reason.kind.value}:{reason.count}" for reason in self.reasons) or LOG_NO_REASON
+
+
+@dataclass(frozen=True)
+class SkipGroup:
+    """Пропуски одной причины: консоль печатает их группой, «Итог» — числом."""
+
+    kind: SkipKind
+    lines: tuple[SkippedLine, ...]
+
+    @property
+    def minutes(self) -> int:
+        return self.lines[0].minutes
+
+    @property
+    def language(self) -> str:
+        return self.lines[0].language
+
+
 @dataclass(frozen=True)
 class RunReport:
     mode: RunMode
@@ -214,6 +262,7 @@ class RunReport:
     mismatches: list[str] = field(default_factory=list)
     keys_file_path: str | None = None
     notice: str | None = None
+    run_exit: RunExit | None = None   # код выхода и причины; None — отчёт собран не запуском (тесты)
 
     @property
     def run_warnings(self) -> list[str]:
@@ -240,12 +289,15 @@ class RunTotals:
     matched: int          # в --status — эфиры планера на каналах
     orphans: int
     skipped: int
-    errors: int
+    errors: int           # ошибки по эфирам (пары «слот × канал»)
     not_admitted: int     # не допущены к публикации: код выхода 1, но не «ошибки»
+    broadcasts: int       # пары «слот × канал» в исходах = created + fixed + matched + not_admitted + errors
+    failures: int         # сбои каналов и файлов планера: исходы без слота, в «Итог по эфирам» не входят
 
 
 def build_totals(report: RunReport) -> RunTotals:
     kinds: list[OutcomeKind] = [outcome.kind for outcome in report.outcomes]
+    pairs: list[PairOutcome] = [outcome for outcome in report.outcomes if outcome.is_broadcast]
     forms: list[FormState | None] = [outcome.form for outcome in report.outcomes]
     accepted: list[ReportPackageLine] = [
         line for line in report.packages if line.status is PackageLineStatus.ACCEPTED
@@ -266,8 +318,10 @@ def build_totals(report: RunReport) -> RunTotals:
         matched=kinds.count(OutcomeKind.MATCHED),
         orphans=len(report.orphans),
         skipped=len(report.skipped),
-        errors=sum(1 for kind in kinds if kind in ERROR_OUTCOME_KINDS),
+        errors=sum(1 for outcome in pairs if outcome.kind in ERROR_OUTCOME_KINDS),
         not_admitted=kinds.count(OutcomeKind.NOT_ADMITTED),
+        broadcasts=len(pairs),
+        failures=sum(1 for outcome in report.outcomes if not outcome.is_broadcast),
     )
 
 
@@ -310,6 +364,7 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
         stream_key=item.stream_key,
         field_changes=tuple(_field_change(item, name) for name in applied),
         admission_texts=admission_texts(item.admission_reasons),
+        admission_actions=admission_actions(item.admission_reasons),
         is_channel_ready=not any(reason.kind is AdmissionKind.CHANNEL for reason in item.admission_reasons),
         unfixed_fields=tuple(name.value for name in item.unfixed_fields) if not is_dry_run else (),
     )
@@ -323,16 +378,27 @@ def _applied_fields(item: PlannedBroadcast, *, is_dry_run: bool) -> tuple[Change
 
 
 def admission_texts(reasons: Sequence[AdmissionReason]) -> tuple[str, ...]:
-    """Причины недопуска словами владельца — одинаково для отчёта, консоли и keys.txt."""
-    return tuple(_admission_text(reason) for reason in reasons)
+    """Чего не хватает — словами владельца, одинаково для отчёта, консоли и keys.txt."""
+    return tuple(_admission_wording(reason)[0] for reason in reasons)
 
 
-def _admission_text(reason: AdmissionReason) -> str:
-    if reason.kind is AdmissionKind.FORM_FIELD:
-        template: str = _ADMISSION_FIELD_TEMPLATES.get(reason.code, msg.ADMISSION_MISSING_OPTION)
-    else:
-        template = _ADMISSION_KIND_TEMPLATES[reason.kind]
-    return template.format(text=reason.text)
+def admission_actions(reasons: Sequence[AdmissionReason]) -> tuple[str, ...]:
+    """Что делать владельцу — по каждой причине, без повторов."""
+    return tuple(dict.fromkeys(_admission_wording(reason)[1] for reason in reasons))
+
+
+def _admission_wording(reason: AdmissionReason) -> tuple[str, str]:
+    """(чего не хватает, что делать) для одной причины недопуска."""
+    if reason.kind is AdmissionKind.CHANNEL:
+        return msg.ADMISSION_CHANNEL_PROBLEM[reason.code], msg.ADMISSION_CHANNEL_ACTION[reason.code]
+    if reason.kind is AdmissionKind.FORM_UNREADABLE:
+        return msg.ADMISSION_FORM_UNREADABLE.format(text=reason.text), msg.ADMISSION_ACTION_FORM_UNREADABLE
+    if reason.code == FORM_CODE_MISSING_OPTION and reason.value == KEY_FORM_MISSING_VALUE:
+        # пакет не дал текста варианта (например, языка нет в form.values): форме тут не поможешь
+        problem: str = msg.ADMISSION_MISSING_PACKAGE_TEXT.format(question=reason.question)
+        return problem, msg.ADMISSION_ACTION_MISSING_PACKAGE_TEXT
+    template, action = _ADMISSION_FIELD_TEXTS.get(reason.code, _ADMISSION_FIELD_TEXTS[FORM_CODE_MISSING_OPTION])
+    return template.format(question=reason.question, value=reason.value), action
 
 
 def _field_change(item: PlannedBroadcast, name: ChangedField) -> FieldChange:
@@ -667,17 +733,69 @@ def not_delivered_texts(report: RunReport) -> list[str]:
 
 
 def _total_lines(report: RunReport, totals: RunTotals) -> list[str]:
-    """Слова — как в строке «Итог» консоли (для каждого режима свой шаблон), плюс файл ключей."""
-    total: str = _REPORT_TOTALS[report.mode].format(
-        created=totals.created,
-        fixed=totals.fixed,
-        matched=totals.matched,
-        skipped=totals.skipped,
-        errors=totals.errors,
-        not_admitted=totals.not_admitted,
-        keys_file=_keys_file_part(report),
+    """Те же строки, что «Итог» консоли, плюс файл ключей."""
+    lines: list[str] = summary_lines(report, totals)
+    if report.keys_file_path:
+        lines.append(msg.REPORT_TOTAL_KEYS_FILE.format(path=report.keys_file_path))
+    return [*lines, ""]
+
+
+def summary_lines(report: RunReport, totals: RunTotals) -> list[str]:
+    """«Итог» — одинаково для консоли и отчёта: эфиры, слоты вне работы (если есть), код выхода."""
+    lines: list[str] = [
+        _SUMMARY_BROADCASTS[report.mode].format(
+            total=totals.broadcasts,
+            created=totals.created,
+            fixed=totals.fixed,
+            matched=totals.matched,
+            not_admitted=totals.not_admitted,
+            errors=totals.errors,
+        )
+    ]
+    groups: list[SkipGroup] = skip_groups(report.skipped)
+    if groups:
+        lines.append(msg.SUMMARY_SLOTS_OUT.format(count=len(report.skipped), reasons=_skip_reasons_text(groups)))
+    if report.run_exit is not None:
+        lines.append(exit_text(report.run_exit))
+    return lines
+
+
+def exit_text(run_exit: RunExit) -> str:
+    if not run_exit.reasons:
+        return msg.SUMMARY_EXIT_OK.format(code=run_exit.code)
+    reasons: str = msg.SUMMARY_SEPARATOR.join(
+        msg.EXIT_REASON_TEXT[reason.kind.value].format(count=reason.count) for reason in run_exit.reasons
     )
-    return [total, ""]
+    return msg.SUMMARY_EXIT_FAILED.format(code=run_exit.code, reasons=reasons)
+
+
+def skip_groups(skipped: Sequence[SkippedLine]) -> list[SkipGroup]:
+    """Пропуски по причинам: уже прошло, внутри min_lead_minutes, нет канала для языка (по языкам)."""
+    groups: list[SkipGroup] = []
+    for kind in (SkipKind.PAST, SkipKind.TOO_LATE):
+        lines: tuple[SkippedLine, ...] = tuple(line for line in skipped if line.kind is kind)
+        if lines:
+            groups.append(SkipGroup(kind, lines))
+    no_channel: list[SkippedLine] = [line for line in skipped if line.kind is SkipKind.NO_CHANNEL]
+    for language in sorted({line.language for line in no_channel}):
+        groups.append(SkipGroup(SkipKind.NO_CHANNEL, tuple(line for line in no_channel if line.language == language)))
+    return groups
+
+
+def _skip_reasons_text(groups: list[SkipGroup]) -> str:
+    """Одна причина — без числа (оно уже в строке); несколько — число у каждой."""
+    reasons: list[tuple[str, int]] = [
+        (
+            msg.SUMMARY_SLOTS_REASON[group.kind.value].format(minutes=group.minutes, language=group.language),
+            len(group.lines),
+        )
+        for group in groups
+    ]
+    if len(reasons) == 1:
+        return reasons[0][0]
+    return msg.SUMMARY_SEPARATOR.join(
+        msg.SUMMARY_SLOTS_REASON_COUNTED.format(reason=reason, count=count) for reason, count in reasons
+    )
 
 
 def _append_status_body(lines: list[str], report: RunReport, totals: RunTotals) -> None:
@@ -713,10 +831,6 @@ def package_problem_texts(report: RunReport) -> list[str]:
     return [render_package_line(line) for line in report.packages if line.status in _UNREADABLE_PACKAGE_STATUSES]
 
 
-def _keys_file_part(report: RunReport) -> str:
-    return msg.REPORT_TOTAL_KEYS_FILE.format(path=report.keys_file_path) if report.keys_file_path else ""
-
-
 def outcome_prefix(outcome: PairOutcome) -> str:
     if outcome.date is None:
         return msg.OUTCOME_CHANNEL_PREFIX.format(channel=channel_text(outcome.account_name, outcome.handle))
@@ -748,25 +862,34 @@ def _outcome_body(outcome: PairOutcome, *, is_dry_run: bool) -> str:
     if outcome.kind is OutcomeKind.NO_STREAM:
         return msg.OUTCOME_NO_STREAM.format(prefix=prefix, url=outcome.broadcast_url or MISSING_VALUE)
     if outcome.kind is OutcomeKind.NOT_ADMITTED:
-        return msg.NOT_ADMITTED_LINE.format(
-            prefix=prefix, reasons=admission_reasons_text(outcome), tail=_not_admitted_tail(outcome)
-        )
+        return not_admitted_text(outcome)
     if outcome.kind is OutcomeKind.STREAM_ATTACHED:
         return msg.OUTCOME_STREAM_ATTACHED.format(prefix=prefix, form=form_mark(outcome.form, outcome.form_error))
     return _error_text(outcome, prefix)
 
 
-def admission_reasons_text(outcome: PairOutcome) -> str:
-    return msg.NOT_ADMITTED_REASON_JOINER.join(outcome.admission_texts)
+def not_admitted_text(outcome: PairOutcome) -> str:
+    """Не допущенный объект — одним текстом для отчёта и консоли: чего не хватает, что не сделано, что делать."""
+    consequence, next_run = _not_admitted_state(outcome)
+    actions: str = msg.NOT_ADMITTED_REASON_JOINER.join(outcome.admission_actions)
+    return msg.NOT_ADMITTED_LINE.format(
+        prefix=outcome_prefix(outcome),
+        problems=msg.NOT_ADMITTED_REASON_JOINER.join(outcome.admission_texts),
+        consequence=consequence,
+        actions=actions[:1].upper() + actions[1:],
+        next_run=next_run,
+    )
 
 
-def _not_admitted_tail(outcome: PairOutcome) -> str:
-    """Что с эфиром на канале: канал не подтверждён — не проверялся; иначе — ссылка или «эфира нет»."""
+def _not_admitted_state(outcome: PairOutcome) -> tuple[str, str]:
+    """Что с эфиром на канале и что планер сделает на следующем запуске."""
     if not outcome.is_channel_ready:
-        return msg.NOT_ADMITTED_TAIL_CHANNEL
+        return msg.NOT_ADMITTED_CONSEQUENCE_CHANNEL, msg.NOT_ADMITTED_NEXT_CHANNEL
     if outcome.broadcast_url:
-        return msg.NOT_ADMITTED_TAIL_BROADCAST.format(url=outcome.broadcast_url)
-    return msg.NOT_ADMITTED_TAIL_NO_BROADCAST
+        return msg.NOT_ADMITTED_CONSEQUENCE_BROADCAST.format(url=outcome.broadcast_url), msg.NOT_ADMITTED_NEXT_BROADCAST
+    if outcome.stream_key:
+        return msg.NOT_ADMITTED_CONSEQUENCE_BROADCAST_NO_URL, msg.NOT_ADMITTED_NEXT_BROADCAST
+    return msg.NOT_ADMITTED_CONSEQUENCE_NO_BROADCAST, msg.NOT_ADMITTED_NEXT_NO_BROADCAST
 
 
 def form_mark(form: FormState | None, error: str | None = None) -> str:

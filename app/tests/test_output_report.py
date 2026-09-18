@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from app.records.slot_record import RecordResults, SlotRecord, SlotStage
 from app.tests.conftest import build_config, build_slot
 from app.tests.conftest import build_planned as build_planned_object
 from app.ui import messages_ru as msg
+from app.pipeline.runner import decide_exit
 from app.version import APP_VERSION
 
 STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
@@ -47,7 +49,10 @@ STREAM_URL: str = "rtmp://a.rtmp.youtube.com/live2"
 # Пример из ТЗ §5.6: итог и ошибки сверху, справка ниже, пустых разделов нет.
 TZ_SAMPLE_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 13-09-2026 12:00
 
-Итог: опубликовано 2, исправлено 1, уже стояло 1, не допущено 0, не публиковали 3, ошибок 1. Файл ключей: keystreams\\keys.txt
+Итог по эфирам (всего 5): опубликовано 2, исправлено 1, уже стояло 1, не допущено 0, ошибок 1.
+Слоты вне работы: 3 — время старта уже прошло 1, до старта меньше 60 минут 1, нет канала для языка en 1.
+Код выхода 1 — не всё выполнено: ошибок по эфирам 1, ключ не дошёл до стримера 1.
+Файл ключей: keystreams\\keys.txt
 
 ## Ключ не дошёл до стримера
 - 18-09-2026 19:00 uk -> Канал UA — форма не подтвердила запись ответа (notConfirmed); эфир на канале стоит — передайте ключ стримеру из keys.txt вручную
@@ -77,13 +82,14 @@ TZ_SAMPLE_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 13-09-2026 12:
 
 EMPTY_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00
 
-Итог: опубликовано 0, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0.
+Итог по эфирам (всего 0): опубликовано 0, исправлено 0, уже стояло 0, не допущено 0, ошибок 0.
+Код выхода 0 — выполнено всё.
 """
 
 DRY_RUN_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00 (dry-run)
 Внимание: Площадка — заглушка
 
-Итог: опубликуем 1, исправим 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0.
+Итог по эфирам (всего 1): опубликуем 1, исправим 0, уже стояло 0, не допущено 0, ошибок 0.
 
 ## Создано (1)
 - 17-03-2027 19:00 uk -> Test UA — эфира нет, будет создан — не выполнено (dry-run)
@@ -91,7 +97,9 @@ DRY_RUN_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00
 
 STATUS_REPORT: str = f"""# Planer {APP_VERSION} — отчёт 16-03-2027 12:00
 
-Итог: уже стояло 1, ошибок 1. Файл ключей: keystreams\\keys.txt
+Итог по эфирам (всего 1): уже стояло 1, ошибок 0.
+Код выхода 1 — не всё выполнено: ошибок каналов и файлов планера 1.
+Файл ключей: keystreams\\keys.txt
 
 ## Ошибки
 - Test RU — YouTube: {msg.YOUTUBE_REASON_TEXT['quotaExceeded']} (quotaExceeded)
@@ -154,11 +162,13 @@ def test_render_matches_tz_structure() -> None:
         ],
         keys_file_path="keystreams\\keys.txt",
     )
+    report = replace(report, run_exit=decide_exit(report, undelivered=1))
     assert render_report(report) == TZ_SAMPLE_REPORT
 
 
 def test_empty_sections_are_not_printed() -> None:
-    assert render_report(RunReport(RunMode.FULL, "16-03-2027 12:00")) == EMPTY_REPORT
+    report: RunReport = RunReport(RunMode.FULL, "16-03-2027 12:00")
+    assert render_report(replace(report, run_exit=decide_exit(report))) == EMPTY_REPORT
 
 
 def test_dry_run_marks_title_and_every_outcome() -> None:
@@ -181,7 +191,7 @@ def test_status_report_structure() -> None:
         ],
         keys_file_path="keystreams\\keys.txt",
     )
-    assert render_report(report) == STATUS_REPORT
+    assert render_report(replace(report, run_exit=decide_exit(report))) == STATUS_REPORT
 
 
 def test_orphans_section_appears_only_when_present() -> None:
@@ -219,7 +229,9 @@ def test_matched_fixed_ambiguous_and_planer_error_texts() -> None:
     assert "несколько эфиров на эту минуту без маркера планера" in text
     assert "у найденного эфира нет привязанного потока" in text
     assert "журнал" not in text and "повторная отправка" not in text and "создан заново" not in text
-    assert text.splitlines()[2] == "Итог: опубликовано 1, исправлено 1, уже стояло 1, не допущено 0, не публиковали 0, ошибок 2."
+    assert text.splitlines()[2] == (
+        "Итог по эфирам (всего 5): опубликовано 1, исправлено 1, уже стояло 1, не допущено 0, ошибок 2."
+    )
     assert "✅" not in text and "❌" not in text
 
 
@@ -269,7 +281,7 @@ def test_not_delivered_section_only_when_form_failed() -> None:
         ],
     )
     lines: list[str] = render_report(failed).splitlines()
-    assert lines[2] == "Итог: опубликовано 2, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0."
+    assert lines[2] == "Итог по эфирам (всего 2): опубликовано 2, исправлено 0, уже стояло 0, не допущено 0, ошибок 0."
     assert lines[4] == "## Ключ не дошёл до стримера"
     assert lines[5].startswith("- 18-03-2027 19:00 uk -> Test UA — в форме нет нужного варианта ответа (18.03.2027)")
     assert "## Создано (2)" in lines
@@ -319,6 +331,8 @@ def test_totals_are_counted_once_for_report_and_console() -> None:
         skipped=0,
         errors=1,              # не допущенный — не ошибка
         not_admitted=1,
+        broadcasts=5,
+        failures=0,
     )
 
 
@@ -481,14 +495,20 @@ def test_not_admitted_section_goes_right_after_not_delivered_and_before_errors()
             _slot_outcome(OutcomeKind.CREATED, form=FormState.FAILED, form_error="notConfirmed: HTTP 200"),
             _slot_outcome(
                 OutcomeKind.NOT_ADMITTED, handle="@nick", date="18-03-2027", time="20:00", language="en",
-                admission_texts=("в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» — нужен владельцу формы",),
+                admission_texts=("в форме в вопросе «Время стрима ( Stream time )» нет варианта «18.03.2027»",),
+                admission_actions=(msg.ADMISSION_ACTION_MISSING_OPTION,),
                 broadcast_url="https://www.youtube.com/watch?v=qJjIZCbP89s",
             ),
             _slot_outcome(
                 OutcomeKind.NOT_ADMITTED, account_name="Українка Я", handle="@Ukrainian_girl25",
-                admission_texts=(msg.ADMISSION_CHANNEL_TEXT["refused"],), is_channel_ready=False,
+                admission_texts=(msg.ADMISSION_CHANNEL_PROBLEM["refused"],),
+                admission_actions=(msg.ADMISSION_CHANNEL_ACTION["refused"],), is_channel_ready=False,
             ),
-            _slot_outcome(OutcomeKind.NOT_ADMITTED, admission_texts=("форма не прочиталась: нет скрипта",)),
+            _slot_outcome(
+                OutcomeKind.NOT_ADMITTED,
+                admission_texts=(msg.ADMISSION_FORM_UNREADABLE.format(text="нет скрипта"),),
+                admission_actions=(msg.ADMISSION_ACTION_FORM_UNREADABLE,),
+            ),
             PairOutcome(
                 OutcomeKind.ERROR, account_name="Українка Я", handle="@Ukrainian_girl25",
                 error=OutcomeError(origin="youtube", code="channelHandleMismatch", message="полный текст отказа"),
@@ -497,21 +517,28 @@ def test_not_admitted_section_goes_right_after_not_delivered_and_before_errors()
     )
     text: str = render_report(report)
     lines: list[str] = text.splitlines()
+    # отказ канала — строка без слота: в «Ошибки» он есть, но в счёт эфиров не входит (его эфиры — «не допущено»)
     assert lines[2] == (
-        "Итог: опубликовано 1, исправлено 0, уже стояло 0, не допущено 3, не публиковали 0, ошибок 1."
+        "Итог по эфирам (всего 4): опубликовано 1, исправлено 0, уже стояло 0, не допущено 3, ошибок 0."
     )
     assert text.index("## Ключ не дошёл до стримера") < text.index("## Не допущено к публикации (3)") < text.index(
         "## Ошибки"
     )
     assert (
-        "- 18-03-2027 20:00 en -> Test UA @nick — в форме нет варианта «Время стрима ( Stream time ): 18.03.2027» "
-        "— нужен владельцу формы; эфир на канале: https://www.youtube.com/watch?v=qJjIZCbP89s"
+        "- 18-03-2027 20:00 en -> Test UA @nick — в форме в вопросе «Время стрима ( Stream time )» нет варианта "
+        "«18.03.2027»: эфир на канале есть (https://www.youtube.com/watch?v=qJjIZCbP89s), но не исправлялся, "
+        "ключ стримеру не передан. Добавьте вариант в форму — планер передаст ключ на следующем запуске."
     ) in lines
     assert (
-        "- 17-03-2027 19:00 uk -> Українка Я @Ukrainian_girl25 — не тот канал; "
-        "канал не подтверждён — эфиры на нём не проверялись"
+        "- 17-03-2027 19:00 uk -> Українка Я @Ukrainian_girl25 — канал не подтверждён: при входе выбран другой канал "
+        "(подробности — в строке ошибки канала): эфиры на канале не проверялись, ключ стримеру не передан. "
+        "При входе выберите в браузере нужный канал — планер проверит канал на следующем запуске."
     ) in lines
-    assert "- 17-03-2027 19:00 uk -> Test UA — форма не прочиталась: нет скрипта; эфира на канале нет" in lines
+    assert (
+        "- 17-03-2027 19:00 uk -> Test UA — форма ключей не прочиталась (нет скрипта): эфир не создан, ключ стримеру "
+        "не передан. Проверьте, что форма открывается по ссылке из пакета — планер создаст эфир на следующем запуске."
+    ) in lines
+    assert "нужен владельцу формы" not in text
     assert sum(1 for line in lines if "полный текст отказа" in line) == 1
 
 

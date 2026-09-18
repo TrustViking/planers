@@ -188,7 +188,10 @@ def _not_admitted(day: int, hour: int, language: str, channel: ChannelConfig, br
     """Эфир стоит на канале, но форма его не принимает: нет варианта даты."""
     item: PlannedBroadcast = _found_key(day, hour, language, channel, broadcast_id, key)
     item.admission_reasons = (
-        AdmissionReason(AdmissionKind.FORM_FIELD, "missingOption", "date", "Время стрима ( Stream time ): 18.09.2026"),
+        AdmissionReason(
+            AdmissionKind.FORM_FIELD, "missingOption", "date", "Время стрима ( Stream time ): 18.09.2026",
+            question="Время стрима ( Stream time )", value="18.09.2026",
+        ),
     )
     return item
 
@@ -196,8 +199,7 @@ def _not_admitted(day: int, hour: int, language: str, channel: ChannelConfig, br
 def test_not_admitted_key_says_why_it_was_not_sent() -> None:
     item: PlannedBroadcast = _not_admitted(18, 20, "en", UA, "qJjIZCbP89s", "wwww-wwww-wwww-wwww-wwww")
     assert form_status_text(item) == (
-        "НЕ отправлен: не допущено — в форме нет варианта «Время стрима ( Stream time ): 18.09.2026» "
-        "— нужен владельцу формы"
+        "НЕ отправлен: не допущено — в форме в вопросе «Время стрима ( Stream time )» нет варианта «18.09.2026»"
     )
     row = key_row_from_planned(item)
     assert (row.stream_key, row.broadcast_url) == ("wwww-wwww-wwww-wwww-wwww", "https://www.youtube.com/watch?v=qJjIZCbP89s")

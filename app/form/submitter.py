@@ -126,7 +126,7 @@ class GoogleFormSender:
         if failure is not None:
             raise failure
         form: KeyForm = self._forms[spec.url]
-        return form if form.spec == spec else KeyForm.build(spec, form.structure)
+        return form if form.spec == spec else form.for_spec(spec)
 
     def send(self, planned: PlannedBroadcast) -> FormSendResult:
         """Ответы не строятся здесь: берутся готовые у объекта (key_form, form_answers)."""

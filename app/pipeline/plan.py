@@ -9,8 +9,8 @@
 допущен ли он к публикации (admit) — единственное место этого правила.
 Сравнение идёт между двумя BroadcastSpec — «как должно быть» и «как есть», — поэтому
 нормализация и обрезка применяются к обеим сторонам по построению. Сверяется всё, что планер
-диктует площадке; какие расхождения планер исправляет, а о каких только сообщает, — FIXABLE_FIELDS
-и REPORTED_FIELDS ниже, больше нигде поля не делятся.
+диктует площадке; какие расхождения планер исправляет (и каким вызовом площадки), а о каких только
+сообщает, — FIX_CALLS / FIXABLE_FIELDS и REPORTED_FIELDS ниже, больше нигде поля не делятся.
 """
 from __future__ import annotations
 
@@ -66,17 +66,26 @@ class ChangedField(str, Enum):
     LATENCY = "latency"
 
 
+class FixCall(str, Enum):
+    """Вызов площадки, которым исправляется поле; при правке эфира зовутся только вызовы полей, что разошлись."""
+
+    BROADCAST = "broadcast"    # liveBroadcasts.update (название, описание; время и категория идут с ними)
+    VIDEO = "video"            # videos.update — проход настроек видео (apply_video_settings)
+    STREAM = "stream"          # liveStreams.update — метка потока (set_stream_marker)
+    THUMBNAIL = "thumbnail"    # thumbnails.set
+
+
+# Исправимые поля и вызов, которым каждое исправляется, — один источник.
 # Расхождение — решение UPDATE: планер приводит эфир к пакету.
-FIXABLE_FIELDS: Final[frozenset[ChangedField]] = frozenset(
-    {
-        ChangedField.TITLE,
-        ChangedField.DESCRIPTION,
-        ChangedField.CATEGORY,
-        ChangedField.PRIVACY,
-        ChangedField.MARKER,
-        ChangedField.THUMBNAIL,
-    }
-)
+FIX_CALLS: Final[dict[ChangedField, FixCall]] = {
+    ChangedField.TITLE: FixCall.BROADCAST,
+    ChangedField.DESCRIPTION: FixCall.BROADCAST,
+    ChangedField.CATEGORY: FixCall.VIDEO,
+    ChangedField.PRIVACY: FixCall.VIDEO,
+    ChangedField.MARKER: FixCall.STREAM,
+    ChangedField.THUMBNAIL: FixCall.THUMBNAIL,
+}
+FIXABLE_FIELDS: Final[frozenset[ChangedField]] = frozenset(FIX_CALLS)
 # Расхождение решения не меняет, но доходит до владельца: лог, «внимание:» в консоли, отчёт.
 # Эти поля живут в contentDetails эфира, а liveBroadcasts.update шлёт только snippet
 # (BROADCAST_UPDATE_PARTS): contentDetails у update требует monitorStream. Гонять их через UPDATE
@@ -121,14 +130,17 @@ class AdmissionKind(str, Enum):
 class AdmissionReason:
     """Почему объект не допущен к публикации. text — для владельца, без оформления (его делает отчёт):
 
-    FORM_FIELD — «вопрос: значение» (MissingAnswer.text); FORM_UNREADABLE — сообщение FormError;
-    CHANNEL — короткая причина по статусу; полный текст отказа канала остаётся в объекте Channel.
+    FORM_FIELD — «вопрос: значение» (MissingAnswer.text), вопрос и значение — ещё и по отдельности;
+    FORM_UNREADABLE — сообщение FormError; CHANNEL — короткая причина по статусу; полный текст отказа
+    канала остаётся в объекте Channel.
     """
 
     kind: AdmissionKind
     code: str            # статус канала / код FormError / missingOption / requiredMissing
     field: str | None    # поле пакета (form.fields) или None
     text: str
+    question: str = ""   # FORM_FIELD: название вопроса формы
+    value: str = ""      # FORM_FIELD missingOption: вариант, которого в форме нет
 
 
 @dataclass(frozen=True)
@@ -378,7 +390,14 @@ class PlannedBroadcast:
             reasons.append(AdmissionReason(AdmissionKind.FORM_UNREADABLE, form_failure.code, None, form_failure.message))
         if self.form_answers is not None:
             reasons.extend(
-                AdmissionReason(AdmissionKind.FORM_FIELD, missing.code, missing.field or None, missing.text)
+                AdmissionReason(
+                    AdmissionKind.FORM_FIELD,
+                    missing.code,
+                    missing.field or None,
+                    missing.text,
+                    question=missing.question,
+                    value=missing.value,
+                )
                 for missing in self.form_answers.missing
             )
         self.admission_reasons = tuple(reasons)
@@ -525,6 +544,15 @@ class PlannedBroadcast:
             results=results,
             snapshot=self._snapshot(),
         )
+
+    @property
+    def fix_calls(self) -> frozenset[FixCall]:
+        """Вызовы площадки, которых требуют расхождения этого эфира (FIX_CALLS)."""
+        return frozenset(FIX_CALLS[name] for name in self.changed_fields)
+
+    def fields_fixed_by(self, call: FixCall) -> tuple[ChangedField, ...]:
+        """Разошедшиеся поля, которые исправляет этот вызов."""
+        return tuple(name for name in self.changed_fields if FIX_CALLS[name] is call)
 
     def mark_fixed(self, fields: tuple[ChangedField, ...]) -> None:
         """Поля, которые этот запуск на площадке действительно исправил; единственное место изменения."""

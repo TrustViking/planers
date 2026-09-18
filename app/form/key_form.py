@@ -12,7 +12,7 @@ KeyForm строится один раз на форму за запуск — �
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime
 from typing import Final
 
@@ -51,11 +51,15 @@ class FormAnswer:
 
 @dataclass(frozen=True)
 class MissingAnswer:
-    """Незаполненное поле: код исхода и текст «вопрос: значение» для владельца."""
+    """Незаполненное поле: код исхода, текст «вопрос: значение» для лога и отказа отправки,
+    вопрос и значение по отдельности — для текста владельцу.
+    """
 
     field: str
     code: str
     text: str
+    question: str = ""     # название вопроса формы (requiredMissing — названия через TITLE_JOINER)
+    value: str = ""        # вариант, которого нет; MISSING_VALUE — пакет не дал текста варианта
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,8 @@ class KeyForm:
     spec: FormSpec
     structure: FormStructure
     questions: Mapping[str, FormQuestion | None]    # поле пакета → вопрос формы; None — нет в пакете или в форме
+    # адреса форм, для которых строка form_pages_by_navigation уже выдана: структура за запуск одна
+    navigation_logged_urls: set[str] = dataclass_field(default_factory=set, compare=False, repr=False)
 
     @classmethod
     def build(cls, spec: FormSpec, structure: FormStructure) -> KeyForm:
@@ -100,6 +106,13 @@ class KeyForm:
             if field in ANSWER_FIELDS:
                 questions[field] = structure.question_by_title(title) if title is not None else None
         return cls(url=spec.url, spec=spec, structure=structure, questions=questions)
+
+    def for_spec(self, spec: FormSpec) -> KeyForm:
+        """Та же прочитанная форма для другого пакета с той же ссылкой: свои названия и варианты,
+        а отметка «строка разделов уже выдана» — общая, строка остаётся одной на форму за запуск.
+        """
+        rebuilt: KeyForm = KeyForm.build(spec, self.structure)
+        return replace(rebuilt, navigation_logged_urls=self.navigation_logged_urls)
 
     @property
     def accepted_dates(self) -> tuple[str, ...]:
@@ -162,9 +175,9 @@ class KeyForm:
             if field in PUBLISHED_FIELDS and values[field] is None:
                 pending.append(question)
                 continue
-            value, problem = self._value_for(field, question, language, start, values)
-            if problem is not None:
-                missing.append(MissingAnswer(field, FORM_CODE_MISSING_OPTION, problem))
+            value, wanted = self._value_for(field, question, language, start, values)
+            if wanted is not None:
+                missing.append(_missing_option(field, question, wanted))
                 unanswerable.append(question)
             elif value is not None:
                 answers.append(FormAnswer(question, value))
@@ -182,7 +195,7 @@ class KeyForm:
         start: datetime,
         values: Mapping[str, str | None],
     ) -> tuple[str | None, str | None]:
-        """(значение, текст незаполненного поля); оба None — поле не отправляется."""
+        """(значение, вариант, которого в форме нет); оба None — поле не отправляется."""
         if field in (FIELD_ACCOUNT_NAME, FIELD_STREAM_KEY):
             return values[field], None
         if field == FIELD_LANGUAGE:
@@ -196,10 +209,10 @@ class KeyForm:
     @staticmethod
     def _option_by_text(question: FormQuestion, wanted: str | None) -> tuple[str | None, str | None]:
         if wanted is None:
-            return None, _missing_text(question, MISSING_VALUE)
+            return None, MISSING_VALUE
         if question.kind is QuestionKind.TEXT or wanted in question.options:
             return wanted, None
-        return None, _missing_text(question, wanted)
+        return None, wanted
 
     def _option_by_date(self, question: FormQuestion, start: datetime) -> tuple[str | None, str | None]:
         """Вариант «13.09.2026 Дата стрима …» опознаётся по началу текста (§7.5 п.3)."""
@@ -209,20 +222,20 @@ class KeyForm:
         for option in question.options:
             if option.startswith(wanted):
                 return option, None
-        return None, _missing_text(question, wanted)
+        return None, wanted
 
     @staticmethod
     def _option_by_url(question: FormQuestion, stream_url: str) -> tuple[str | None, str | None]:
         """Сравнение нормализованное, отправляется текст варианта как он есть в форме."""
         if not stream_url:
-            return None, _missing_text(question, MISSING_VALUE)
+            return None, MISSING_VALUE
         if question.kind is QuestionKind.TEXT:
             return stream_url, None
         wanted: str = _normalize_url(stream_url)
         for option in question.options:
             if _normalize_url(option) == wanted:
                 return option, None
-        return None, _missing_text(question, stream_url)
+        return None, stream_url
 
     def _visited_pages(self, answers: list[FormAnswer]) -> list[int]:
         """Раздел вопроса «Платформа» и раздел, куда ведёт выбранный вариант (§7.5 п.4)."""
@@ -232,15 +245,7 @@ class KeyForm:
         if fork is not None and jump is not None and self._is_page_in_range(jump.page_index):
             self._append_page(pages, fork.question.page_index)
             self._append_page(pages, jump.page_index)
-            LOGGER.info(
-                "form_pages_by_navigation pages=%s entry=%s option=%r section_id=%d page=%s page_count=%d",
-                pages,
-                fork.question.entry_id,
-                fork.value,
-                jump.section_id,
-                jump.page_index,
-                self.structure.page_count,
-            )
+            self._log_navigation(pages, fork, jump)
             return pages
         for answer in answers:
             self._append_page(pages, answer.question.page_index)
@@ -252,6 +257,21 @@ class KeyForm:
             self.structure.page_count,
         )
         return pages
+
+    def _log_navigation(self, pages: list[int], fork: FormAnswer, jump: SectionJump) -> None:
+        """Разделы по переходу — DEBUG, один раз на форму за запуск: у всех ответов одной формы они одни."""
+        if self.url in self.navigation_logged_urls:
+            return
+        self.navigation_logged_urls.add(self.url)
+        LOGGER.debug(
+            "form_pages_by_navigation pages=%s entry=%s option=%r section_id=%d page=%s page_count=%d",
+            pages,
+            fork.question.entry_id,
+            fork.value,
+            jump.section_id,
+            jump.page_index,
+            self.structure.page_count,
+        )
 
     def _fork_answer(self, answers: list[FormAnswer]) -> FormAnswer | None:
         """Вопрос-развилка — тот, у которого есть переходы по вариантам."""
@@ -295,7 +315,8 @@ class KeyForm:
         ]
         if not titles:
             return None
-        return MissingAnswer("", FORM_CODE_REQUIRED_MISSING, TITLE_JOINER.join(titles))
+        joined: str = TITLE_JOINER.join(titles)
+        return MissingAnswer("", FORM_CODE_REQUIRED_MISSING, joined, question=joined)
 
     def _is_date(self, text: str) -> bool:
         try:
@@ -309,5 +330,7 @@ def _normalize_url(value: str) -> str:
     return value.strip().rstrip("/").lower()
 
 
-def _missing_text(question: FormQuestion, wanted: str) -> str:
-    return f"{question.title}: {wanted}"
+def _missing_option(field: str, question: FormQuestion, wanted: str) -> MissingAnswer:
+    return MissingAnswer(
+        field, FORM_CODE_MISSING_OPTION, f"{question.title}: {wanted}", question=question.title, value=wanted
+    )

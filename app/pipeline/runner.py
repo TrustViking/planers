@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum, IntEnum
 from pathlib import Path
@@ -40,11 +40,13 @@ from app.output.keys_file import (
 )
 from app.output.progress import BroadcastStep, NoProgress, RunProgress
 from app.output.report import (
-    ERROR_OUTCOME_KINDS,
+    ExitReason,
+    ExitReasonKind,
     OrphanLine,
     PairOutcome,
     ReportPackageLine,
     RunMode,
+    RunExit,
     RunReport,
     RunTotals,
     build_package_lines,
@@ -73,6 +75,7 @@ from app.pipeline.plan import (
     WARNING_STEP_THUMBNAIL,
     ChangedField,
     Decision,
+    FixCall,
     OutcomeError,
     OutcomeWarning,
     PlannedBroadcast,
@@ -93,7 +96,7 @@ from app.platforms.base import (
     broadcast_url_for,
 )
 
-__all__ = ["ExitCode", "RunMode", "RunOutcome", "RunProblem", "run"]
+__all__ = ["ExitCode", "RunMode", "RunOutcome", "RunProblem", "decide_exit", "run"]
 
 LOGGER = get_logger("runner")
 # OutcomeError.origin для ошибок самого планера и его файлов; тексты — messages_ru.
@@ -102,8 +105,6 @@ ERROR_CODE_KEYS_WRITE: Final[str] = "keysWriteFailed"
 MISSING_FIELD: Final[str] = "-"
 DESCRIPTION_HEAD_CHARS: Final[int] = 80
 # Ключи строк broadcast_expected и broadcast_actual — один набор на обе.
-# liveBroadcasts.update переносит всё исправимое, кроме метки (set_stream_marker) и обложки (thumbnails.set).
-_UPDATE_EXCLUDED: Final[frozenset[ChangedField]] = frozenset({ChangedField.THUMBNAIL, ChangedField.MARKER})
 SPEC_LOG_KEYS: Final[tuple[str, ...]] = (
     "start",
     "marker",
@@ -277,15 +278,8 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         notice=context.notice,
     )
     # ключ, который должен был дойти до стримера и не дошёл, — это код выхода 1 (§7.5)
-    form_pending: bool = context.is_full and any(item.is_key_undelivered for item in selection.planned)
-    # не допущенный объект — тоже код 1: ключ этого эфира стримеру не передан
-    has_errors: bool = (
-        _has_error_outcomes(report.outcomes)
-        or bool(scan.problems)
-        or form_pending
-        or build_totals(report).not_admitted > 0
-    )
-    return _complete(context, report, has_errors=has_errors)
+    undelivered: int = sum(1 for item in selection.planned if item.is_key_undelivered) if context.is_full else 0
+    return _complete(context, report, package_problems=len(scan.problems), undelivered=undelivered)
 
 
 def _log_in(context: _RunContext, channels: Sequence[ChannelConfig]) -> None:
@@ -451,7 +445,7 @@ def _run_status(context: _RunContext) -> RunOutcome:
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
     )
-    return _complete(context, report, has_errors=_has_error_outcomes(outcomes))
+    return _complete(context, report)
 
 
 def _marked_results(context: _RunContext, marked: MarkedBroadcast) -> RecordResults | None:
@@ -466,7 +460,15 @@ def _marked_results(context: _RunContext, marked: MarkedBroadcast) -> RecordResu
     return record.results if record is not None else None
 
 
-def _complete(context: _RunContext, report: RunReport, *, has_errors: bool) -> RunOutcome:
+def _complete(
+    context: _RunContext,
+    report: RunReport,
+    *,
+    package_problems: int = 0,
+    undelivered: int = 0,
+) -> RunOutcome:
+    run_exit: RunExit = decide_exit(report, package_problems=package_problems, undelivered=undelivered)
+    report = replace(report, run_exit=run_exit)
     context.progress.report_started()
     text: str = render_report(report)
     if context.mode is not RunMode.DRY_RUN:
@@ -475,9 +477,33 @@ def _complete(context: _RunContext, report: RunReport, *, has_errors: bool) -> R
     if context.is_full:
         _clean_records(context)
     report_path: Path = write_report(context.paths, text, context.now_local)
-    exit_code: ExitCode = ExitCode.ERRORS if has_errors else ExitCode.OK
-    LOGGER.info("run_report mode=%s outcomes=%d exit_code=%d", report.mode.value, len(report.outcomes), int(exit_code))
-    return RunOutcome(report=report, exit_code=int(exit_code), report_path=report_path)
+    LOGGER.info(
+        "run_report mode=%s outcomes=%d exit_code=%d reason=%s",
+        report.mode.value,
+        len(report.outcomes),
+        run_exit.code,
+        run_exit.log_text,
+    )
+    return RunOutcome(report=report, exit_code=run_exit.code, report_path=report_path)
+
+
+def decide_exit(report: RunReport, *, package_problems: int = 0, undelivered: int = 0) -> RunExit:
+    """Код выхода и его причины — единственное решение; консоль, отчёт и run_report берут их отсюда.
+
+    Код 1: ошибки по эфирам, сбои каналов и файлов, ключ не дошёл до стримера (§7.5),
+    не допущенные к публикации объекты, непрочитанные пакеты.
+    """
+    totals: RunTotals = build_totals(report)
+    counts: tuple[tuple[ExitReasonKind, int], ...] = (
+        (ExitReasonKind.ERRORS, totals.errors),
+        (ExitReasonKind.FAILURES, totals.failures),
+        (ExitReasonKind.KEY_UNDELIVERED, undelivered),
+        (ExitReasonKind.NOT_ADMITTED, totals.not_admitted),
+        (ExitReasonKind.PACKAGES, package_problems),
+    )
+    reasons: tuple[ExitReason, ...] = tuple(ExitReason(kind, count) for kind, count in counts if count > 0)
+    code: ExitCode = ExitCode.ERRORS if reasons else ExitCode.OK
+    return RunExit(code=int(code), reasons=reasons)
 
 
 def _clean_records(context: _RunContext) -> None:
@@ -485,10 +511,6 @@ def _clean_records(context: _RunContext) -> None:
     border: datetime = context.now_utc - timedelta(days=context.config.settings.keep_days)
     removed: int = context.store.delete_started_before(border)
     LOGGER.info("records_cleaned removed=%d", removed)
-
-
-def _has_error_outcomes(outcomes: Sequence[PairOutcome]) -> bool:
-    return any(outcome.kind in ERROR_OUTCOME_KINDS for outcome in outcomes)
 
 
 def _form_error_text(result: FormSendResult) -> str | None:
@@ -750,36 +772,26 @@ class _Executor:
             self._fix(item)
 
     def _fix(self, item: PlannedBroadcast) -> None:
-        """Исправляемый эфир переотправляется целиком: тексты, время и категория, метка, обложка; видимость — в _finish.
-
-        Отличается только обложка, а загрузку обложек канал в этом запуске уже отказал — переотправлять нечего.
-        """
         broadcast_id: str = item.found.broadcast_id if item.found else ""
-        refusal: PlatformError | None = self._platform.thumbnail_refusal(item.channel)
-        if item.changed_fields == (ChangedField.THUMBNAIL,) and refusal is not None:
-            LOGGER.info(
-                'broadcast_fix_skipped slot_id=%s channel="%s" handle=%s broadcast_id=%s reason=%s',
-                item.slot_id,
-                item.channel.account_name,
-                item.channel.handle,
-                broadcast_id,
-                refusal.code,
-            )
-            self._thumbnail_failed(item, refusal)
-            return
         self._resend(item, broadcast_id, with_marker=True)
 
     def _resend(self, item: PlannedBroadcast, broadcast_id: str, *, with_marker: bool) -> None:
-        """Одна переотправка на эфир за запуск: liveBroadcasts.update, метка (если отличалась), обложка из пакета."""
+        """Одна правка на эфир за запуск: только вызовы, которых требуют расхождения (FIX_CALLS).
+
+        Поля видео (видимость, категория) правит проход настроек видео в _finish.
+        """
         self._resent.add((item.slot_id, item.channel.key))
         self._context.progress.broadcast_step_started(item, BroadcastStep.FIX)
-        self._platform.update_broadcast(item.channel, broadcast_id, item.expected)
-        item.mark_fixed(tuple(name for name in item.changed_fields if name not in _UPDATE_EXCLUDED))
-        if with_marker and ChangedField.MARKER in item.changed_fields and item.found_stream is not None:
+        calls: frozenset[FixCall] = item.fix_calls
+        if FixCall.BROADCAST in calls:
+            self._platform.update_broadcast(item.channel, broadcast_id, item.expected)
+            item.mark_fixed(item.fields_fixed_by(FixCall.BROADCAST))
+        if with_marker and FixCall.STREAM in calls and item.found_stream is not None:
             # ручной эфир усыновлён: со следующего запуска видно, что ключ уходил стримеру
             self._platform.set_stream_marker(item.channel, item.found_stream.stream_id, item.expected.marker)
-            item.mark_fixed((ChangedField.MARKER,))
-        self._set_thumbnail(item, broadcast_id)
+            item.mark_fixed(item.fields_fixed_by(FixCall.STREAM))
+        if FixCall.THUMBNAIL in calls:
+            self._set_thumbnail(item, broadcast_id)
         LOGGER.info(
             'broadcast_updated slot_id=%s channel="%s" handle=%s broadcast_id=%s fields=%s',
             item.slot_id,
@@ -884,8 +896,7 @@ class _Executor:
             self._thumbnail_failed(item, error)
             return
         item.remember_thumbnail(broadcast_id, self._context.clock())
-        if ChangedField.THUMBNAIL in item.changed_fields:
-            item.mark_fixed((ChangedField.THUMBNAIL,))
+        item.mark_fixed(item.fields_fixed_by(FixCall.THUMBNAIL))
 
     @staticmethod
     def _thumbnail_failed(item: PlannedBroadcast, error: PlatformError) -> None:
@@ -897,8 +908,8 @@ class _Executor:
             error.code,
         )
         item.warn(OutcomeWarning(WARNING_STEP_THUMBNAIL, error.code, error.message))
-        if ChangedField.THUMBNAIL in item.changed_fields:
-            item.mark_unfixed(ChangedField.THUMBNAIL)
+        for name in item.fields_fixed_by(FixCall.THUMBNAIL):
+            item.mark_unfixed(name)
 
     def _preview(self, item: PlannedBroadcast) -> bytes | None:
         """Случайное превью слота (§5.1) — если planer.json велит ставить превью и в слоте они есть."""

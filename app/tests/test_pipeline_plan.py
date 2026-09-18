@@ -376,7 +376,10 @@ def test_date_without_option_is_a_form_field_reason(tmp_path: Path) -> None:
     item: PlannedBroadcast = _admission_item("en", datetime(2027, 3, 18, 20, 0, tzinfo=timezone(timedelta(hours=2))))
     item.admit(_channel_object(item, ChannelStatus.READY), training_key_form(tmp_path), None)
     assert item.admission_reasons == (
-        AdmissionReason(AdmissionKind.FORM_FIELD, "missingOption", "date", "Время стрима ( Stream time ): 18.03.2027"),
+        AdmissionReason(
+            AdmissionKind.FORM_FIELD, "missingOption", "date", "Время стрима ( Stream time ): 18.03.2027",
+            question="Время стрима ( Stream time )", value="18.03.2027",
+        ),
     )
     assert item.decision is Decision.NOT_ADMITTED
 

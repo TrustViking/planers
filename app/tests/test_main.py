@@ -103,7 +103,8 @@ def test_run_without_flags_is_the_full_cycle(
     out: str = capsys.readouterr().out
     lines: list[str] = out.splitlines()
     assert re.fullmatch(rf"Planer {re.escape(APP_VERSION)} — \d{{2}}-\d{{2}}-\d{{4}} \d{{2}}:\d{{2}}", lines[0])
-    assert lines.count("Итог: опубликовано 1, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0") == 1
+    assert lines.count("Итог по эфирам (всего 1): опубликовано 1, исправлено 0, уже стояло 0, не допущено 0, ошибок 0.") == 1
+    assert lines.count("Код выхода 0 — выполнено всё.") == 1
     assert sum(1 for line in lines if line.startswith("Planer ")) == 1          # шапка одна на прогон
     assert f"  {UA} {UA_HANDLE} ({UA_GOOGLE})" in lines
     assert "    01-01-2099  19:00  uk  ****-0000  передан в форму" in lines
@@ -146,7 +147,7 @@ def test_full_run_prints_title_then_progress_then_blank_line_then_total(
         "  " + msg.PROGRESS_REPORT,
     ]
     assert lines[1 : 1 + len(progress)] == progress
-    total: int = lines.index("Итог: опубликовано 2, исправлено 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0")
+    total: int = lines.index("Итог по эфирам (всего 2): опубликовано 2, исправлено 0, уже стояло 0, не допущено 0, ошибок 0.")
     assert total == len(progress) + 2 and lines[total - 1] == ""
 
 
@@ -168,7 +169,7 @@ def test_dry_run_prints_channel_and_package_progress_but_no_actions(
     assert "  " + msg.PROGRESS_PACKAGES_READ.format(packages=1, slots_total=1, slots_mine=1) in lines
     assert not [line for line in lines if "создаю эфир" in line or "исправляю эфир" in line or "отправляю ключ" in line]
     assert lines.index("  " + msg.PROGRESS_REPORT) < lines.index(
-        "Итог: опубликуем 1, исправим 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0"
+        "Итог по эфирам (всего 1): опубликуем 1, исправим 0, уже стояло 0, не допущено 0, ошибок 0."
     )
 
 
@@ -293,7 +294,7 @@ def test_missing_token_logs_in_before_any_channel_is_read(
     ) in out
     # шапка — до входа, итог — после
     assert out.index(f"Planer {APP_VERSION} — ") < out.index(msg.AUTH_STARTING.format(**UA_NAMES))
-    assert out.index("Google hasn't verified this app") < out.index("Итог: ")
+    assert out.index("Google hasn't verified this app") < out.index("Итог по эфирам ")
     ok_line: str = msg.AUTH_OK.format(
         **UA_NAMES, title=UA, youtube_handle=UA_HANDLE, youtube_channel_id=f"UCfake{UA_KEY}"
     )
@@ -333,8 +334,20 @@ def test_channel_handle_mismatch_fails_only_that_channel(
     assert f"  {RU} {RU_HANDLE} ({RU_GOOGLE})" in lines
     # полный текст отказа — один раз на канал; объект канала — коротко во «Внимание»
     assert sum(1 for line in lines if line.startswith("  ошибка: Канал UA @KanalUA — YouTube: channelHandleMismatch (")) == 1
-    assert "  не допущено: 01-01-2099 19:00 uk -> Канал UA @KanalUA — не тот канал; " + msg.NOT_ADMITTED_TAIL_CHANNEL in lines
-    assert "не допущено 1" in lines[lines.index(next(line for line in lines if line.startswith("Итог: ")))]
+    assert (
+        "  не допущено: 01-01-2099 19:00 uk -> Канал UA @KanalUA — "
+        + msg.ADMISSION_CHANNEL_PROBLEM["refused"]
+        + ": "
+        + msg.NOT_ADMITTED_CONSEQUENCE_CHANNEL
+        + ". При входе выберите в браузере нужный канал — "
+        + msg.NOT_ADMITTED_NEXT_CHANNEL
+        + "."
+    ) in lines
+    total: str = next(line for line in lines if line.startswith("Итог по эфирам "))
+    # отказ канала не считается второй раз ошибкой: эфиров два — один опубликован, один не допущен
+    assert total == "Итог по эфирам (всего 2): опубликовано 1, исправлено 0, уже стояло 0, не допущено 1, ошибок 0."
+    exit_line: str = lines[lines.index(total) + 1]
+    assert exit_line == "Код выхода 1 — не всё выполнено: ошибок каналов и файлов планера 1, не допущено к публикации 1."
     assert [call.channel_id for call in fake_platform_in_main.created] == [RU_KEY]
     assert not (planer_root / "app").exists()                          # файлов привязок больше нет
 
@@ -354,7 +367,7 @@ def test_dry_run_on_valid_package(
     assert run_cli(["--dry-run"]) == 0
     captured = capsys.readouterr()
     assert "dry-run" in captured.out.splitlines()[0]
-    assert "Итог: опубликуем 2, исправим 0, уже стояло 0, не допущено 0, не публиковали 0, ошибок 0" in captured.out
+    assert "Итог по эфирам (всего 2): опубликуем 2, исправим 0, уже стояло 0, не допущено 0, ошибок 0." in captured.out
     assert "ОПУБЛИКУЕМ (2)" in captured.out and "КЛЮЧИ СТРИМЕРУ" not in captured.out
     # каналы — в порядке channels.json: сначала UA, потом RU
     assert captured.out.index(f"  {UA} {UA_HANDLE} ({UA_GOOGLE})") < captured.out.index(
@@ -398,7 +411,8 @@ def test_status_writes_keys_file(
     assert len(lines) == len(msg.KEYS_FILE_HEADER) and all(line.startswith("# ") for line in lines)
     out: str = capsys.readouterr().out
     assert out.splitlines()[0].endswith(" — --status: эфиры планера на каналах")
-    assert "Итог: уже стояло 0, ошибок 0" in out.splitlines()
+    assert "Итог по эфирам (всего 0): уже стояло 0, ошибок 0." in out.splitlines()
+    assert "Код выхода 0 — выполнено всё." in out.splitlines()
     assert "=====" not in out                                         # пустые блоки не печатаются
     assert re.search(r"^  ключи +keystreams", out, re.MULTILINE)
 
@@ -423,6 +437,12 @@ def test_undated_broadcast_goes_to_attention_not_to_the_log_console(
     [report_file] = list((planer_root / "logs").glob("*_report.md"))
     assert f"- {warning}" in report_file.read_text(encoding="utf-8").splitlines()
     assert "broadcast_without_start" not in captured.err and "broadcast_without_start" not in captured.out
+    # 5n-A: текст говорит, что эфир есть и что с ним делать, а не «планер его не видит»
+    assert warning == (
+        f"На канале {UA} {UA_HANDLE} есть эфир без даты и времени — «Брифинг без времени». Планер такие эфиры "
+        "со слотами не сверяет и не трогает; если он лишний — удалите его в Студии."
+    )
+    assert "планер его не видит" not in captured.out
 
 
 def test_check_reports_every_channel(

@@ -7,6 +7,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import logging
+from dataclasses import replace
+
 import pytest
 
 from app.form.base import FORM_CODE_MISSING_OPTION, FORM_CODE_REQUIRED_MISSING
@@ -87,6 +90,34 @@ def test_date_without_option_is_missing(form: KeyForm) -> None:
     error = answers.error()
     assert error is not None and error.code == FORM_CODE_MISSING_OPTION
     assert DATE_ENTRY not in _values(answers)
+
+
+def test_missing_option_keeps_question_and_value_apart(form: KeyForm) -> None:
+    """Владельцу вопрос и значение называются по отдельности, не склеенной строкой «вопрос: значение»."""
+    [missing] = _answers(form, start=datetime(2027, 3, 18, 19, 0, tzinfo=KYIV)).missing
+    assert (missing.question, missing.value) == ("Время стрима ( Stream time )", "18.03.2027")
+
+
+def test_pages_by_navigation_are_logged_once_per_form(form: KeyForm, caplog: pytest.LogCaptureFixture) -> None:
+    """Прогон 18-09-2026 14:04: 57 одинаковых строк за запуск — теперь одна, DEBUG; разделы у всех ответов те же."""
+    caplog.set_level(logging.DEBUG, logger="planer")
+    pages: set[tuple[int, ...]] = {_answers(form).pages for _ in range(5)}
+    pages.add(_answers(form, stream_key=None, stream_url=None).pages)
+    assert pages == {(0, 1)}
+    records = [record for record in caplog.records if record.getMessage().startswith("form_pages_by_navigation ")]
+    assert len(records) == 1 and records[0].levelno == logging.DEBUG
+
+
+def test_same_url_for_another_package_does_not_repeat_the_pages_line(
+    form: KeyForm, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Другой пакет с той же ссылкой — своя KeyForm (for_spec), но строка разделов — одна на форму за запуск."""
+    caplog.set_level(logging.DEBUG, logger="planer")
+    other: KeyForm = form.for_spec(replace(form.spec, date_format="%d.%m.%Y"))
+    _answers(form)
+    _answers(other)
+    _answers(form.for_spec(form.spec))
+    assert sum(1 for message in caplog.messages if message.startswith("form_pages_by_navigation ")) == 1
 
 
 def test_time_is_not_a_missing_field(form: KeyForm) -> None:
