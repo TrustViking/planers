@@ -1,9 +1,12 @@
 """Пробник эфиров канала: что YouTube держит в upcoming и почему планер часть из этого не видит.
 
 Запуск из корня репо:
-  .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --channel Osvald.X
-  .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --channel Osvald.X --remove HxTFRJslx2k
-  .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --dump-undated [--channel Osvald.X]
+  .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --channel "@Osvald.X"
+  .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --channel "@Osvald.X" --remove HxTFRJslx2k
+  .\\.venv_planers\\Scripts\\python.exe -m app.tools.broadcast_probe --dump-undated [--channel "@Osvald.X"]
+
+Ник — всегда в кавычках: в PowerShell @имя без кавычек — splatting, и в --channel уходит пустое значение
+(прогон 18-09-2026: --channel @ПашаЭкскаватощик → «expected one argument»).
 
 Список читается с broadcastType=all: видны и постоянные эфиры («Начать эфир сейчас»), которых planer
 не запрашивает. --remove удаляет ровно один эфир по идентификатору и только если у эфира НЕТ времени

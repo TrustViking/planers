@@ -24,6 +24,7 @@ from app.output.report import (
     build_run_warning_lines,
     build_skipped_lines,
     build_totals,
+    build_notice_note_lines,
     build_notice_warning_lines,
     build_warning_lines,
     error_texts,
@@ -363,16 +364,29 @@ def _with_new_key(day: int, decision: Decision) -> PlannedBroadcast:
     return item
 
 
-def test_undated_notices_are_deduplicated_by_channel_and_title() -> None:
-    """Канал за запуск читается не раз: одинаковое замечание — одна строка предупреждения."""
+def test_undated_notices_are_platform_notes_deduplicated_by_channel_and_title() -> None:
+    """Канал за запуск читается не раз: одинаковое замечание — одна строка; в предупреждения не идёт (5n-C)."""
     notice: PlatformNotice = PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, "Test UA", "Брифинг")
     other: PlatformNotice = PlatformNotice(PlatformNoticeKind.UNDATED_BROADCAST, "Test RU", "Брифинг")
-    lines: list[str] = build_notice_warning_lines([notice, other, notice])
+    lines: list[str] = build_notice_note_lines([notice, other, notice])
     assert lines == [
-        msg.WARNING_UNDATED_BROADCAST.format(channel="Test UA", title="Брифинг"),
-        msg.WARNING_UNDATED_BROADCAST.format(channel="Test RU", title="Брифинг"),
+        msg.NOTE_UNDATED_BROADCAST.format(channel="Test UA", title="Брифинг"),
+        msg.NOTE_UNDATED_BROADCAST.format(channel="Test RU", title="Брифинг"),
     ]
-    assert build_warning_lines([], (), [notice]) == lines[:1]
+    assert build_notice_warning_lines([notice, other]) == []
+    assert build_warning_lines([], (), [notice]) == []
+
+
+def test_platform_notes_go_to_the_notes_section_last() -> None:
+    """Строки по каналам — в «Особенности площадки» после общих особенностей; в «Предупреждения» не попадают."""
+    note: str = msg.NOTE_UNDATED_BROADCAST.format(channel="Test UA @ua", title="Брифинг")
+    report: RunReport = RunReport(
+        RunMode.FULL, "16-03-2027 12:00", warnings=[msg.WARNING_LIVE_CHAT], platform_notes=[note]
+    )
+    assert report.notes == [msg.WARNING_LIVE_CHAT, note] and report.run_warnings == []
+    lines: list[str] = render_report(report).splitlines()
+    assert lines[-3:] == [msg.REPORT_SECTION_NOTES, f"- {msg.WARNING_LIVE_CHAT}", f"- {note}"]
+    assert msg.REPORT_SECTION_WARNINGS not in lines
 
 
 def _remembered(item: PlannedBroadcast) -> PlannedBroadcast:

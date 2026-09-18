@@ -42,7 +42,7 @@ OKTAVIAN: dict[str, str] = {
 }
 CHANNEL_ORDER: tuple[str, ...] = ("osvald.x", "oktavian.x")      # ключи каналов в порядке channels.json
 FULL_KEYS: tuple[str, ...] = ("aaaa-bbbb-cccc-dddd-6jty", "aaaa-bbbb-cccc-dddd-3j1j", "aaaa-bbbb-cccc-dddd-9zzz")
-UNDATED_WARNING: str = msg.WARNING_UNDATED_BROADCAST.format(channel="Osvald.X @Osvald.X", title="Брифинг в Конгрессе")
+UNDATED_NOTE: str = msg.NOTE_UNDATED_BROADCAST.format(channel="Osvald.X @Osvald.X", title="Брифинг в Конгрессе")
 RESTORED_WARNING: str = (
     "не можем исправить: 19-03-2027 19:00 uk -> Oktavian.X — автостарт: нужно да, на площадке нет; "
     "через API это не исправляется"
@@ -57,7 +57,6 @@ SAMPLE_CONSOLE: str = f"""Итог по эфирам (всего 4): опубл�
   ключ не дошёл до стримера: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — форма недоступна (HTTP 503)
   вернули к пакету: 18-03-2027 20:00 ru -> Osvald.X @Osvald.X — видимость: было private, стало unlisted
   {RESTORED_WARNING}
-  {UNDATED_WARNING}
 
 =================== ОПУБЛИКОВАЛИ (2) ===================
   Osvald.X @Osvald.X (trustviorel@gmail.com)
@@ -124,7 +123,8 @@ def _sample_report(**overrides: Any) -> RunReport:
             SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "en", title="Russia's 20-Year Hybrid War"),
             SkippedLine(SkipKind.NO_CHANNEL, "18-03-2027", "20:00", "en", title="The Invisible Side of Air"),
         ],
-        warnings=[RESTORED_WARNING, UNDATED_WARNING, msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY],
+        warnings=[RESTORED_WARNING, msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY],
+        platform_notes=[UNDATED_NOTE],
         keys_file_path="keystreams\\keys.txt",
         run_exit=RunExit(1, (ExitReason(ExitReasonKind.KEY_UNDELIVERED, 1),)),
     )
@@ -249,7 +249,8 @@ def test_attention_collects_errors_forms_packages_restored_and_warnings() -> Non
         + " (liveStreamingNotEnabled)"
     ) in attention
     assert "  пакет: broken.bcast — пакет повреждён: не ZIP-архив; файл не тронут" in attention
-    assert f"  {UNDATED_WARNING}" in attention
+    # служебный эфир площадки — особенность площадки: только в отчёте, в консоль не идёт (5n-C)
+    assert UNDATED_NOTE not in text and "служебный эфир" not in text
     # AMBIGUOUS приходит предупреждением со ссылками — строкой ошибки не дублируется
     assert not any("несколько эфиров" in line for line in attention)
     # постоянные особенности площадки — только в отчёте

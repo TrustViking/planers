@@ -263,6 +263,8 @@ class RunReport:
     keys_file_path: str | None = None
     notice: str | None = None
     run_exit: RunExit | None = None   # код выхода и причины; None — отчёт собран не запуском (тесты)
+    # особенности площадки по каналам (служебный эфир без времени старта) — только в отчёт, к notes
+    platform_notes: list[str] = field(default_factory=list)
 
     @property
     def run_warnings(self) -> list[str]:
@@ -271,8 +273,8 @@ class RunReport:
 
     @property
     def notes(self) -> list[str]:
-        """Постоянные особенности площадки из warnings — только в отчёт, разделом в конце."""
-        return [line for line in self.warnings if line in PLATFORM_NOTE_LINES]
+        """Особенности площадки — только в отчёт, разделом в конце: общие (из warnings), затем по каналам."""
+        return [line for line in self.warnings if line in PLATFORM_NOTE_LINES] + self.platform_notes
 
 
 @dataclass(frozen=True)
@@ -479,15 +481,25 @@ def build_run_warning_lines(planned: Sequence[PlannedBroadcast], diagnostics: Se
 
 
 def build_notice_warning_lines(notices: Sequence[PlatformNotice]) -> list[str]:
-    """Замечания площадки: эфиры без времени старта и строки о каналах. Повтор строки — одна строка."""
+    """Замечания площадки о каналах — предупреждения запуска. Повтор строки — одна строка."""
+    lines: dict[str, None] = {}
+    for notice in notices:
+        if notice.kind is PlatformNoticeKind.CHANNEL:
+            lines.setdefault(notice.text, None)
+    return list(lines)
+
+
+def build_notice_note_lines(notices: Sequence[PlatformNotice]) -> list[str]:
+    """Служебные эфиры площадки без времени старта — особенности площадки по каналам (RunReport.platform_notes).
+
+    Владельцу действовать не по чему: эфир заводит YouTube, в Студии он не виден, планер его не трогает.
+    Канал за запуск читается не раз — повтор строки даёт одну строку.
+    """
     lines: dict[str, None] = {}
     for notice in notices:
         if notice.kind is PlatformNoticeKind.UNDATED_BROADCAST:
-            # канал за запуск читается не раз
             channel: str = channel_text(notice.account_name, notice.handle)
-            lines.setdefault(msg.WARNING_UNDATED_BROADCAST.format(channel=channel, title=notice.title), None)
-        elif notice.kind is PlatformNoticeKind.CHANNEL:
-            lines.setdefault(notice.text, None)
+            lines.setdefault(msg.NOTE_UNDATED_BROADCAST.format(channel=channel, title=notice.title), None)
     return list(lines)
 
 
@@ -810,6 +822,7 @@ def _append_status_body(lines: list[str], report: RunReport, totals: RunTotals) 
             if outcome.kind is OutcomeKind.MATCHED
         ],
     )
+    _append_section(lines, msg.REPORT_SECTION_NOTES, report.notes)
 
 
 def _append_section(lines: list[str], header: str, body: list[str]) -> None:

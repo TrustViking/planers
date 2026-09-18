@@ -417,34 +417,47 @@ def test_status_writes_keys_file(
     assert re.search(r"^  ключи +keystreams", out, re.MULTILINE)
 
 
-def test_undated_broadcast_goes_to_attention_not_to_the_log_console(
+def test_service_broadcast_goes_to_platform_notes_not_to_the_console(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
     make_package: PackageFactory,
     make_slot: SlotFactory,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Замечание площадки приходит данными (take_notices): одна строка — и во «Внимание», и в файле отчёта."""
+    """5n-C: служебный эфир площадки без времени старта — строка в «Особенностях площадки» отчёта, и только там."""
     _ready(planer_root)
     make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
     fake_platform_in_main.seed_undated_broadcast(UA, "Брифинг без времени", handle=UA_HANDLE)
     assert run_cli(["--dry-run"]) == 0
     captured = capsys.readouterr()
-    warning: str = msg.WARNING_UNDATED_BROADCAST.format(channel=f"{UA} {UA_HANDLE}", title="Брифинг без времени")
-    lines: list[str] = captured.out.splitlines()
-    attention: int = next(index for index, line in enumerate(lines) if msg.CONSOLE_BLOCK_ATTENTION in line)
-    assert lines[attention + 1] == f"  {warning}"
-    [report_file] = list((planer_root / "logs").glob("*_report.md"))
-    assert f"- {warning}" in report_file.read_text(encoding="utf-8").splitlines()
-    assert "broadcast_without_start" not in captured.err and "broadcast_without_start" not in captured.out
-    # 5n-A: текст говорит, что эфир есть и что с ним делать, а не «планер его не видит»
-    assert warning == (
-        f"На канале {UA} {UA_HANDLE} есть эфир без даты и времени — «Брифинг без времени». Планер такие эфиры "
-        "со слотами не сверяет и не трогает. В Студии, в списке трансляций, этот эфир не виден: его показывает "
-        "только API."
+    note: str = msg.NOTE_UNDATED_BROADCAST.format(channel=f"{UA} {UA_HANDLE}", title="Брифинг без времени")
+    assert note == (
+        f"на канале {UA} {UA_HANDLE} есть служебный эфир площадки без даты и времени — «Брифинг без времени». "
+        "YouTube заводит такой эфир сам при заходе в панель трансляций канала; планер его со слотами не сверяет "
+        "и не трогает, в списке трансляций Студии он не виден"
     )
-    assert "планер его не видит" not in captured.out
-    assert "удалите его в Студии" not in captured.out
+    assert "Брифинг без времени" not in captured.out                     # ни во ВНИМАНИЕ, ни где-либо в консоли
+    [report_file] = list((planer_root / "logs").glob("*_report.md"))
+    report_lines: list[str] = report_file.read_text(encoding="utf-8").splitlines()
+    notes: int = report_lines.index(msg.REPORT_SECTION_NOTES)
+    assert f"- {note}" in report_lines[notes:]
+    assert msg.REPORT_SECTION_WARNINGS not in report_lines
+    assert "broadcast_without_start" not in captured.err and "broadcast_without_start" not in captured.out
+
+
+def test_dated_broadcast_gives_no_platform_note(
+    planer_root: Path,
+    fake_platform_in_main: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    assert run_cli(["--dry-run"]) == 0
+    capsys.readouterr()
+    [report_file] = list((planer_root / "logs").glob("*_report.md"))
+    assert "служебный эфир" not in report_file.read_text(encoding="utf-8")
 
 
 def test_check_reports_every_channel(

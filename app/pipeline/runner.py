@@ -52,6 +52,7 @@ from app.output.report import (
     build_package_lines,
     build_skipped_lines,
     build_mismatch_lines,
+    build_notice_note_lines,
     build_totals,
     build_warning_lines,
     display_path,
@@ -245,7 +246,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         known_slot_ids,
     )
     memory_warnings: list[str] = _bootstrap_records(context, selection.planned)
-    # замечания площадки (эфир без времени старта) — данными, в отчёт и консоль одним путём
+    # замечания площадки — данными: о каналах — в предупреждения, служебные эфиры — в особенности площадки
     notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
     keys_path: Path | None = None
     extra_outcomes: list[PairOutcome] = []
@@ -276,6 +277,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         ),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
+        platform_notes=build_notice_note_lines(notices),
     )
     # ключ, который должен был дойти до стримера и не дошёл, — это код выхода 1 (§7.5)
     undelivered: int = sum(1 for item in selection.planned if item.is_key_undelivered) if context.is_full else 0
@@ -444,6 +446,7 @@ def _run_status(context: _RunContext) -> RunOutcome:
         warnings=build_warning_lines((), (), notices, [*context.channel_warnings, *context.store.take_warnings()]),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
+        platform_notes=build_notice_note_lines(notices),
     )
     return _complete(context, report)
 

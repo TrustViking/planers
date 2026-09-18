@@ -71,7 +71,8 @@ BIND_PARTS: Final[str] = "id,contentDetails"
 VIDEO_SETTINGS_PARTS: Final[str] = "snippet,status"   # один проход: язык, категория, аудитория
 VIDEO_FACTS_PARTS: Final[str] = "snippet,status,contentDetails,liveStreamingDetails"
 AGE_RESTRICTED_RATING: Final[str] = "ytAgeRestricted"
-# Постоянный эфир канала: заводит сама площадка, времени старта у него нет, удалить нельзя.
+# Флаг постоянного эфира в snippet: только факт для строки лога broadcast_without_start, не основание решения —
+# у служебных эфиров «Начать эфир сейчас» он приходит false (выгрузки 18-09-2026); признак — нет времени старта.
 DEFAULT_BROADCAST_FLAG: Final[str] = "isDefaultBroadcast"
 RFC3339_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
 INGESTION_TYPE: Final[str] = "rtmp"
@@ -152,6 +153,8 @@ STREAM_INSERT_OPERATION: Final[str] = "liveStreams.insert"
 # несозданным, эфир доделает следующий запуск. Явный отказ сервера (лимит частоты) повторяется как у всех.
 CREATING_OPERATIONS: Final[frozenset[str]] = frozenset({BROADCAST_INSERT_OPERATION, STREAM_INSERT_OPERATION})
 # Пара (операция, причина) главнее причины: forbidden у обложки — канал не подтверждён, у прочих — разовый отказ.
+# Таблица пар спрашивается раньше правила создающих вызовов (CREATING_OPERATIONS): пары с liveBroadcasts.insert
+# и liveStreams.insert сюда не добавлять — иначе защита от повтора создающего вызова молча отключится.
 OPERATION_REASON_BEHAVIORS: Final[dict[tuple[str, str], ErrorBehavior]] = {
     (THUMBNAIL_OPERATION, "forbidden"): ErrorBehavior.OPERATION,
 }
@@ -995,23 +998,15 @@ def _raw_or_missing(raw: dict[str, Any], key: str) -> Any:
 
 
 def _broadcast_from_item(item: dict[str, Any], channel: ChannelConfig) -> UpcomingBroadcast | PlatformNotice | None:
-    """Эфир без разбираемого времени старта сверять не с чем: вместо эфира — замечание для владельца.
+    """Эфир без разбираемого времени старта сверять не с чем: вместо эфира — замечание площадки.
 
-    Постоянный эфир канала (isDefaultBroadcast) владелец не удалит и не исправит: без замечания, None.
+    Это служебный эфир «Начать эфир сейчас», который YouTube заводит сам; признак — только отсутствие времени
+    старта, флаг isDefaultBroadcast решения не меняет (у таких эфиров он false).
     """
     snippet: dict[str, Any] = _mapping(item, "snippet")
     broadcast_id: str = _text(item, "id")
     start_text: Any = snippet.get("scheduledStartTime")
     start_utc: datetime | None = _parse_start(start_text)
-    if start_utc is None and _optional_bool(snippet, DEFAULT_BROADCAST_FLAG):
-        LOGGER.info(
-            'default_broadcast_skipped channel="%s" handle=%s broadcast_id=%s title=%r',
-            channel.account_name,
-            channel.handle,
-            broadcast_id,
-            snippet.get("title"),
-        )
-        return None
     if start_utc is None:
         # лог — только диагностика; владельцу факт уходит данными (PlatformNotice → take_notices)
         _log_undated_broadcast(item, channel, start_text)
