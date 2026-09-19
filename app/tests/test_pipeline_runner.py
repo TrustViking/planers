@@ -2114,3 +2114,120 @@ def test_broadcast_of_a_past_slot_is_not_an_orphan(
     assert outcome.report is not None
     assert [(orphan.date, orphan.time) for orphan in outcome.report.orphans] == [("16-03-2027", "09:00")]
     assert any(line.kind is SkipKind.PAST for line in outcome.report.skipped)
+
+
+# --- предстартовая проверка дат формы (задача 5n-D)
+
+FORM_DATES_WARNING_18_03: str = msg.WARNING_FORM_DATES_MISSING.format(
+    dates="18-03-2027", question=FORM_SPEC["fields"]["date"]
+)
+
+
+class _ProgressAwareLogins(_LoginPhase):
+    """Фаза входов, которая запоминает, какие строки прогресса уже прозвучали к её началу."""
+
+    def __init__(self, platform: FakePlatform, progress: RecordingProgress) -> None:
+        super().__init__(platform)
+        self._progress: RecordingProgress = progress
+        self.progress_before: list[list[object]] = []
+
+    def log_in_needed(self, channels: Sequence[ChannelConfig]) -> None:
+        self.progress_before.append(self._progress.names())
+        super().log_in_needed(channels)
+
+
+def test_missing_form_dates_give_one_warning_before_logins_and_platform(
+    tmp_path: Path,
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    make_package(planer_paths.bcast_dir, slots=_nick_slots(make_slot))
+    sender: FakeFormSender = FakeFormSender(platform=fake_platform, key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    progress: RecordingProgress = RecordingProgress(fake_platform)
+    logins: _ProgressAwareLogins = _ProgressAwareLogins(fake_platform, progress)
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(NICK_CONFIG_CHANNELS), planer_paths, fake_platform, sender, now, rng,
+        progress=progress, logins=logins,
+    )
+    [checked] = [call for call in progress.calls if call[0] == "form_dates_checked"]
+    assert checked == ("form_dates_checked", FORM_SPEC["url"], ("18.03.2027",), 0)   # до list_upcoming
+    assert logins.progress_before == [["packages_read", "form_dates_checked"]]        # до фазы входов
+    assert outcome.report is not None
+    assert outcome.report.run_warnings.count(FORM_DATES_WARNING_18_03) == 1
+    assert f"- {FORM_DATES_WARNING_18_03}" in _report_text(outcome).splitlines()
+    assert FORM_DATES_WARNING_18_03 in render_console(outcome.report, root=planer_paths.root)
+    # допуск и код выхода — как без проверки: объект 18-03 не допущен сам, остальное опубликовано
+    [blocked] = [item for item in outcome.report.outcomes if item.kind is OutcomeKind.NOT_ADMITTED]
+    assert (blocked.date, blocked.time) == ("18-03-2027", "20:00")
+    assert [call.marker for call in fake_platform.created] == ["17-03-2027_1900_en", "17-03-2027_2100_en"]
+    assert outcome.exit_code == ExitCode.ERRORS
+
+
+def test_covered_form_dates_give_no_warning(
+    tmp_path: Path,
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    make_package(planer_paths.bcast_dir, slots=_nick_slots(make_slot))
+    key_form: KeyForm = _form_with_dates(tmp_path, "17.03.2027", "18.03.2027")
+    sender: FakeFormSender = FakeFormSender(platform=fake_platform, key_form=key_form)
+    progress: RecordingProgress = RecordingProgress(fake_platform)
+    outcome: RunOutcome = run(
+        RunMode.FULL, make_config(NICK_CONFIG_CHANNELS), planer_paths, fake_platform, sender, now, rng,
+        progress=progress,
+    )
+    assert ("form_dates_checked", FORM_SPEC["url"], (), 0) in progress.calls
+    assert outcome.report is not None
+    assert not [line for line in outcome.report.run_warnings if "в форме ключей нет дат" in line]
+    assert outcome.exit_code == ExitCode.OK and len(fake_platform.created) == 3
+
+
+def test_one_form_of_several_pairs_is_checked_once(
+    tmp_path: Path,
+    planer_paths: PlanerPaths,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    make_package(
+        planer_paths.bcast_dir,
+        slots=[make_slot("17-03-2027", "19:00", "uk"), make_slot("17-03-2027", "19:00", "ru"),
+               make_slot("18-03-2027", "19:00", "uk")],
+    )
+    sender: FakeFormSender = FakeFormSender(platform=fake_platform, key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    progress: RecordingProgress = RecordingProgress(fake_platform)
+    outcome: RunOutcome = run(
+        RunMode.DRY_RUN, make_config(), planer_paths, fake_platform, sender, now, rng, progress=progress
+    )
+    assert [call for call in progress.calls if call[0] == "form_dates_checked"] == [
+        ("form_dates_checked", FORM_SPEC["url"], ("18.03.2027",), 0)
+    ]
+    assert outcome.report is not None
+    assert outcome.report.run_warnings.count(FORM_DATES_WARNING_18_03) == 1
+
+
+def test_status_does_not_check_form_dates(
+    tmp_path: Path,
+    planer_paths: PlanerPaths,
+    make_config: ConfigFactory,
+    fake_platform: FakePlatform,
+    now: datetime,
+    rng: random.Random,
+) -> None:
+    sender: FakeFormSender = FakeFormSender(platform=fake_platform, key_form=_form_with_dates(tmp_path, "17.03.2027"))
+    progress: RecordingProgress = RecordingProgress(fake_platform)
+    run(RunMode.STATUS, make_config(), planer_paths, fake_platform, sender, now, rng, progress=progress)
+    assert "form_dates_checked" not in progress.names()

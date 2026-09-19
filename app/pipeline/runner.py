@@ -29,7 +29,7 @@ from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import format_datetime_text
 from app.core.retention import cleanup_expired
 from app.form.base import FormError, FormSender, FormSendResult
-from app.form.key_form import FormAnswers, KeyForm
+from app.form.key_form import MISSING_VALUE, DateCoverage, FormAnswers, KeyForm
 from app.observability.logging_setup import get_logger, mask_stream_key
 from app.output.keys_file import (
     KeyRow,
@@ -235,6 +235,8 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         context.platform.limits,
         context.now_utc,
     )
+    # даты формы — по готовым формам, до входов и до площадки: одна строка на форму вместо строки на объект
+    form_date_warnings: list[str] = _check_form_dates(context, selection.planned)
     # к площадке обращаемся только по каналам, у которых есть объекты (и too_late): входы — все до сверки
     _log_in(context, [item.channel for item in selection.planned])
     _admit_all(context, selection.planned)
@@ -273,7 +275,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
             selection.planned,
             context.form_diagnostics,
             notices,
-            [*context.channel_warnings, *memory_warnings, *context.store.take_warnings()],
+            [*context.channel_warnings, *form_date_warnings, *memory_warnings, *context.store.take_warnings()],
         ),
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
@@ -282,6 +284,50 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     # ключ, который должен был дойти до стримера и не дошёл, — это код выхода 1 (§7.5)
     undelivered: int = sum(1 for item in selection.planned if item.is_key_undelivered) if context.is_full else 0
     return _complete(context, report, package_problems=len(scan.problems), undelivered=undelivered)
+
+
+def _check_form_dates(context: _RunContext, planned: Sequence[PlannedBroadcast]) -> list[str]:
+    """Покрывает ли каждая форма даты объектов, которые запуск собирается публиковать (не too_late).
+
+    Одна проверка и одна строка на форму (по form.url, в порядке появления). Допуск не меняется:
+    объект без варианта даты по-прежнему не допускается сам (missingOption).
+    """
+    starts_by_url: dict[str, list[datetime]] = {}
+    specs_by_url: dict[str, FormSpec] = {}
+    for item in planned:
+        if item.is_too_late:
+            continue
+        specs_by_url.setdefault(item.form.url, item.form)
+        starts_by_url.setdefault(item.form.url, []).append(item.slot.start)
+    warnings: list[str] = []
+    for url, spec in specs_by_url.items():
+        key_form, failure = _form_for(context, spec)
+        if key_form is None or failure is not None:
+            continue            # не прочиталась — это причина недопуска FORM_UNREADABLE; None — форма не проверяется
+        coverage: DateCoverage = key_form.date_coverage(starts_by_url[url])
+        warning: str | None = _report_form_dates(context, coverage)
+        if warning is not None:
+            warnings.append(warning)
+    return warnings
+
+
+def _report_form_dates(context: _RunContext, coverage: DateCoverage) -> str | None:
+    """Лог и строка прогресса по одной форме; недостающие даты — строка предупреждения запуска."""
+    if not coverage.question_title:
+        LOGGER.debug("form_dates_not_checked url=%s reason=no_date_question", coverage.form_url)
+        return None
+    LOGGER.info(
+        "form_dates_checked url=%s question=%s wanted=%d missing=%d dates=%s",
+        coverage.form_url,
+        _quoted(coverage.question_title),
+        len(coverage.wanted),
+        len(coverage.missing),
+        ",".join(coverage.missing) or MISSING_VALUE,
+    )
+    context.progress.form_dates_checked(coverage)
+    if coverage.is_complete:
+        return None
+    return msg.WARNING_FORM_DATES_MISSING.format(dates=coverage.missing_text, question=coverage.question_title)
 
 
 def _log_in(context: _RunContext, channels: Sequence[ChannelConfig]) -> None:

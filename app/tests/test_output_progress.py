@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
 from app.config.loader import PlanerConfig
+from app.form.key_form import DateCoverage
 from app.output.progress import BroadcastStep, ConsoleProgress, NoProgress, RunProgress
 from app.pipeline.plan import PlannedBroadcast
 from app.tests.conftest import build_config, build_planned, build_slot
@@ -52,3 +53,32 @@ def test_console_progress_flushes_every_line(now: datetime, monkeypatch: pytest.
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: flushes.append(kwargs.get("flush", False)))
     _every_step(ConsoleProgress(), _item(now))
     assert flushes == [True] * 7
+
+
+def _coverage(*, is_checkable: bool, missing: tuple[date, ...] = ()) -> DateCoverage:
+    return DateCoverage(
+        form_url="https://forms.gle/x",
+        question_title="Время стрима ( Stream time )",
+        is_checkable=is_checkable,
+        wanted=("17.03.2027", "18.03.2027", "19.03.2027") if is_checkable else (),
+        missing=tuple(value.strftime("%d.%m.%Y") for value in missing),
+        missing_dates=missing,
+        accepted_count=5,
+    )
+
+
+def test_console_progress_prints_form_dates_in_three_cases(capsys: pytest.CaptureFixture[str]) -> None:
+    progress: ConsoleProgress = ConsoleProgress()
+    progress.form_dates_checked(_coverage(is_checkable=True))
+    progress.form_dates_checked(_coverage(is_checkable=False))
+    progress.form_dates_checked(_coverage(is_checkable=True, missing=(date(2027, 3, 18), date(2027, 3, 19))))
+    assert capsys.readouterr().out.splitlines() == [
+        "  форма ключей: все даты запуска в ней есть — нужно 3, форма принимает 5",
+        "  форма ключей: дата вводится текстом — принимается любая",
+        "  форма ключей: нет дат 18-03-2027, 19-03-2027 — эфиры на эти даты не создаются, ключи стримеру не уйдут",
+    ]
+
+
+def test_no_progress_prints_nothing_for_form_dates(capsys: pytest.CaptureFixture[str]) -> None:
+    NoProgress().form_dates_checked(_coverage(is_checkable=True, missing=(date(2027, 3, 18),)))
+    assert capsys.readouterr().out == ""

@@ -174,6 +174,11 @@ WARNING_TOKEN_SAVE_FAILED: Final[str] = (
     "канал «{account_name}» {handle}: вход выполнен, но файл токена не записан ({error}) — "
     "в этом запуске канал работает, при следующем запуске планер снова предложит вход"
 )
+# Предстартовая проверка дат формы (app/pipeline/runner.py::_check_form_dates).
+WARNING_FORM_DATES_MISSING: Final[str] = (
+    "в форме ключей нет дат: {dates} — эфиры на эти даты не создаются и ключи стримеру не уходят; "
+    "попросите владельца формы добавить эти даты в вопрос «{question}»"
+)
 # Память планера (app/records/record_store.py).
 WARNING_RECORDS_CREATED: Final[str] = (
     "{count} эфиров с меткой планера, созданных до появления памяти планера, "
@@ -574,6 +579,11 @@ PROGRESS_KEY_SEND: Final[str] = (
     "канал «{account_name}» {handle}: отправляю ключ в форму — эфир {date} {time} {language}"
 )
 PROGRESS_REPORT: Final[str] = "пишу отчёт"
+PROGRESS_FORM_DATES_OK: Final[str] = "форма ключей: все даты запуска в ней есть — нужно {wanted}, форма принимает {accepted}"
+PROGRESS_FORM_DATES_ANY: Final[str] = "форма ключей: дата вводится текстом — принимается любая"
+PROGRESS_FORM_DATES_MISSING: Final[str] = (
+    "форма ключей: нет дат {dates} — эфиры на эти даты не создаются, ключи стримеру не уйдут"
+)
 
 # --- файл ключей (ТЗ §5.5): блок на стрим, ключ — первой строкой блока
 # Начала строк «форма» — одни и те же в шапке файла и в самих строках.

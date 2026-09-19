@@ -11,11 +11,12 @@ KeyForm строится один раз на форму за запуск — �
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field as dataclass_field, replace
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 
+from app.core.dates import format_date
 from app.form.base import FORM_CODE_MISSING_OPTION, FORM_CODE_REQUIRED_MISSING, FormError
 from app.form.discovery import FormQuestion, FormStructure, QuestionKind, SectionJump
 from app.observability.logging_setup import get_logger
@@ -39,6 +40,7 @@ PLATFORM_CODE: Final[str] = "youtube"
 FIRST_PAGE: Final[int] = 0
 MISSING_VALUE: Final[str] = "-"
 TITLE_JOINER: Final[str] = ", "
+DATES_JOINER: Final[str] = ", "
 # Образец даты для длины префикса варианта «Время стрима»: две цифры в каждой части.
 DATE_SAMPLE: Final[datetime] = datetime(2000, 12, 28)
 
@@ -86,6 +88,32 @@ class FormAnswers:
         if self.pending:
             return FormError(FORM_CODE_REQUIRED_MISSING, TITLE_JOINER.join(self.pending))
         return None
+
+
+@dataclass(frozen=True)
+class DateCoverage:
+    """Покрывает ли вопрос «Время стрима» даты запуска — проверка до входов и до площадки.
+
+    Даты сопоставляются тем же кодом, что и при отправке (KeyForm._date_option): что здесь названо
+    недостающим, то при допуске даст missingOption, и наоборот.
+    """
+
+    form_url: str
+    question_title: str                 # пусто — вопроса даты нет в пакете или в форме
+    is_checkable: bool                  # вопрос есть и он с вариантами (не текст)
+    wanted: tuple[str, ...]             # даты запуска в date_format формы, по возрастанию, без повторов
+    missing: tuple[str, ...]            # из wanted — без варианта в форме, тот же порядок
+    missing_dates: tuple[date, ...]     # те же даты объектами date, тот же порядок
+    accepted_count: int                 # сколько дат форма принимает (len(accepted_dates))
+
+    @property
+    def is_complete(self) -> bool:
+        return not self.missing
+
+    @property
+    def missing_text(self) -> str:
+        """Недостающие даты для владельца — в формате планера DD-MM-YYYY."""
+        return DATES_JOINER.join(format_date(value) for value in self.missing_dates)
 
 
 @dataclass(frozen=True)
@@ -138,6 +166,32 @@ class KeyForm:
     def stream_url_options(self) -> tuple[str, ...]:
         question: FormQuestion | None = self.questions.get(FIELD_STREAM_URL)
         return question.options if question is not None else ()
+
+    def date_coverage(self, starts: Iterable[datetime]) -> DateCoverage:
+        """Есть ли в форме вариант на каждую дату этих стартов; сеть не нужна — форма уже прочитана."""
+        question: FormQuestion | None = self.questions.get(FIELD_DATE)
+        if question is None or question.kind is QuestionKind.TEXT:
+            return DateCoverage(
+                form_url=self.url,
+                question_title=question.title if question is not None else "",
+                is_checkable=False,
+                wanted=(),
+                missing=(),
+                missing_dates=(),
+                accepted_count=len(self.accepted_dates),
+            )
+        by_date: dict[date, str] = {start.date(): start.strftime(self.spec.date_format) for start in starts}
+        ordered: list[date] = sorted(by_date)
+        absent: list[date] = [day for day in ordered if self._date_option(question, by_date[day]) is None]
+        return DateCoverage(
+            form_url=self.url,
+            question_title=question.title,
+            is_checkable=True,
+            wanted=tuple(by_date[day] for day in ordered),
+            missing=tuple(by_date[day] for day in absent),
+            missing_dates=tuple(absent),
+            accepted_count=len(self.accepted_dates),
+        )
 
     def log_ready(self) -> None:
         LOGGER.info(
@@ -219,10 +273,18 @@ class KeyForm:
         wanted: str = start.strftime(self.spec.date_format)
         if question.kind is QuestionKind.TEXT:
             return wanted, None
+        option: str | None = self._date_option(question, wanted)
+        if option is not None:
+            return option, None
+        return None, wanted
+
+    @staticmethod
+    def _date_option(question: FormQuestion, wanted: str) -> str | None:
+        """Первый вариант, начинающийся с даты; один код и для отправки, и для предстартовой проверки."""
         for option in question.options:
             if option.startswith(wanted):
-                return option, None
-        return None, wanted
+                return option
+        return None
 
     @staticmethod
     def _option_by_url(question: FormQuestion, stream_url: str) -> tuple[str | None, str | None]:

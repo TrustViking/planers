@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import logging
@@ -13,8 +13,17 @@ from dataclasses import replace
 import pytest
 
 from app.form.base import FORM_CODE_MISSING_OPTION, FORM_CODE_REQUIRED_MISSING
-from app.form.discovery import FormDiscovery, FormStructure
-from app.form.key_form import FIELD_DATE, FIELD_LANGUAGE, FIELD_STREAM_KEY, FIELD_STREAM_URL, FormAnswers, KeyForm
+from app.form.discovery import FormDiscovery, FormQuestion, FormStructure, QuestionKind
+from app.form.key_form import (
+    FIELD_DATE,
+    FIELD_LANGUAGE,
+    FIELD_STREAM_KEY,
+    FIELD_STREAM_URL,
+    DateCoverage,
+    FormAnswers,
+    KeyForm,
+)
+from app.package.model import FormSpec
 from app.tests.conftest import build_form_spec
 from app.tests.test_form_discovery import SHORT_URL, _FakeResponse, _FakeSession
 
@@ -165,3 +174,66 @@ def training_key_form(tmp_path: Path) -> KeyForm:
     session: _FakeSession = _FakeSession(_FakeResponse(PAGE))
     structure: FormStructure = FormDiscovery(session, tmp_path, datetime(2026, 9, 13, 12, 0)).structure(SHORT_URL)
     return KeyForm.build(build_form_spec(), structure)
+
+
+# --- предстартовая проверка дат (задача 5n-D): в форме 11.09.2026, 12.09.2026, 13.09.2026, 17.03.2027
+
+def _start(day: int, month: int = 9, year: int = 2026, hour: int = 19) -> datetime:
+    return datetime(year, month, day, hour, 0, tzinfo=KYIV)
+
+
+def test_date_coverage_complete_when_every_date_has_an_option(form: KeyForm) -> None:
+    coverage: DateCoverage = form.date_coverage([_start(13), _start(11), _start(17, 3, 2027)])
+    assert coverage.is_checkable and coverage.is_complete
+    assert coverage.wanted == ("11.09.2026", "13.09.2026", "17.03.2027")
+    assert coverage.missing == () and coverage.missing_dates == () and coverage.missing_text == ""
+    assert coverage.accepted_count == len(form.accepted_dates)
+    assert coverage.question_title == build_form_spec().fields[FIELD_DATE]
+    assert coverage.form_url == form.url
+
+
+def test_date_coverage_lists_missing_dates_in_order_in_planer_format(form: KeyForm) -> None:
+    coverage: DateCoverage = form.date_coverage([_start(20), _start(13), _start(14)])
+    assert not coverage.is_complete
+    assert coverage.wanted == ("13.09.2026", "14.09.2026", "20.09.2026")
+    assert coverage.missing == ("14.09.2026", "20.09.2026")
+    assert coverage.missing_dates == (date(2026, 9, 14), date(2026, 9, 20))
+    assert coverage.missing_text == "14-09-2026, 20-09-2026"
+
+
+def test_date_coverage_counts_one_date_of_several_slots_once(form: KeyForm) -> None:
+    coverage: DateCoverage = form.date_coverage([_start(14, hour=19), _start(14, hour=21), _start(13)])
+    assert coverage.wanted == ("13.09.2026", "14.09.2026")
+    assert coverage.missing == ("14.09.2026",)
+
+
+def test_date_coverage_of_a_text_question_accepts_any_date(form: KeyForm) -> None:
+    date_question: FormQuestion | None = form.questions[FIELD_DATE]
+    assert date_question is not None
+    text_question: FormQuestion = replace(date_question, kind=QuestionKind.TEXT, options=())
+    structure: FormStructure = replace(
+        form.structure,
+        questions=tuple(text_question if item == date_question else item for item in form.structure.questions),
+    )
+    coverage: DateCoverage = KeyForm.build(form.spec, structure).date_coverage([_start(20)])
+    assert not coverage.is_checkable and coverage.is_complete and coverage.missing == ()
+    assert coverage.question_title == date_question.title
+
+
+def test_date_coverage_without_date_field_checks_nothing(form: KeyForm) -> None:
+    spec: FormSpec = replace(form.spec, fields={**form.spec.fields, FIELD_DATE: None})
+    coverage: DateCoverage = KeyForm.build(spec, form.structure).date_coverage([_start(20)])
+    assert coverage.question_title == "" and not coverage.is_checkable and coverage.missing == ()
+
+
+def test_date_coverage_agrees_with_answers(form: KeyForm) -> None:
+    """Проверка и отправка сопоставляют даты одним кодом: недостающая дата — missingOption, и наоборот."""
+    starts: list[datetime] = [_start(11), _start(14), _start(17, 3, 2027), _start(18, 3, 2027)]
+    coverage: DateCoverage = form.date_coverage(starts)
+    for start in starts:
+        answers: FormAnswers = _answers(form, start=start)
+        is_missing: bool = any(
+            item.field == FIELD_DATE and item.code == FORM_CODE_MISSING_OPTION for item in answers.missing
+        )
+        assert is_missing == (start.strftime(form.spec.date_format) in coverage.missing)
+    assert coverage.missing == ("14.09.2026", "18.03.2027")

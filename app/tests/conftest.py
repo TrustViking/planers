@@ -18,7 +18,7 @@ from app.config.loader import ChannelConfig, Platform, PlanerConfig, PlanerSetti
 from app.core.dates import build_slot_id, format_date, format_time, parse_date, parse_time
 from app.core.text import HANDLE_PREFIX
 from app.form.base import FormError, FormSendResult
-from app.form.key_form import KeyForm
+from app.form.key_form import DateCoverage, KeyForm
 from app.output.progress import BroadcastStep
 from app.package.model import FormSpec, Package, Slot
 from app.pipeline.plan import BroadcastSpec, PlannedBroadcast
@@ -235,6 +235,9 @@ class RecordingProgress:
 
     def packages_read(self, packages: int, slots_total: int, slots_mine: int) -> None:
         self.calls.append(("packages_read", packages, slots_total, slots_mine))
+
+    def form_dates_checked(self, coverage: DateCoverage) -> None:
+        self.calls.append(("form_dates_checked", coverage.form_url, coverage.missing, *self._list_count()))
 
     def channel_read_started(self, channel: ChannelConfig) -> None:
         self.calls.append(("channel_read_started", channel.account_name, *self._list_count()))
