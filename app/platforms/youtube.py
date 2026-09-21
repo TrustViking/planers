@@ -30,6 +30,7 @@ from app.google.auth import AuthError, AuthErrorReason, load_credentials, save_t
 from app.core.dates import format_datetime_text
 from app.core.retry import RetryPolicy
 from app.observability.logging_setup import get_logger, mask_stream_key
+from app.observability.run_stats import RunStats
 from app.pipeline.plan import BroadcastSpec
 from app.pipeline.reconciler import MarkerParts, split_marker
 from app.platforms.base import (
@@ -155,6 +156,27 @@ BROADCAST_LIST_OPERATION: Final[str] = "liveBroadcasts.list"
 STREAM_LIST_OPERATION: Final[str] = "liveStreams.list"
 VIDEO_LIST_OPERATION: Final[str] = "videos.list"
 STREAM_INSERT_OPERATION: Final[str] = "liveStreams.insert"
+CHANNEL_LIST_OPERATION: Final[str] = "channels.list"
+BROADCAST_UPDATE_OPERATION: Final[str] = "liveBroadcasts.update"
+BROADCAST_BIND_OPERATION: Final[str] = "liveBroadcasts.bind"
+STREAM_UPDATE_OPERATION: Final[str] = "liveStreams.update"
+VIDEO_UPDATE_OPERATION: Final[str] = "videos.update"
+# Цена операции в единицах квоты YouTube Data API — единственный источник. Начисляется за каждую попытку
+# (Google берёт минимум 1 ед. и за отказ): это оценка сверху, владельцу — со знаком «≈».
+QUOTA_UNITS: Final[dict[str, int]] = {
+    CHANNEL_LIST_OPERATION: 1,
+    BROADCAST_LIST_OPERATION: 1,
+    STREAM_LIST_OPERATION: 1,
+    VIDEO_LIST_OPERATION: 1,
+    BROADCAST_INSERT_OPERATION: 50,
+    BROADCAST_UPDATE_OPERATION: 50,
+    BROADCAST_BIND_OPERATION: 50,
+    STREAM_INSERT_OPERATION: 50,
+    STREAM_UPDATE_OPERATION: 50,
+    VIDEO_UPDATE_OPERATION: 50,
+    THUMBNAIL_OPERATION: 50,
+}
+UNKNOWN_QUOTA_UNITS: Final[int] = 0   # операция без цены: 0 ед. и одна строка quota_units_unknown за запуск
 # Создающие, неидемпотентные вызовы: дошёл запрос, а ответ потерялся — повтор завёл бы второй эфир или поток.
 # Отказ с неизвестным исходом (обрыв связи, 5xx) у них не повторяется (_is_unknown_outcome): объект остаётся
 # несозданным, эфир доделает следующий запуск. Явный отказ сервера (лимит частоты) повторяется как у всех.
@@ -217,6 +239,7 @@ class YouTubePlatform:
     Настройки эфира площадка не хранит: всё, что уходит в эфир, приходит готовой спекой (§7.4).
     request_pause_sec — youtube_pause_seconds из planer.json: наименьший промежуток между обращениями.
     rng — случайная добавка к паузам повторов (RetryPolicy); в тестах — фиксированный.
+    stats — статистика запуска: попытки, повторы, пустые ответы, отказы, секунды запроса и паузы, единицы квоты.
     Браузер открывается только из describe_channel(allow_login=True): все прочие обращения входа не делают.
     Учётные данные нового входа живут в памяти, пока канал не подтверждён (keep_login пишет токен).
     """
@@ -228,7 +251,10 @@ class YouTubePlatform:
         *,
         request_pause_sec: int,
         rng: random.Random,
+        stats: RunStats | None = None,
     ) -> None:
+        self._stats: RunStats = stats if stats is not None else RunStats()
+        self._unpriced: set[str] = set()   # операции без цены, о которых уже написано в лог
         self._client_secret_file: Path = client_secret_file
         self._secrets_dir: Path = secrets_dir
         self._request_pause_sec: int = request_pause_sec
@@ -261,7 +287,7 @@ class YouTubePlatform:
             return cached
         response: dict[str, Any] = self._execute(
             channel,
-            "channels.list",
+            CHANNEL_LIST_OPERATION,
             lambda service: service.channels().list(part=CHANNEL_PARTS, mine=True),
             allow_login=allow_login,
         )
@@ -336,12 +362,14 @@ class YouTubePlatform:
         if not isinstance(url, str) or not url:
             return None
         self._wait_pause()
+        started: float = self._stats.now()
         try:
             response: requests.Response = self._session.get(url, timeout=PICTURE_TIMEOUT_SEC)
         except requests.RequestException as error:
             LOGGER.info("thumbnail_picture_unavailable url=%s status=%s error=%s", url, LOG_MISSING, error)
             return None
         finally:
+            self._stats.picture_downloaded(self._stats.now() - started)
             self._mark_request_done()
         if response.status_code != HTTP_OK or not response.content:
             LOGGER.info("thumbnail_picture_unavailable url=%s status=%s", url, response.status_code)
@@ -424,7 +452,7 @@ class YouTubePlatform:
         }
         self._execute(
             channel,
-            "liveBroadcasts.update",
+            BROADCAST_UPDATE_OPERATION,
             lambda service: service.liveBroadcasts().update(
                 part=BROADCAST_UPDATE_PARTS,
                 body={"id": broadcast_id, "snippet": snippet},
@@ -465,7 +493,7 @@ class YouTubePlatform:
         status["privacyStatus"] = privacy
         updated: dict[str, Any] = self._execute(
             channel,
-            "videos.update",
+            VIDEO_UPDATE_OPERATION,
             lambda service: service.videos().update(
                 part=VIDEO_SETTINGS_PARTS,
                 body={"id": broadcast_id, "snippet": snippet, "status": status},
@@ -507,7 +535,7 @@ class YouTubePlatform:
         )
         self._execute(
             channel,
-            "liveStreams.update",
+            STREAM_UPDATE_OPERATION,
             lambda service: service.liveStreams().update(
                 part=STREAM_UPDATE_PARTS,
                 body={"id": stream_id, "snippet": snippet},
@@ -609,7 +637,7 @@ class YouTubePlatform:
             raise PlatformError(ERROR_UNEXPECTED_KEY, mask_stream_key(stream_key))
         self._execute(
             channel,
-            "liveBroadcasts.bind",
+            BROADCAST_BIND_OPERATION,
             lambda service: service.liveBroadcasts().bind(
                 part=BIND_PARTS,
                 id=broadcast_id,
@@ -707,8 +735,9 @@ class YouTubePlatform:
         retry_number: int = 0
         while True:
             self._wait_pause()
+            started: float = self._stats.now()
             try:
-                response: Any = request_builder(service).execute()
+                response: Any = self._timed_execute(operation, request_builder(service), started)
             except HttpError as error:
                 failure: _Failure = _http_failure(operation, error)
             except OSError as error:
@@ -748,6 +777,7 @@ class YouTubePlatform:
             items: list[dict[str, Any]] = _items(self._execute(channel, operation, request_builder))
             if items:
                 return items[0]
+            self._stats.empty_answer(operation)
             behavior: ErrorBehavior = _error_behavior(operation, None, ERROR_NOT_LISTED)
             if behavior is not ErrorBehavior.RETRY or not RETRY_POLICY.has_retry_left(retry_number + 1):
                 break
@@ -764,6 +794,22 @@ class YouTubePlatform:
         )
         return None
 
+    def _timed_execute(self, operation: str, request: Any, started: float) -> Any:
+        """execute() одной попытки; секунды и цена попытки — в статистику при любом исходе."""
+        try:
+            return request.execute()
+        finally:
+            self._stats.request_done(operation, self._stats.now() - started, self._quota_units(operation))
+
+    def _quota_units(self, operation: str) -> int:
+        units: int | None = QUOTA_UNITS.get(operation)
+        if units is not None:
+            return units
+        if operation not in self._unpriced:
+            self._unpriced.add(operation)
+            LOGGER.warning("quota_units_unknown operation=%s", operation)
+        return UNKNOWN_QUOTA_UNITS
+
     def _wait_pause(self) -> None:
         """Выждать остаток request_pause_sec от конца предыдущего обращения; паузы повторов входят в него."""
         if self._request_pause_sec <= 0 or self._last_request_at is None:
@@ -771,6 +817,7 @@ class YouTubePlatform:
         remaining: float = self._request_pause_sec - (time.monotonic() - self._last_request_at)
         if remaining > 0:
             time.sleep(remaining)
+            self._stats.paused(remaining)
 
     def _mark_request_done(self) -> None:
         self._last_request_at = time.monotonic()
@@ -836,6 +883,7 @@ class YouTubePlatform:
         key: RefusalKey | None = _refusal_key(failure.behavior, channel.key, operation)
         if key is not None:
             self._refusals[key] = (error, failure.behavior)
+        self._stats.refused(operation)
         return error
 
     def _sleep_before_retry(self, channel: ChannelConfig, operation: str, retry_number: int, failure: _Failure) -> None:
@@ -852,6 +900,7 @@ class YouTubePlatform:
             failure.error.code,
         )
         time.sleep(delay_sec)   # через модуль time: тесты подменяют
+        self._stats.retried(operation, delay_sec)
 
 
 def _not_listed_error(operation: str, object_id: str) -> PlatformError:

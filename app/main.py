@@ -40,12 +40,19 @@ from app.config.loader import (
     allowed_values,
     load_planer_config,
 )
-from app.core.dates import format_datetime_text
+from app.core.dates import (
+    format_date,
+    format_datetime_text,
+    format_time,
+    youtube_quota_day,
+    youtube_quota_day_start,
+)
 from app.form.base import FormSender
 from app.form.discovery import FormDiscovery
 from app.form.submitter import GoogleFormSender
 from app.google.auth import AuthErrorReason
-from app.observability.logging_setup import close_logging, get_logger, setup_logging
+from app.observability.logging_setup import close_logging, get_logger, run_id_from_log, setup_logging
+from app.observability.run_stats import SECONDS_DIGITS, RunKind, RunStage, RunStats
 from app.output.console import render_console
 from app.output.progress import ConsoleProgress
 from app.paths import PlanerPaths, build_paths, ensure_dirs, resolve_root
@@ -64,12 +71,15 @@ from app.platforms.channel_sync import ChannelSync
 from app.platforms.verified import VerifiedPlatform
 from app.platforms.youtube import YouTubePlatform
 from app.records.record_store import RecordStore
+from app.records.run_record import RunRecord, RunStore
 from app.ui import messages_ru as msg
 from app.version import APP_VERSION
 
 LOGGER = get_logger("main")
 
 LIST_JOINER: Final[str] = ", "
+SECONDS_PER_MINUTE: Final[int] = 60
+SECONDS_PER_HOUR: Final[int] = 3600
 # Шапка запуска: --check и --auth — обычная, как у полного цикла.
 TITLES: Final[dict[RunMode, str]] = {
     RunMode.FULL: msg.CONSOLE_TITLE,
@@ -129,6 +139,7 @@ class _Dependencies:
     platform: VerifiedPlatform
     book: ChannelBook
     rng: random.Random
+    stats: RunStats
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,28 +159,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_platform(paths: PlanerPaths, settings: PlanerSettings, rng: random.Random) -> BroadcastPlatform:
+def build_platform(
+    paths: PlanerPaths,
+    settings: PlanerSettings,
+    rng: random.Random,
+    stats: RunStats | None = None,
+) -> BroadcastPlatform:
     """Боевая площадка; FakePlatform остаётся только для тестов.
 
     Из planer.json площадка берёт только паузу между обращениями; настройки эфира она получает спекой.
+    stats — статистика запуска: обращения, секунды, единицы квоты.
     """
     return YouTubePlatform(
         paths.client_secret_file,
         paths.secrets_dir,
         request_pause_sec=settings.youtube_pause_seconds,
         rng=rng,
+        stats=stats,
     )
 
 
-def build_form_sender(paths: PlanerPaths, now_utc: datetime, rng: random.Random) -> FormSender:
+def build_form_sender(
+    paths: PlanerPaths,
+    now_utc: datetime,
+    rng: random.Random,
+    stats: RunStats | None = None,
+) -> FormSender:
     """Отправитель Google-формы; адрес формы приходит в пакете, здесь его нет (ТЗ §7.5)."""
     session: requests.Session = requests.Session()
-    discovery: FormDiscovery = FormDiscovery(session, paths.logs_dir, now_utc.astimezone(), rng)  # type: ignore
-    return GoogleFormSender(session, discovery, rng)  # type: ignore
+    discovery: FormDiscovery = FormDiscovery(session, paths.logs_dir, now_utc.astimezone(), rng, stats)  # type: ignore
+    return GoogleFormSender(session, discovery, rng, stats)  # type: ignore
 
 
 def run_cli(argv: Sequence[str] | None = None) -> int:
     args: argparse.Namespace = build_parser().parse_args(argv)
+    # статистика — первым делом: общее время запуска считается от этой точки
+    stats: RunStats = RunStats(kind=_run_kind(args), version=APP_VERSION)
     _configure_console()
     paths: PlanerPaths = build_paths(resolve_root())
     ensure_dirs(paths)
@@ -182,20 +207,90 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         args.status,
         log_path,
     )
-    now_utc: datetime = datetime.now(timezone.utc)
+    now_utc: datetime = stats.started_utc
     _say_title(args, now_utc)
     try:
-        exit_code: int = _run_guarded(args, paths, log_path, now_utc)
-        LOGGER.info("run_finished exit_code=%d", exit_code)
+        exit_code: int = _run_guarded(args, paths, log_path, now_utc, stats)
+        _finish_stats(stats, exit_code, paths, log_path)
+        LOGGER.info("run_finished exit_code=%d elapsed_sec=%.1f", exit_code, stats.elapsed_sec)
         return exit_code
     finally:
         close_logging()
 
 
-def _run_guarded(args: argparse.Namespace, paths: PlanerPaths, log_path: Path, now_utc: datetime) -> int:
+def _run_kind(args: argparse.Namespace) -> RunKind:
+    if args.auth is not None:
+        return RunKind.AUTH
+    if args.check:
+        return RunKind.CHECK
+    return RunKind(_requested_run_mode(args).value)
+
+
+def _finish_stats(stats: RunStats, exit_code: int, paths: PlanerPaths, log_path: Path) -> None:
+    """Конец любого запуска: строка runs в памяти планера, строки run_stats в лог, время и квота — в терминал.
+
+    Сбой записи строки — «нет данных» в терминале; код выхода не меняется.
+    """
+    stats.finish(exit_code)
+    finished_utc: datetime = datetime.now(timezone.utc)
+    quota_day: str = format_date(youtube_quota_day(finished_utc))
+    record: RunRecord = RunRecord(
+        run_id=run_id_from_log(log_path),
+        started_utc=stats.started_utc.isoformat(),
+        quota_day=quota_day,
+        quota_units=stats.youtube_units,
+        elapsed_sec=round(stats.elapsed_sec, SECONDS_DIGITS),
+        exit_code=exit_code,
+        mode=stats.kind.value,
+        version=stats.version,
+        stats=stats.to_json(),
+    )
+    day_units: int | None = RunStore(paths.records_file).save(record)
+    stats.log_summary(quota_day, day_units)
+    _say("")
+    _say(msg.RUN_ELAPSED.format(duration=_duration_text(stats.elapsed_sec)))
+    if stats.youtube_calls:
+        _say(_youtube_text(stats, day_units, youtube_quota_day_start(finished_utc)))
+
+
+def _duration_text(seconds: float) -> str:
+    """9 мин 43 сек; дольше часа — 1 ч 05 мин 12 сек."""
+    total: int = int(round(seconds))
+    hours, rest = divmod(total, SECONDS_PER_HOUR)
+    minutes, secs = divmod(rest, SECONDS_PER_MINUTE)
+    if hours:
+        return msg.DURATION_HOURS.format(hours=hours, minutes=minutes, seconds=secs)
+    return msg.DURATION_MINUTES.format(minutes=minutes, seconds=secs)
+
+
+def _youtube_text(stats: RunStats, day_units: int | None, day_start_utc: datetime) -> str:
+    calls: str = _number_text(stats.youtube_calls)
+    units: str = _number_text(stats.youtube_units)
+    if day_units is None:
+        return msg.RUN_YOUTUBE_NO_DAY_DATA.format(calls=calls, units=units)
+    return msg.RUN_YOUTUBE.format(
+        calls=calls,
+        units=units,
+        since=format_time(day_start_utc.astimezone().time()),
+        day_units=_number_text(day_units),
+    )
+
+
+def _number_text(value: int) -> str:
+    """10 370 — тысячи через пробел."""
+    return f"{value:,}".replace(",", msg.NUMBER_GROUP_SEPARATOR)
+
+
+def _run_guarded(
+    args: argparse.Namespace,
+    paths: PlanerPaths,
+    log_path: Path,
+    now_utc: datetime,
+    stats: RunStats,
+) -> int:
     """Обрыв и падение не пропадают без следа: причина — в лог, короткая строка — в консоль, код 1."""
     try:
-        return _run(args, paths, log_path, now_utc)
+        return _run(args, paths, log_path, now_utc, stats)
     except KeyboardInterrupt:
         LOGGER.warning("run_interrupted")
         _say(msg.RUN_INTERRUPTED)
@@ -235,13 +330,15 @@ def _requested_run_mode(args: argparse.Namespace) -> RunMode:
     return RunMode.FULL
 
 
-def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path, now_utc: datetime) -> int:
-    dependencies: _Dependencies | None = _build_dependencies(paths, now_utc)
+def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path, now_utc: datetime, stats: RunStats) -> int:
+    with stats.stage(RunStage.START):
+        dependencies: _Dependencies | None = _build_dependencies(paths, now_utc, stats)
     if dependencies is None:
         return int(ExitCode.CONFIG)
     if args.auth is not None:
         return _run_auth(args.auth, paths, dependencies)
-    checked: tuple[_Dependencies, list[str]] | None = _check_channels(dependencies)
+    with stats.stage(RunStage.START):
+        checked: tuple[_Dependencies, list[str]] | None = _check_channels(dependencies)
     if checked is None:
         return int(ExitCode.CONFIG)
     dependencies, channel_warnings = checked
@@ -250,7 +347,7 @@ def _run(args: argparse.Namespace, paths: PlanerPaths, log_path: Path, now_utc: 
     return _run_pipeline(_requested_run_mode(args), paths, dependencies, log_path, now_utc, channel_warnings)
 
 
-def _build_dependencies(paths: PlanerPaths, now_utc: datetime) -> _Dependencies | None:
+def _build_dependencies(paths: PlanerPaths, now_utc: datetime, stats: RunStats) -> _Dependencies | None:
     """Конфиги и паспорт программы; к каналам здесь никто не обращается. None — код 2."""
     config: PlanerConfig | None = _load_config(paths)
     if config is None:
@@ -260,11 +357,11 @@ def _build_dependencies(paths: PlanerPaths, now_utc: datetime) -> _Dependencies 
         _say(msg.CLIENT_SECRET_MISSING.format(path=paths.client_secret_file))
         return None
     rng: random.Random = random.Random()
-    youtube: BroadcastPlatform = build_platform(paths, config.settings, rng)
+    youtube: BroadcastPlatform = build_platform(paths, config.settings, rng, stats)
     # проверка при старте, входы и шлюз площадки — через одну площадку, один паспорт и одну книгу каналов
     sync: ChannelSync = ChannelSync(youtube, paths, now_utc.astimezone())
     book: ChannelBook = ChannelBook(youtube, sync, ChannelConsole())
-    return _Dependencies(config=config, platform=VerifiedPlatform(youtube, book), book=book, rng=rng)
+    return _Dependencies(config=config, platform=VerifiedPlatform(youtube, book), book=book, rng=rng, stats=stats)
 
 
 def _check_channels(dependencies: _Dependencies) -> tuple[_Dependencies, list[str]] | None:
@@ -328,7 +425,8 @@ def _run_auth(target: str, paths: PlanerPaths, dependencies: _Dependencies) -> i
         return int(ExitCode.ERRORS)
     failed: int = 0
     for channel_config in channels:
-        channel: Channel = dependencies.book.log_in(channel_config, force=True)
+        with dependencies.stats.stage(RunStage.LOGINS):
+            channel: Channel = dependencies.book.log_in(channel_config, force=True)
         if channel.status is not ChannelStatus.READY:
             failed += 1
             _say_not_ready(channel)
@@ -391,11 +489,13 @@ def _run_check(paths: PlanerPaths, dependencies: _Dependencies, channel_warnings
     """Все каналы конфига — тем же путём, что и запуск: проверка без браузера, фаза входов, работа."""
     _say(msg.CHECK_HEADER.format(path=paths.channels_file))
     _say_warnings(channel_warnings)
-    dependencies.book.log_in_needed(dependencies.config.channels)
+    with dependencies.stats.stage(RunStage.LOGINS):
+        dependencies.book.log_in_needed(dependencies.config.channels)
     failed: int = 0
-    for channel in dependencies.config.channels:
-        if not _check_channel(channel, dependencies):
-            failed += 1
+    with dependencies.stats.stage(RunStage.RECONCILE):
+        for channel in dependencies.config.channels:
+            if not _check_channel(channel, dependencies):
+                failed += 1
     _say_warnings(dependencies.book.take_warnings())
     _say(msg.CHECK_CHANNEL_LANGUAGE_NOTE)
     _say(msg.CHECK_HAS_PROBLEMS if failed else msg.CHECK_ALL_OK)
@@ -445,13 +545,14 @@ def _run_pipeline(
             dependencies.config,
             paths,
             dependencies.platform,
-            build_form_sender(paths, now_utc, dependencies.rng),
+            build_form_sender(paths, now_utc, dependencies.rng, dependencies.stats),
             now_utc,
             dependencies.rng,
             progress=ConsoleProgress(),
             channel_warnings=channel_warnings,
             logins=dependencies.book,
             store=store,
+            stats=dependencies.stats,
         )
     finally:
         # обрыв и падение проходят сюда же: память закрыта до того, как _run_guarded запишет причину

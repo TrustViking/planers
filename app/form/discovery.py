@@ -23,6 +23,7 @@ from app.core.dates import FILE_STAMP_FORMAT
 from app.core.retry import RetryPolicy
 from app.form.base import FORM_CODE_STRUCTURE_UNREADABLE, FORM_CODE_TRANSPORT_FAILED, FormError
 from app.observability.logging_setup import get_logger
+from app.observability.run_stats import RunStats
 
 LOGGER = get_logger("form.discovery")
 
@@ -117,7 +118,9 @@ class FormDiscovery:
         logs_dir: Path,
         now: datetime,
         rng: random.Random | None = None,
+        stats: RunStats | None = None,
     ) -> None:
+        self._stats: RunStats = stats if stats is not None else RunStats()   # чтения страниц формы: число и секунды
         self._session: HttpSession = session
         self._logs_dir: Path = logs_dir
         self._now: datetime = now
@@ -159,12 +162,9 @@ class FormDiscovery:
         """Сетевые сбои и 5xx повторяются по RETRY_POLICY; прочий ответ не 200 — сразу отказ."""
         retry_number: int = 0
         while True:
+            started: float = self._stats.now()
             try:
-                response: HttpResponse = self._session.get(
-                    form_url,
-                    timeout=REQUEST_TIMEOUT_SEC,
-                    allow_redirects=True,
-                )
+                response: HttpResponse = self._timed_get(form_url, started)
             except OSError as error:
                 reason: str = str(error)
             else:
@@ -186,6 +186,13 @@ class FormDiscovery:
                 reason,
             )
             time.sleep(delay_sec)   # через модуль time: тесты подменяют
+
+    def _timed_get(self, form_url: str, started: float) -> HttpResponse:
+        """Один GET страницы формы; попытка и её секунды — в статистику при любом исходе."""
+        try:
+            return self._session.get(form_url, timeout=REQUEST_TIMEOUT_SEC, allow_redirects=True)
+        finally:
+            self._stats.form_read(self._stats.now() - started)
 
     def _parse(self, html: str, final_url: str, form_url: str) -> FormStructure:
         payload: Any = _load_script(html)

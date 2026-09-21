@@ -7,7 +7,8 @@
 updated_at (память старше, чем это открытие), база пустая — текущим временем. Сбой базы не валит запуск: не открылась — файл переименовывается
 в planer.sqlite3.broken-<DD-MM-YYYY_HHMMSS> (не удаляется) и создаётся новая; не записалось — WARNING
 и одна строка предупреждения за запуск, объект работает дальше. read_only (--dry-run, --status) —
-на диск ничего не пишется: файла нет — пустая база в памяти.
+на диск ничего не пишется: файла нет — пустая база в памяти. Исключение — строка статистики запуска
+в таблице runs (app/records/run_record.py): она пишется в любом режиме отдельным соединением.
 Ключи потока в базе — полностью (как в keys.txt); в логах — только маской.
 """
 from __future__ import annotations
@@ -24,7 +25,12 @@ from app.ui import messages_ru as msg
 
 LOGGER = get_logger("records")
 
-SCHEMA_VERSION: Final[str] = "1"
+# 2 — появилась таблица runs (статистика запусков, app/records/run_record.py); slots не менялась.
+SCHEMA_VERSION: Final[str] = "2"
+# Номер схемы поднимается и у существующих баз (строки slots не трогаются).
+SCHEMA_VERSION_SQL: Final[str] = (
+    "INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value"
+)
 MEMORY_DATABASE: Final[str] = ":memory:"
 READ_ONLY_URI: Final[str] = "file:{path}?mode=ro"
 BROKEN_SUFFIX: Final[str] = ".broken-{stamp}"
@@ -35,7 +41,6 @@ SCHEMA_SQL: Final[tuple[str, ...]] = (
     " PRIMARY KEY (slot_id, youtube_channel_id))",
     "CREATE INDEX IF NOT EXISTS slots_start ON slots (slot_start_utc)",
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-    "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '" + SCHEMA_VERSION + "')",
 )
 SELECT_SQL: Final[str] = (
     "SELECT slot_id, youtube_channel_id, slot_start_utc, stage, updated_at, record_json"
@@ -296,3 +301,4 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     with connection:
         for statement in SCHEMA_SQL:
             connection.execute(statement)
+        connection.execute(SCHEMA_VERSION_SQL, (SCHEMA_VERSION,))

@@ -211,6 +211,17 @@ RUN_CRASHED: Final[str] = (
     "Планер аварийно остановился — подробности в логе {log}. "
     "Что уже сделано на YouTube, найдёт и учтёт следующий запуск; перешлите лог оператору."
 )
+# Последние строки любого запуска (main._finish_stats): время работы и расход квоты YouTube (RunStats).
+RUN_ELAPSED: Final[str] = "Время работы: {duration}"
+DURATION_MINUTES: Final[str] = "{minutes} мин {seconds} сек"
+DURATION_HOURS: Final[str] = "{hours} ч {minutes:02d} мин {seconds:02d} сек"
+RUN_YOUTUBE: Final[str] = (
+    "YouTube: обращений {calls}, квота ≈ {units} ед.; за квотные сутки на этом компьютере (с {since}) ≈ {day_units} ед."
+)
+RUN_YOUTUBE_NO_DAY_DATA: Final[str] = (
+    "YouTube: обращений {calls}, квота ≈ {units} ед.; за квотные сутки на этом компьютере — нет данных"
+)
+NUMBER_GROUP_SEPARATOR: Final[str] = " "   # 10 370
 
 # --- проверка каналов (--check)
 CHECK_HEADER: Final[str] = "Проверка каналов по {path}:"

@@ -35,6 +35,7 @@ from app.form.discovery import (
 )
 from app.form.key_form import FormAnswers, KeyForm
 from app.observability.logging_setup import get_logger, mask_stream_key
+from app.observability.run_stats import RunStats
 from app.package.model import FormSpec
 from app.pipeline.plan import PlannedBroadcast
 
@@ -94,7 +95,14 @@ class Confirmation:
 class GoogleFormSender:
     """Один отправитель на запуск: формы читаются в prepare, send берёт готовую KeyForm."""
 
-    def __init__(self, session: HttpSession, discovery: FormDiscovery, rng: random.Random | None = None) -> None:
+    def __init__(
+        self,
+        session: HttpSession,
+        discovery: FormDiscovery,
+        rng: random.Random | None = None,
+        stats: RunStats | None = None,
+    ) -> None:
+        self._stats: RunStats = stats if stats is not None else RunStats()   # отправки формы: число и секунды
         self._session: HttpSession = session
         self._discovery: FormDiscovery = discovery
         self._rng: random.Random = rng or random.Random()   # добавка к паузам повторов; main передаёт свой
@@ -182,12 +190,7 @@ class GoogleFormSender:
         retry_number: int = 0
         while True:
             try:
-                response: HttpResponse = self._session.post(
-                    url,
-                    data=body,
-                    timeout=REQUEST_TIMEOUT_SEC,
-                    headers={HEADER_ACCEPT_LANGUAGE: RESPONSE_LANGUAGE},
-                )
+                response: HttpResponse = self._timed_post(url, body)
             except OSError as error:
                 reason: str = str(error)
             else:
@@ -206,6 +209,19 @@ class GoogleFormSender:
                 reason,
             )
             time.sleep(delay_sec)   # через модуль time: тесты подменяют
+
+    def _timed_post(self, url: str, body: dict[str, list[str]]) -> HttpResponse:
+        """Один POST ответа формы; попытка и её секунды — в статистику при любом исходе."""
+        started: float = self._stats.now()
+        try:
+            return self._session.post(
+                url,
+                data=body,
+                timeout=REQUEST_TIMEOUT_SEC,
+                headers={HEADER_ACCEPT_LANGUAGE: RESPONSE_LANGUAGE},
+            )
+        finally:
+            self._stats.form_posted(self._stats.now() - started)
 
 
 def _ready_answers(planned: PlannedBroadcast) -> tuple[KeyForm, FormAnswers]:

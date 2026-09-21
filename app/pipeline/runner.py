@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum, IntEnum
 from pathlib import Path
@@ -31,6 +31,7 @@ from app.core.retention import cleanup_expired
 from app.form.base import FormError, FormSender, FormSendResult
 from app.form.key_form import MISSING_VALUE, DateCoverage, FormAnswers, KeyForm
 from app.observability.logging_setup import get_logger, mask_stream_key
+from app.observability.run_stats import RunStage, RunStats
 from app.output.keys_file import (
     KeyRow,
     key_row_from_marked,
@@ -170,6 +171,7 @@ class _RunContext:
     logins: ChannelLogins | None        # None — входов нет (тесты без ChannelBook)
     store: RecordStore                  # память планера; read_only в --dry-run и --status
     clock: Callable[[], datetime]       # время событий: момент публикации, подтверждения, записи
+    stats: RunStats                     # статистика запуска: этапы, время объектов, итоги
 
     @property
     def now_local(self) -> datetime:
@@ -204,6 +206,7 @@ def run(
     logins: ChannelLogins | None = None,
     store: RecordStore | None = None,
     clock: Callable[[], datetime] = utc_now,
+    stats: RunStats | None = None,
 ) -> RunOutcome:
     """channel_warnings — предупреждения сверки каналов при старте: в отчёт и консоль вместе с прочими.
 
@@ -211,11 +214,13 @@ def run(
     store — память планера; открывает и закрывает её main. Без неё (тесты) — пустая память в оперативной
     памяти, как у первого запуска.
     clock — часы для времени событий; тесты передают свои.
+    stats — статистика запуска (main создаёт её первой); без неё — новый объект.
     """
     context: _RunContext = _RunContext(
         mode, config, paths, platform, form_sender, now_utc, rng, notice, [], tuple(channel_warnings), progress, logins,
         store if store is not None else RecordStore.memory(is_new=True),
         clock,
+        stats if stats is not None else RunStats(),
     )
     if mode is RunMode.STATUS:
         return _run_status(context)
@@ -223,43 +228,49 @@ def run(
 
 
 def _run_bcast(context: _RunContext) -> RunOutcome:
-    scan: BcastScan = scan_bcast(context.paths, context.now_utc)
-    if scan.is_empty:
-        return RunOutcome(report=None, exit_code=int(ExitCode.BCAST_EMPTY), problem=RunProblem.BCAST_EMPTY)
-    packages: list[ReportPackageLine] = build_package_lines(scan, context.config)
-    _progress_packages(context, packages)
-    # формы — один раз на форму, до входов и до обращений к площадке
-    context.form_sender.prepare([slot.form for slot in scan.slot_map.values()])
-    selection: Selection = build_planned(
-        scan.slot_map,
-        scan.slot_sources,
-        context.config,
-        context.platform.limits,
-        context.now_utc,
-    )
-    # даты формы — по готовым формам, до входов и до площадки: одна строка на форму вместо строки на объект
-    form_date_warnings: list[str] = _check_form_dates(context, selection.planned)
-    # к площадке обращаемся только по каналам, у которых есть объекты (и too_late): входы — все до сверки
-    _log_in(context, [item.channel for item in selection.planned])
-    _admit_all(context, selection.planned)
-    _load_records(context, selection.planned)
-    # известные слоты — будущие и прошедшие: эфир прошедшего слота на своей минуте не сирота,
-    # эфир известного слота на другой минуте — «перенесён»
-    known_slots: dict[str, datetime] = {slot.slot_id: slot.start for slot in scan.past_slots}
-    known_slots.update((slot_id, slot.start) for slot_id, slot in scan.slot_map.items())
-    orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
-        selection.planned,
-        known_slots,
-    )
-    memory_warnings: list[str] = _bootstrap_records(context, selection.planned)
-    # замечания площадки — данными: о каналах — в предупреждения, служебные эфиры — в особенности площадки
-    notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
+    stats: RunStats = context.stats
+    with stats.stage(RunStage.PACKAGES):
+        scan: BcastScan = scan_bcast(context.paths, context.now_utc)
+        if scan.is_empty:
+            return RunOutcome(report=None, exit_code=int(ExitCode.BCAST_EMPTY), problem=RunProblem.BCAST_EMPTY)
+        packages: list[ReportPackageLine] = build_package_lines(scan, context.config)
+        _progress_packages(context, packages)
+        selection: Selection = build_planned(
+            scan.slot_map,
+            scan.slot_sources,
+            context.config,
+            context.platform.limits,
+            context.now_utc,
+        )
+    with stats.stage(RunStage.FORM):
+        # формы — один раз на форму, до входов и до обращений к площадке
+        context.form_sender.prepare([slot.form for slot in scan.slot_map.values()])
+        # даты формы — по готовым формам, до входов и до площадки: одна строка на форму вместо строки на объект
+        form_date_warnings: list[str] = _check_form_dates(context, selection.planned)
+    with stats.stage(RunStage.LOGINS):
+        # к площадке обращаемся только по каналам, у которых есть объекты (и too_late): входы — все до сверки
+        _log_in(context, [item.channel for item in selection.planned])
+    with stats.stage(RunStage.RECONCILE):
+        _admit_all(context, selection.planned)
+        _load_records(context, selection.planned)
+        # известные слоты — будущие и прошедшие: эфир прошедшего слота на своей минуте не сирота,
+        # эфир известного слота на другой минуте — «перенесён»
+        known_slots: dict[str, datetime] = {slot.slot_id: slot.start for slot in scan.past_slots}
+        known_slots.update((slot_id, slot.start) for slot_id, slot in scan.slot_map.items())
+        orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
+            selection.planned,
+            known_slots,
+        )
+        memory_warnings: list[str] = _bootstrap_records(context, selection.planned)
+        # замечания площадки — данными: о каналах — в предупреждения, служебные эфиры — в особенности площадки
+        notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
     keys_path: Path | None = None
     extra_outcomes: list[PairOutcome] = []
-    if context.is_full:
-        keys_path, extra_outcomes = _execute_full(context, selection)
-    else:
-        _decide_without_actions(selection.planned)
+    with stats.stage(RunStage.ACTIONS):
+        if context.is_full:
+            keys_path, extra_outcomes = _execute_full(context, selection)
+        else:
+            _decide_without_actions(selection.planned)
     outcomes: list[PairOutcome] = [
         outcome_from_planned(item, is_dry_run=not context.is_full)
         for item in selection.planned
@@ -469,7 +480,9 @@ def _execute_full(
         if item.is_admitted and not item.is_too_late:
             _save_record(context, item, SlotStage.ADMITTED)
     for item in selection.planned:
+        started: float = context.stats.now()
         executor.execute(item)
+        context.stats.object_done(item.decision.value, context.stats.now() - started)
     keys_path, outcomes = _write_keys(
         context,
         # все будущие эфиры с ключом, включая слоты внутри min_lead_minutes и не допущенные (§5.5)
@@ -480,11 +493,13 @@ def _execute_full(
 
 def _run_status(context: _RunContext) -> RunOutcome:
     """Без пакетов: входы всех каналов → эфиры с маркером планера на каналах → keys.txt и отчёт."""
-    _log_in(context, context.config.channels)
-    marked: MarkedScan = Reconciler(context.platform, progress=context.progress).marked_broadcasts(
-        context.config.channels
-    )
-    notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
+    with context.stats.stage(RunStage.LOGINS):
+        _log_in(context, context.config.channels)
+    with context.stats.stage(RunStage.RECONCILE):
+        marked: MarkedScan = Reconciler(context.platform, progress=context.progress).marked_broadcasts(
+            context.config.channels
+        )
+        notices: tuple[PlatformNotice, ...] = context.platform.take_notices()
     rows: list[KeyRow] = [key_row_from_marked(item, _marked_results(context, item)) for item in marked.broadcasts]
     outcomes: list[PairOutcome] = [outcome_from_marked(item) for item in marked.broadcasts]
     outcomes.extend(platform_error_outcome(failure.channel, failure.error) for failure in marked.failures)
@@ -521,6 +536,18 @@ def _complete(
     package_problems: int = 0,
     undelivered: int = 0,
 ) -> RunOutcome:
+    with context.stats.stage(RunStage.REPORT):
+        return _write_outcome(context, report, package_problems=package_problems, undelivered=undelivered)
+
+
+def _write_outcome(
+    context: _RunContext,
+    report: RunReport,
+    *,
+    package_problems: int,
+    undelivered: int,
+) -> RunOutcome:
+    context.stats.record_totals(asdict(build_totals(report)))
     run_exit: RunExit = decide_exit(report, package_problems=package_problems, undelivered=undelivered)
     report = replace(report, run_exit=run_exit)
     context.progress.report_started()

@@ -1,7 +1,7 @@
 """Форматы дат и времени планера — единственный источник (ТЗ §5)."""
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Final
 
 DATE_FORMAT: Final[str] = "%d-%m-%Y"
@@ -62,3 +62,62 @@ def build_slot_id(date_text: str, time_text: str, language: str) -> str:
         time=parse_time(time_text).strftime(SLOT_TIME_FORMAT),
         language=language,
     )
+
+
+# --- квотные сутки YouTube Data API: начинаются в полночь по Тихоокеанскому времени (правило США, stdlib без tzdata)
+DATETIME_SECONDS_FORMAT: Final[str] = f"{DATE_FORMAT} %H:%M:%S"   # моменты внутри статистики запуска
+PACIFIC_STANDARD_OFFSET_HOURS: Final[int] = -8   # PST
+PACIFIC_DAYLIGHT_OFFSET_HOURS: Final[int] = -7   # PDT
+DST_START_MONTH: Final[int] = 3                  # второе воскресенье марта, 02:00 местного (PST)
+DST_START_SUNDAY_NUMBER: Final[int] = 2
+DST_END_MONTH: Final[int] = 11                   # первое воскресенье ноября, 02:00 местного (PDT)
+DST_END_SUNDAY_NUMBER: Final[int] = 1
+DST_SWITCH_LOCAL_HOUR: Final[int] = 2
+SUNDAY_WEEKDAY: Final[int] = 6
+
+
+def format_datetime_seconds(value: datetime) -> str:
+    return value.strftime(DATETIME_SECONDS_FORMAT)
+
+
+def _nth_sunday(year: int, month: int, number: int) -> date:
+    first: date = date(year, month, 1)
+    shift: int = (SUNDAY_WEEKDAY - first.weekday()) % 7
+    return first + timedelta(days=shift + 7 * (number - 1))
+
+
+def _pacific_offset_hours(moment: datetime) -> int:
+    """Смещение Тихоокеанского времени от UTC в момент moment (aware): −7 летом, −8 зимой."""
+    moment_utc: datetime = moment.astimezone(timezone.utc)
+    year: int = moment_utc.year
+    start_local: date = _nth_sunday(year, DST_START_MONTH, DST_START_SUNDAY_NUMBER)
+    end_local: date = _nth_sunday(year, DST_END_MONTH, DST_END_SUNDAY_NUMBER)
+    dst_start_utc: datetime = datetime.combine(start_local, time(DST_SWITCH_LOCAL_HOUR), timezone.utc) - timedelta(
+        hours=PACIFIC_STANDARD_OFFSET_HOURS
+    )
+    dst_end_utc: datetime = datetime.combine(end_local, time(DST_SWITCH_LOCAL_HOUR), timezone.utc) - timedelta(
+        hours=PACIFIC_DAYLIGHT_OFFSET_HOURS
+    )
+    if dst_start_utc <= moment_utc < dst_end_utc:
+        return PACIFIC_DAYLIGHT_OFFSET_HOURS
+    return PACIFIC_STANDARD_OFFSET_HOURS
+
+
+def youtube_quota_day(moment: datetime) -> date:
+    """Квотные сутки YouTube, в которые попадает момент (aware): дата по Тихоокеанскому времени."""
+    moment_utc: datetime = moment.astimezone(timezone.utc)
+    return (moment_utc + timedelta(hours=_pacific_offset_hours(moment_utc))).date()
+
+
+def youtube_quota_day_start(moment: datetime) -> datetime:
+    """Начало квотных суток момента — полночь по Тихоокеанскому времени, aware UTC.
+
+    Переход на летнее и зимнее время — в 02:00 местного, полночь дня перехода живёт по прежнему смещению.
+    """
+    day: date = youtube_quota_day(moment)
+    midnight: datetime = datetime.combine(day, time(0), timezone.utc)
+    for offset in (PACIFIC_DAYLIGHT_OFFSET_HOURS, PACIFIC_STANDARD_OFFSET_HOURS):
+        candidate: datetime = midnight - timedelta(hours=offset)
+        if _pacific_offset_hours(candidate) == offset:
+            return candidate
+    return midnight - timedelta(hours=PACIFIC_STANDARD_OFFSET_HOURS)

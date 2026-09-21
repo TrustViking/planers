@@ -20,6 +20,7 @@ from app.form.base import (
 from app.form.discovery import FormDiscovery, FormStructure, SectionJump
 from app.core.retry import RetryPolicy
 from app.form.submitter import CONFIRMATION_MARKERS, Confirmation, GoogleFormSender, read_confirmation
+from app.observability.run_stats import RunStats
 from app.package.model import Slot
 from app.pipeline.plan import PlannedBroadcast
 from app.tests.conftest import build_planned
@@ -519,3 +520,34 @@ def test_post_asks_for_english_response_and_get_is_untouched(
     assert url == RESPONSE_URL
     assert session.post_headers == [{"Accept-Language": "en"}]
     assert session.get_calls == [SHORT_URL]                  # страница формы читается как раньше
+
+
+def test_stats_count_form_reads_and_posts_with_their_seconds(
+    tmp_path: Path,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5o-B: каждый GET страницы формы и каждый POST ответа — в статистику запуска, с секундами."""
+    import app.form.submitter as submitter_module
+
+    monkeypatch.setattr(submitter_module.time, "sleep", lambda seconds: None)
+    ticks: list[float] = [0.0]
+
+    def _clock() -> float:
+        ticks[0] += 0.25          # каждое обращение к часам — четверть секунды
+        return ticks[0]
+
+    stats: RunStats = RunStats(clock=_clock)
+    session: _FakeSession = _FakeSession(
+        _FakeResponse(build_html()), _FakeResponse("", status_code=503), _FakeResponse(CONFIRMED_BODY)
+    )
+    now: datetime = datetime(2027, 3, 16, 12, 0)
+    sender: GoogleFormSender = GoogleFormSender(
+        session, FormDiscovery(session, tmp_path / "logs", now, stats=stats), stats=stats
+    )
+    assert _send(sender, _planned(make_config, make_slot_object)).confirmed is True
+    assert (stats.form_reads.count, stats.form_posts.count) == (1, 2)       # POST с повтором — две попытки
+    assert stats.form_reads.seconds == pytest.approx(0.25)
+    assert stats.form_posts.seconds == pytest.approx(0.5)
+    assert stats.youtube_calls == 0

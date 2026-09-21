@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import random
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from googleapiclient.errors import HttpError
 from dataclasses import replace
 
 from app.config.loader import ChannelConfig, Platform, Privacy
+from app.observability.run_stats import RunStats
 from app.platforms import youtube as youtube_module
 from app.pipeline.plan import BroadcastSpec
 from app.platforms.base import (
@@ -1701,3 +1703,101 @@ def test_empty_channels_list_is_still_channel_not_found(
 
 def test_not_listed_is_retried_by_the_table() -> None:
     assert _error_behavior("videos.list", None, ERROR_NOT_LISTED) is ErrorBehavior.RETRY
+
+
+class _AdvancingRequest:
+    """execute() занимает seconds по поддельным часам: секунды запроса отдельно от пауз."""
+
+    def __init__(self, clock: _FakeClock, seconds: float, response: Any) -> None:
+        self._clock: _FakeClock = clock
+        self._seconds: float = seconds
+        self._response: Any = response
+
+    def execute(self) -> Any:
+        self._clock.now += self._seconds
+        return self._response
+
+
+def _measured_platform(tmp_path: Path, clock: _FakeClock, pause: int = 0) -> tuple[YouTubePlatform, RunStats]:
+    stats: RunStats = RunStats(clock=clock.monotonic)
+    client_secret: Path = tmp_path / "client_secret.json"
+    client_secret.write_text("{}", encoding="utf-8")
+    platform: YouTubePlatform = YouTubePlatform(
+        client_secret, tmp_path, request_pause_sec=pause, rng=random.Random(RNG_SEED), stats=stats
+    )
+    return platform, stats
+
+
+def test_stats_count_attempts_retries_empty_answers_and_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock
+) -> None:
+    platform, stats = _measured_platform(tmp_path, clock)
+    stream: dict[str, Any] = {
+        "id": "S1", "snippet": {"title": "m"}, "cdn": {"ingestionInfo": {"ingestionAddress": "rtmp://x", "streamName": GOOD_KEY}}
+    }
+    _install(
+        platform, monkeypatch,
+        _FakeService(liveStreams=[_http_error(503, "backendError", "down"), {"items": []}, {"items": [stream]}]),
+    )
+    assert platform.get_stream(CHANNEL, "S1") is not None
+    method = stats.methods["liveStreams.list"]
+    assert (method.calls, method.retries, method.empty, method.refusals, method.units) == (3, 2, 1, 0, 3)
+    assert stats.retry_sleep_sec == pytest.approx(sum(clock.sleeps)) and len(clock.sleeps) == 2
+
+
+def test_stats_count_final_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock) -> None:
+    platform, stats = _measured_platform(tmp_path, clock)
+    _install(platform, monkeypatch, _FakeService(liveBroadcasts=[_http_error(403, "quotaExceeded", "quota")]))
+    with pytest.raises(PlatformError):
+        platform.list_upcoming(CHANNEL)
+    assert (stats.methods["liveBroadcasts.list"].calls, stats.methods["liveBroadcasts.list"].refusals) == (1, 1)
+
+
+def test_stats_keep_request_seconds_apart_from_pauses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock
+) -> None:
+    platform, stats = _measured_platform(tmp_path, clock, pause=2)
+
+    class _Broadcasts:
+        def list(self, **kwargs: Any) -> _AdvancingRequest:
+            return _AdvancingRequest(clock, 0.5, {"items": []})
+
+    class _Service:
+        def liveBroadcasts(self) -> _Broadcasts:  # noqa: N802 — имя как у googleapiclient
+            return _Broadcasts()
+
+    monkeypatch.setattr(platform, "_service", lambda channel, allow_login: _Service())
+    platform.list_upcoming(CHANNEL)
+    platform.list_upcoming(CHANNEL)
+    assert stats.request_sec == pytest.approx(1.0)
+    assert stats.pause_sec == pytest.approx(2.0)
+    assert (stats.youtube_calls, stats.youtube_units) == (2, 2)
+
+
+def test_every_operation_has_a_quota_price() -> None:
+    """Каждая операция, которую площадка передаёт в _execute, — константой *_OPERATION с ценой в QUOTA_UNITS."""
+    source: str = Path(youtube_module.__file__).read_text(encoding="utf-8")
+    operations: dict[str, str] = {
+        name: value for name, value in vars(youtube_module).items() if name.endswith("_OPERATION") and isinstance(value, str)
+    }
+    assert set(operations.values()) == set(youtube_module.QUOTA_UNITS)
+    passed: list[str] = re.findall(r"self\._(?:execute|read_by_id)\(\s*channel,\s*([^,\s]+),", source)
+    constants: list[str] = [name for name in passed if name.isupper()]   # «operation» — параметр самого _read_by_id
+    assert constants and all(name in operations for name in constants)
+    assert set(passed) - set(constants) == {"operation"}
+    assert youtube_module.QUOTA_UNITS["videos.list"] == 1 and youtube_module.QUOTA_UNITS["thumbnails.set"] == 50
+
+
+def test_unpriced_operation_costs_nothing_and_warns_once(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stats: RunStats = RunStats()
+    monkeypatch.setattr(platform, "_stats", stats)
+    _install(platform, monkeypatch, _FakeService(channels=[{"items": []}, {"items": []}]))
+    with caplog.at_level("WARNING", logger="planer"):
+        for _ in range(2):
+            platform._execute(CHANNEL, "channels.unknown", lambda service: service.channels().list(mine=True))
+    assert stats.methods["channels.unknown"].calls == 2 and stats.youtube_units == 0
+    assert [line for line in caplog.messages if line.startswith("quota_units_unknown")] == [
+        "quota_units_unknown operation=channels.unknown"
+    ]

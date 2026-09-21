@@ -20,7 +20,8 @@ from app.core.dates import FILE_STAMP_FORMAT
 
 ROOT_LOGGER_NAME: Final[str] = "planer"
 LOG_FORMAT: Final[str] = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-LOG_FILE_TEMPLATE: Final[str] = "{stamp}_planer.log"
+LOG_FILE_SUFFIX: Final[str] = "_planer.log"
+LOG_FILE_TEMPLATE: Final[str] = "{stamp}" + LOG_FILE_SUFFIX
 LOG_ENCODING: Final[str] = "utf-8"
 MASK_PREFIX: Final[str] = "****-"
 MASK_HIDDEN: Final[str] = "****"
@@ -34,6 +35,11 @@ _THIRD_PARTY_HANDLERS: list[logging.Handler] = []   # свои обработч�
 def get_logger(name: str) -> logging.Logger:
     """Дочерний логгер планера: planer.<name>."""
     return logging.getLogger(f"{ROOT_LOGGER_NAME}.{name}")
+
+
+def run_id_from_log(log_path: Path) -> str:
+    """Отметка запуска из имени файла лога (DD-MM-YYYY_HHMMSS): run_id строки статистики в памяти планера."""
+    return log_path.name.removesuffix(LOG_FILE_SUFFIX)
 
 
 def setup_logging(logs_dir: Path, debug: bool) -> Path:

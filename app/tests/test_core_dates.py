@@ -20,6 +20,8 @@ from app.core.dates import (
     parse_local_datetime_text_utc,
     parse_iso_start,
     parse_time,
+    youtube_quota_day,
+    youtube_quota_day_start,
 )
 
 
@@ -68,3 +70,28 @@ def test_local_text_becomes_the_same_moment_in_utc() -> None:
     moment: datetime = datetime(2026, 9, 17, 16, 39).astimezone()      # местное время машины
     parsed: datetime = parse_local_datetime_text_utc(format_datetime_text(moment))
     assert parsed.tzinfo is timezone.utc and parsed == moment
+
+
+def _utc(text: str) -> datetime:
+    return datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("moment", "day", "start"),
+    [
+        ("2026-09-21T06:59", "20-09-2026", "2026-09-20T07:00"),   # лето: граница 07:00 UTC
+        ("2026-09-21T07:00", "21-09-2026", "2026-09-21T07:00"),
+        ("2026-12-10T07:59", "09-12-2026", "2026-12-09T08:00"),   # зима: граница 08:00 UTC
+        ("2026-12-10T08:00", "10-12-2026", "2026-12-10T08:00"),
+        ("2026-03-08T07:59", "07-03-2026", "2026-03-07T08:00"),   # 08-03-2026 — второе воскресенье марта
+        ("2026-03-08T08:00", "08-03-2026", "2026-03-08T08:00"),   # полночь дня перехода — ещё PST
+        ("2026-03-09T07:00", "09-03-2026", "2026-03-09T07:00"),   # на следующий день — уже PDT
+        ("2026-11-01T06:59", "31-10-2026", "2026-10-31T07:00"),   # 01-11-2026 — первое воскресенье ноября
+        ("2026-11-01T07:00", "01-11-2026", "2026-11-01T07:00"),   # полночь дня перехода — ещё PDT
+        ("2026-11-02T07:59", "01-11-2026", "2026-11-01T07:00"),
+        ("2026-11-02T08:00", "02-11-2026", "2026-11-02T08:00"),   # на следующий день — уже PST
+    ],
+)
+def test_youtube_quota_day_starts_at_pacific_midnight(moment: str, day: str, start: str) -> None:
+    assert format_date(youtube_quota_day(_utc(moment))) == day
+    assert youtube_quota_day_start(_utc(moment)) == _utc(start)

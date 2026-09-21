@@ -5,6 +5,7 @@ import logging
 import random
 import re
 import shutil
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from app.google.auth import LOGIN_TIMEOUT_MINUTES
 from app.main import run_cli
 from app.paths import ROOT_ENV_VAR, PlanerPaths
 from app.platforms.base import BroadcastPlatform, ChannelInfo, PlatformError
+from app.observability.run_stats import RunStats
 from app.platforms.fake import FAKE_TOKEN_TEXT, FakePlatform
 from app.records.record_store import RecordStore
 from app.tests.conftest import FakeFormSender
@@ -54,12 +56,14 @@ def fake_platform_in_main(monkeypatch: pytest.MonkeyPatch) -> FakePlatform:
     """
     platform: FakePlatform = FakePlatform()
 
-    def _build(paths: PlanerPaths, settings: PlanerSettings, rng: random.Random) -> BroadcastPlatform:
+    def _build(
+        paths: PlanerPaths, settings: PlanerSettings, rng: random.Random, stats: RunStats | None = None
+    ) -> BroadcastPlatform:
         platform.secrets_dir = paths.secrets_dir
         return platform
 
     monkeypatch.setattr(main_module, "build_platform", _build)
-    monkeypatch.setattr(main_module, "build_form_sender", lambda paths, now_utc, rng: FakeFormSender())
+    monkeypatch.setattr(main_module, "build_form_sender", lambda paths, now_utc, rng, stats=None: FakeFormSender())
     return platform
 
 
@@ -229,7 +233,11 @@ def test_missing_channels_json_prints_template_and_creates_nothing(
     assert lines[hint + 2].startswith("  handle — ник канала на YouTube, начинается с @")
     assert lines[hint + len(msg.CONFIG_CHANNELS_FIELDS) + 1] == msg.CONFIG_CHANNELS_TEMPLATE.splitlines()[0]
     assert "Osvald.X" not in out
-    assert sorted(path.name for path in (planer_root / "secrets").iterdir()) == ["client_secret.json", "planer.json"]
+    # 5o-B: строка статистики запуска пишется и при коде 2; память о слотах — нет
+    assert sorted(path.name for path in (planer_root / "secrets").iterdir()) == [
+        "client_secret.json", "planer.json", "planer.sqlite3"
+    ]
+    assert _tables(planer_root / "secrets" / "planer.sqlite3") == ["meta", "runs"]
 
 
 def test_missing_planer_json_prints_its_template(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -239,7 +247,9 @@ def test_missing_planer_json_prints_its_template(planer_root: Path, capsys: pyte
     out: str = capsys.readouterr().out
     assert msg.CONFIG_PLANER_HINT.format(path=planer_root / "secrets" / "planer.json") in out
     assert msg.CONFIG_PLANER_TEMPLATE in out
-    assert sorted(path.name for path in (planer_root / "secrets").iterdir()) == ["channels.json", "client_secret.json"]
+    assert sorted(path.name for path in (planer_root / "secrets").iterdir()) == [
+        "channels.json", "client_secret.json", "planer.sqlite3"
+    ]
 
 
 def test_missing_field_prints_template(planer_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -675,7 +685,7 @@ def test_terminal_has_no_raw_log_lines(
             logging.getLogger("googleapiclient.discovery_cache").warning("file_cache is unavailable")
             super().prepare(forms)
 
-    monkeypatch.setattr(main_module, "build_form_sender", lambda paths, now_utc, rng: _NoisySender())
+    monkeypatch.setattr(main_module, "build_form_sender", lambda paths, now_utc, rng, stats=None: _NoisySender())
     _write_config(planer_root)
     _write_tokens(planer_root, RU_HANDLE)
     fake_platform_in_main.tokens_missing = {UA_KEY}
@@ -754,6 +764,14 @@ def opened_stores(monkeypatch: pytest.MonkeyPatch) -> list[RecordStore]:
     return opened
 
 
+def _tables(path: Path) -> list[str]:
+    connection: sqlite3.Connection = sqlite3.connect(path)
+    try:
+        return sorted(row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'"))
+    finally:
+        connection.close()
+
+
 def test_memory_is_opened_for_the_run_and_closed(
     planer_root: Path,
     fake_platform_in_main: FakePlatform,
@@ -764,7 +782,8 @@ def test_memory_is_opened_for_the_run_and_closed(
     _ready(planer_root)
     make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
     assert run_cli(["--dry-run"]) == 0
-    assert not (planer_root / "secrets" / "planer.sqlite3").exists()        # dry-run память не создаёт
+    # dry-run память о слотах не создаёт; строка статистики запуска — есть (5o-B)
+    assert _tables(planer_root / "secrets" / "planer.sqlite3") == ["meta", "runs"]
     assert run_cli([]) == 0
     assert (planer_root / "secrets" / "planer.sqlite3").is_file()
     assert [(store.is_read_only, store.is_closed) for store in opened_stores] == [(True, True), (False, True)]
@@ -802,3 +821,150 @@ def test_memory_is_closed_when_the_run_crashes(
     assert store.is_closed
     log: str = _log_text(planer_root)
     assert "| run_crashed " in log and "RuntimeError: сломалось в сверке" in log
+
+
+# --- 5o-B: статистика запуска — последние строки терминала, строка runs, строки лога
+
+ELAPSED_LINE: re.Pattern[str] = re.compile(r"^Время работы: \d+ мин \d+ сек$")
+YOUTUBE_LINE: re.Pattern[str] = re.compile(
+    r"^YouTube: обращений (\d+), квота ≈ (\d+) ед\.; за квотные сутки на этом компьютере \(с \d{2}:\d{2}\) ≈ ([\d ]+) ед\.$"
+)
+
+
+@pytest.fixture
+def counted_platform(fake_platform_in_main: FakePlatform, monkeypatch: pytest.MonkeyPatch) -> FakePlatform:
+    """Фейк не ходит в YouTube: каждое list_upcoming засчитывается статистике как одно чтение за 1 ед."""
+    built = main_module.build_platform
+
+    def _build(
+        paths: PlanerPaths, settings: PlanerSettings, rng: random.Random, stats: RunStats | None = None
+    ) -> BroadcastPlatform:
+        platform: FakePlatform = built(paths, settings, rng, stats)   # type: ignore[assignment]
+        original = platform.list_upcoming
+
+        def _list(channel: Any) -> Any:
+            if stats is not None:
+                stats.request_done("liveBroadcasts.list", 0.0, 1)
+            return original(channel)
+
+        monkeypatch.setattr(platform, "list_upcoming", _list)
+        return platform
+
+    monkeypatch.setattr(main_module, "build_platform", _build)
+    return fake_platform_in_main
+
+
+def _runs(root: Path) -> list[tuple[Any, ...]]:
+    connection: sqlite3.Connection = sqlite3.connect(root / "secrets" / "planer.sqlite3")
+    try:
+        return list(connection.execute("SELECT run_id, quota_day, quota_units, exit_code, mode, version FROM runs"))
+    finally:
+        connection.close()
+
+
+def test_finished_run_prints_time_and_youtube_last(
+    planer_root: Path,
+    counted_platform: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    assert run_cli([]) == 0
+    lines: list[str] = capsys.readouterr().out.splitlines()
+    assert lines[-3] == ""
+    assert ELAPSED_LINE.match(lines[-2])
+    found = YOUTUBE_LINE.match(lines[-1])
+    assert found is not None and found.group(1) == "1" and found.group(2) == "1" and found.group(3) == "1"
+    [row] = _runs(planer_root)
+    assert (row[2], row[3], row[4], row[5]) == (1, 0, "full", APP_VERSION)
+    assert re.fullmatch(r"\d{2}-\d{2}-\d{4}_\d{6}", row[0])
+    [log_file] = list((planer_root / "logs").glob("*_planer.log"))
+    assert log_file.name == f"{row[0]}_planer.log"          # run_id — отметка из имени лога
+    log: str = _log_text(planer_root)
+    assert "| run_stats elapsed_sec=" in log and "youtube_calls=1 youtube_units=1" in log
+    assert "| run_stats_method operation=liveBroadcasts.list calls=1" in log
+    assert "| run_stats_stage stage=logins sec=" in log and "| run_stats_stage stage=other sec=" in log
+    assert "| run_stats_objects decision=create count=1" in log
+    assert re.search(r"\| run_finished exit_code=0 elapsed_sec=\d+\.\d$", log, re.MULTILINE)
+    assert log.index("| run_stats ") < log.index("| run_finished ")
+
+
+def test_config_error_prints_time_without_youtube_line(
+    planer_root: Path, fake_platform_in_main: FakePlatform, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_cli(["--dry-run"]) == 2
+    lines: list[str] = capsys.readouterr().out.splitlines()
+    assert ELAPSED_LINE.match(lines[-1])
+    assert not any(line.startswith("YouTube: ") for line in lines)
+    [row] = _runs(planer_root)
+    assert (row[2], row[3], row[4]) == (0, 2, "dry_run")
+
+
+def test_crashed_run_still_prints_time_last(
+    planer_root: Path,
+    counted_platform: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("сломалось внутри")
+
+    monkeypatch.setattr(main_module, "render_console", _boom)
+    assert run_cli([]) == 1
+    lines: list[str] = capsys.readouterr().out.splitlines()
+    assert ELAPSED_LINE.match(lines[-2]) and YOUTUBE_LINE.match(lines[-1])
+    assert [row[3] for row in _runs(planer_root)] == [1]
+
+
+def test_quota_day_sums_runs_of_this_computer(
+    planer_root: Path,
+    counted_platform: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Два запуска в одни квотные сутки: вторая строка терминала — сумма обоих, --dry-run slots не трогает."""
+    run_ids: list[str] = ["21-09-2026_092900", "21-09-2026_094926"]
+    monkeypatch.setattr(main_module, "run_id_from_log", lambda log_path: run_ids.pop(0))
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    assert run_cli(["--dry-run"]) == 0
+    assert _tables(planer_root / "secrets" / "planer.sqlite3") == ["meta", "runs"]
+    capsys.readouterr()
+    assert run_cli(["--dry-run"]) == 0
+    found = YOUTUBE_LINE.match(capsys.readouterr().out.splitlines()[-1])
+    assert found is not None and (found.group(2), found.group(3)) == ("1", "2")
+    assert [(row[0], row[4]) for row in _runs(planer_root)] == [
+        ("21-09-2026_092900", "dry_run"), ("21-09-2026_094926", "dry_run")
+    ]
+    assert _tables(planer_root / "secrets" / "planer.sqlite3") == ["meta", "runs"]
+
+
+def test_failed_stats_write_says_no_data(
+    planer_root: Path,
+    counted_platform: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+    monkeypatch.setattr(main_module.RunStore, "save", lambda self, record: None)
+    assert run_cli(["--dry-run"]) == 0
+    last: str = capsys.readouterr().out.splitlines()[-1]
+    assert last == msg.RUN_YOUTUBE_NO_DAY_DATA.format(calls=1, units=1)
+
+
+def test_duration_text_switches_to_hours() -> None:
+    assert main_module._duration_text(583.4) == "9 мин 43 сек"
+    assert main_module._duration_text(3912.0) == "1 ч 05 мин 12 сек"
+    assert main_module._number_text(10370) == "10 370"
