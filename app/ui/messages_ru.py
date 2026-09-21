@@ -313,12 +313,13 @@ STREAM_DESCRIPTION: Final[str] = (
 # Хвост описания ключа: отпечаток заглушки обложки канала (PLACEHOLDER_TOKEN) — по нему узнаётся эфир без обложки.
 STREAM_DESCRIPTION_PLACEHOLDER: Final[str] = "; заглушка обложки {token}"
 WARNING_FORM_DIAGNOSTIC: Final[str] = "ответ формы сохранён для разбора: {path}"
-# Постоянные особенности площадки — только в отчёте, разделом «Особенности площадки» (ТЗ §5.6).
+# Поведение планера: пояснение под заголовком «Уже запланировано, совпадает» (report.has_kept_keys).
 WARNING_KEPT_KEY: Final[str] = (
     "ключ совпавшего эфира форма уже подтверждала раньше (память планера) — повторно он не отправляется. "
     "Если стример ключа не получил — передайте его из keys.txt вручную или удалите эфир на YouTube: "
     "планер создаст его заново с новым ключом и отправит"
 )
+# Постоянные особенности площадки — только в отчёте, разделом «Особенности площадки» (ТЗ §5.6).
 WARNING_LIVE_CHAT: Final[str] = (
     "у эфиров YouTube всегда включён живой чат. Через API он не отключается: если чат не нужен, "
     "выключите его один раз в Студии на весь канал (Settings -> Community)"
@@ -388,6 +389,10 @@ YOUTUBE_REASON_TEXT: Final[dict[str, str]] = {
     "authenticatedUserAccountSuspended": _SUSPENDED_TEXT,
     "authenticatedUserNotChannel": "у аккаунта нет канала YouTube — при входе выберите канал",
     "videoNotFound": "эфир не найден на YouTube — возможно, удалён во время запуска",
+    "notListed": (
+        "YouTube не отдал эфир или поток по его id и после повторов — после записи площадка иногда отстаёт; "
+        "следующий запуск прочитает его снова"
+    ),
     "invalidScheduledStartTime": "YouTube не принял время старта эфира",
     "transportFailed": (
         "YouTube недоступен (сеть или сбой на стороне YouTube), повторы не помогли — запустите планер позже"
@@ -434,6 +439,9 @@ PLANER_ERROR_TEXT: Final[dict[str, str]] = {
     "keysWriteFailed": "файл ключей не записан: {detail}",
 }
 ORPHAN_LINE: Final[str] = "{date} {time} {language} -> {channel} — {url} — эфир не удалён"
+ORPHAN_MOVED_LINE: Final[str] = (
+    "{date} {time} {language} -> {channel} — {url} — стоит на {actual}: время эфира менял владелец, планер его не трогает"
+)
 SCHEDULED_LINE: Final[str] = "{prefix} — {url}"
 
 # --- отчёт logs\{дата}_{время}_report.md (ТЗ §5.6): подробности, можно переслать оператору
@@ -452,6 +460,12 @@ REPORT_SECTION_WARNINGS: Final[str] = "## Предупреждения"
 REPORT_SECTION_MISMATCHES: Final[str] = "## Расхождения с платформой"
 REPORT_SECTION_ERRORS: Final[str] = "## Ошибки"
 REPORT_SECTION_NOT_DELIVERED: Final[str] = "## Ключ не дошёл до стримера"
+REPORT_SECTION_TWO_KEYS: Final[str] = "## В форме два ключа на один слот ({count})"
+TWO_KEYS_LINE: Final[str] = (
+    "{date} {time} {language} -> {channel} — прежний эфир {old_url} на времени слота не найден (удалён или перенесён), "
+    "поставлен новый {new_url}. Действующий ключ {new_key}; прежний {old_key} тоже передан в форму на эту дату — "
+    "для этого слота он больше не действует"
+)
 REPORT_SECTION_NOT_ADMITTED: Final[str] = "## Не допущено к публикации ({count})"
 REPORT_SECTION_NOTES: Final[str] = "## Особенности площадки — так устроена площадка, это не про этот запуск"
 NOT_DELIVERED_LINE: Final[str] = "{prefix} — {reason}; эфир на канале стоит — передайте ключ стримеру из keys.txt вручную"
@@ -556,6 +570,10 @@ CONSOLE_SKIP_GROUP_TOO_LATE: Final[str] = "  до старта меньше {min
 CONSOLE_SKIP_GROUP_NO_CHANNEL: Final[str] = "  нет канала для языка {language}"
 CONSOLE_ATTENTION_ERROR: Final[str] = "  ошибка: {text}"
 CONSOLE_ATTENTION_NOT_DELIVERED: Final[str] = "  ключ не дошёл до стримера: {prefix} — {reason}"
+CONSOLE_ATTENTION_TWO_KEYS: Final[str] = (
+    "  {date} {time} {language} -> {channel}: прежний эфир на времени слота не найден — поставлен новый; "
+    "в форме на эту дату два ключа: действующий {new_key}, прежний {old_key}"
+)
 CONSOLE_ATTENTION_NOT_ADMITTED: Final[str] = "  не допущено: {text}"
 CONSOLE_ATTENTION_PACKAGE: Final[str] = "  пакет: {text}"
 CONSOLE_ATTENTION_TEXT: Final[str] = "  {text}"

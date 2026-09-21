@@ -159,6 +159,18 @@ class OutcomeError:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class ReplacedBroadcast:
+    """Прежний эфир планера этого слота, чей ключ форма уже подтвердила, а этот запуск поставил новый.
+
+    В форме на дату слота теперь два ключа: действующий — нового эфира, прежний — этого.
+    """
+
+    broadcast_id: str
+    broadcast_url: str
+    stream_key: str      # прежний подтверждённый формой ключ (полностью; маскирует вывод)
+
+
 def to_minute(value: datetime) -> datetime:
     """Момент старта с точностью до минуты в UTC — единственный способ сравнивать время."""
     return value.astimezone(timezone.utc).replace(second=0, microsecond=0)
@@ -317,6 +329,8 @@ class PlannedBroadcast:
     # обложка, поставленная этим запуском (remember_thumbnail): id эфира и момент — в память
     thumbnail_set_broadcast_id: str | None = None
     thumbnail_set_at: str | None = None
+    # эфир создан заново, а память помнила другой эфир с подтверждённым ключом (remember_replaced)
+    replaced: ReplacedBroadcast | None = None
 
     # --- объекты запуска и допуск (admit). channel_object в production передаётся всегда;
     # None — только тесты без ChannelBook. key_form None — отправитель формы не проверяет (тесты, Noop).
@@ -566,6 +580,23 @@ class PlannedBroadcast:
             return
         failed: set[ChangedField] = {*self.unfixed_fields, name}
         self.unfixed_fields = tuple(candidate for candidate in ChangedField if candidate in failed)
+
+    def remember_replaced(self) -> ReplacedBroadcast | None:
+        """Эфир создан этим запуском, а запись памяти помнит другой эфир планера с подтверждённым ключом.
+
+        Снимается сразу после создания, до того как новая запись памяти заменит прежнюю.
+        """
+        if self.record is None or not self.broadcast_id:
+            return None
+        previous: RecordResults = self.record.results
+        if not previous.broadcast_id or previous.broadcast_id == self.broadcast_id or not previous.confirmed_stream_key:
+            return None
+        self.replaced = ReplacedBroadcast(
+            broadcast_id=previous.broadcast_id,
+            broadcast_url=previous.broadcast_url or broadcast_url_for(self.channel, previous.broadcast_id),
+            stream_key=previous.confirmed_stream_key,
+        )
+        return self.replaced
 
     def remember_thumbnail(self, broadcast_id: str, now: datetime) -> None:
         """Обложка эфира поставлена: факт уйдёт в память и переживёт задержку картинки на площадке."""

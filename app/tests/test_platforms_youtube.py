@@ -33,6 +33,7 @@ from app.platforms.youtube import (
     DEFAULT_BROADCAST_FLAG,
     ERROR_AUTH,
     ERROR_LOGIN_REQUIRED,
+    ERROR_NOT_LISTED,
     ERROR_TRANSPORT,
     RETRY_POLICY,
     YOUTUBE_STREAM_KEY_PATTERN,
@@ -445,9 +446,15 @@ def test_get_stream_reads_marker_and_key(platform: YouTubePlatform, monkeypatch:
     )
 
 
-def test_get_stream_without_items_gives_none(platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(platform, monkeypatch, _FakeService(liveStreams=[{"items": []}]))
+def test_get_stream_without_items_gives_none(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock
+) -> None:
+    """Пустой ответ по id повторяется; пусто на всех попытках — None, как раньше."""
+    empties: list[Any] = [{"items": []} for _ in range(RETRY_POLICY.max_attempts)]
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(liveStreams=empties))
     assert platform.get_stream(CHANNEL, "S1") is None
+    assert len(service.calls) == RETRY_POLICY.max_attempts
+    assert clock.sleeps == _expected_delays(RETRY_POLICY.max_retries)
 
 
 def test_unexpected_key_format_warns_but_keeps_stream(
@@ -1266,7 +1273,7 @@ def test_read_facts_without_live_streaming_details_gives_none(
         _FakeService(
             videos=[{"items": [{"id": "B1", "snippet": {"title": "Эфир", "description": ""},
                                 "status": {}, "contentDetails": {}}]}],
-            liveBroadcasts=[{"items": []}],
+            liveBroadcasts=[{"items": [_broadcast_item("B1", "2027-03-17T17:00:00Z", stream_id=None)]}],
         ),
     )
     facts: BroadcastFacts = platform.read_facts(CHANNEL, "B1")
@@ -1609,3 +1616,88 @@ def test_connection_drop_on_reading_call_is_retried_as_before(
     )
     assert platform.list_upcoming(CHANNEL) == []
     assert len(service.calls) == 2 and clock.sleeps == _expected_delays(1)
+
+
+def _facts_video(broadcast_id: str = "B1") -> dict[str, Any]:
+    return {
+        "items": [
+            {
+                "id": broadcast_id,
+                "snippet": {"title": "Эфир", "description": "Описание", "defaultLanguage": "uk"},
+                "status": {"privacyStatus": "unlisted"},
+                "liveStreamingDetails": {"scheduledStartTime": "2027-03-17T17:00:00Z"},
+            }
+        ]
+    }
+
+
+def test_empty_read_by_id_after_write_is_retried(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Прогон 20-09-2026 23:37: videos.list через 2 с после videos.update отдал пустой items — повтор, а не сбой."""
+    service: _FakeService = _install(
+        platform,
+        monkeypatch,
+        _FakeService(
+            videos=[{"items": []}, _facts_video()],
+            liveBroadcasts=[{"items": [_broadcast_item("B1", "2027-03-17T17:00:00Z", stream_id=None)]}],
+        ),
+    )
+    caplog.set_level("INFO", logger="planer")
+    facts: BroadcastFacts = platform.read_facts(CHANNEL, "B1")
+    assert facts.default_language == "uk"
+    assert [call["resource"] for call in service.calls] == ["videos", "videos", "liveBroadcasts"]
+    assert clock.sleeps == _expected_delays(1)
+    assert any("request_retry operation=videos.list" in line and "reason=notListed" in line for line in caplog.messages)
+
+
+def test_empty_read_by_id_on_every_attempt_is_not_listed(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    empties: list[Any] = [{"items": []} for _ in range(RETRY_POLICY.max_attempts)]
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(videos=empties))
+    caplog.set_level("INFO", logger="planer")
+    with pytest.raises(PlatformError) as raised:
+        platform.read_facts(CHANNEL, "B1")
+    assert raised.value.code == ERROR_NOT_LISTED
+    assert "videos.list" in raised.value.message and "B1" in raised.value.message
+    assert str(RETRY_POLICY.max_attempts) in raised.value.message
+    assert len(service.calls) == RETRY_POLICY.max_attempts
+    assert [line for line in caplog.messages if line.startswith("read_not_listed")] == [
+        f'read_not_listed operation=videos.list channel="{CHANNEL.account_name}" handle={CHANNEL.handle}'
+        f" object_id=B1 attempts={RETRY_POLICY.max_attempts}"
+    ]
+
+
+def test_empty_video_item_and_stream_marker_are_not_listed(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock
+) -> None:
+    empties: list[Any] = [{"items": []} for _ in range(RETRY_POLICY.max_attempts)]
+    _install(platform, monkeypatch, _FakeService(videos=list(empties), liveStreams=list(empties)))
+    with pytest.raises(PlatformError) as video_raised:
+        platform.apply_video_settings(CHANNEL, "B1", "uk", "22", "unlisted")
+    with pytest.raises(PlatformError) as stream_raised:
+        platform.set_stream_marker(CHANNEL, "S1", "17-03-2027_1900_uk")
+    assert (video_raised.value.code, stream_raised.value.code) == (ERROR_NOT_LISTED, ERROR_NOT_LISTED)
+
+
+def test_empty_upcoming_list_is_not_retried(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock
+) -> None:
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(liveBroadcasts=[{"items": []}]))
+    assert platform.list_upcoming(CHANNEL) == []
+    assert len(service.calls) == 1 and clock.sleeps == []
+
+
+def test_empty_channels_list_is_still_channel_not_found(
+    platform: YouTubePlatform, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock
+) -> None:
+    service: _FakeService = _install(platform, monkeypatch, _FakeService(channels=[{"items": []}]))
+    with pytest.raises(PlatformError) as raised:
+        platform.describe_channel(CHANNEL)
+    assert raised.value.code == "channelNotFound"
+    assert len(service.calls) == 1 and clock.sleeps == []
+
+
+def test_not_listed_is_retried_by_the_table() -> None:
+    assert _error_behavior("videos.list", None, ERROR_NOT_LISTED) is ErrorBehavior.RETRY

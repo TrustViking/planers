@@ -56,6 +56,7 @@ from app.output.report import (
     build_totals,
     build_warning_lines,
     display_path,
+    has_kept_keys,
     outcome_from_marked,
     outcome_from_planned,
     planer_error_outcome,
@@ -80,6 +81,7 @@ from app.pipeline.plan import (
     OutcomeError,
     OutcomeWarning,
     PlannedBroadcast,
+    ReplacedBroadcast,
 )
 from app.platforms.channel import Channel
 from app.records.record_store import RecordStore
@@ -241,11 +243,13 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
     _log_in(context, [item.channel for item in selection.planned])
     _admit_all(context, selection.planned)
     _load_records(context, selection.planned)
-    # известные слоты — будущие и прошедшие: эфир прошедшего слота, который ещё не начался, не сирота
-    known_slot_ids: frozenset[str] = frozenset(scan.slot_map) | frozenset(slot.slot_id for slot in scan.past_slots)
+    # известные слоты — будущие и прошедшие: эфир прошедшего слота на своей минуте не сирота,
+    # эфир известного слота на другой минуте — «перенесён»
+    known_slots: dict[str, datetime] = {slot.slot_id: slot.start for slot in scan.past_slots}
+    known_slots.update((slot_id, slot.start) for slot_id, slot in scan.slot_map.items())
     orphans: tuple[OrphanBroadcast, ...] = Reconciler(context.platform, progress=context.progress).reconcile(
         selection.planned,
-        known_slot_ids,
+        known_slots,
     )
     memory_warnings: list[str] = _bootstrap_records(context, selection.planned)
     # замечания площадки — данными: о каналах — в предупреждения, служебные эфиры — в особенности площадки
@@ -280,6 +284,7 @@ def _run_bcast(context: _RunContext) -> RunOutcome:
         keys_file_path=display_path(context.paths.root, keys_path),
         notice=context.notice,
         platform_notes=build_notice_note_lines(notices),
+        has_kept_keys=has_kept_keys(selection.planned),
     )
     # ключ, который должен был дойти до стримера и не дошёл, — это код выхода 1 (§7.5)
     undelivered: int = sum(1 for item in selection.planned if item.is_key_undelivered) if context.is_full else 0
@@ -578,6 +583,8 @@ def _orphan_line(orphan: OrphanBroadcast) -> OrphanLine:
         account_name=orphan.channel.account_name,
         handle=orphan.channel.handle,
         broadcast_url=broadcast_url_for(orphan.channel, orphan.broadcast.broadcast_id),
+        kind=orphan.kind,
+        actual_start=format_datetime_text(orphan.broadcast.start_utc.astimezone()),
     )
 
 
@@ -653,7 +660,8 @@ def _log_broadcast_fields(item: PlannedBroadcast) -> None:
     после действий (facts) — для разбора расхождений. found — не состояние после правки: это facts.
     """
     LOGGER.info("broadcast_expected %s", _log_line(item, _describe_spec(item.expected)))
-    LOGGER.info("broadcast_found %s", _log_line(item, _describe_spec(item.actual)))
+    if item.actual is not None:   # созданный этим запуском эфир в списке не находился
+        LOGGER.info("broadcast_found %s", _log_line(item, _describe_spec(item.actual)))
     if item.facts is not None:
         LOGGER.info("broadcast_facts %s", _log_line(item, _describe_facts(item.facts)))
 
@@ -796,6 +804,20 @@ class _Executor:
             created.broadcast_id,
             mask_stream_key(created.stream_key),
         )
+        # до записи published: прежний эфир и его подтверждённый ключ известны только из прежней записи
+        replaced: ReplacedBroadcast | None = item.remember_replaced()
+        if replaced is not None:
+            LOGGER.info(
+                'broadcast_replaced slot_id=%s channel="%s" handle=%s previous_broadcast_id=%s previous_stream_key=%s'
+                ' broadcast_id=%s stream_key=%s',
+                item.slot_id,
+                item.channel.account_name,
+                item.channel.handle,
+                replaced.broadcast_id,
+                mask_stream_key(replaced.stream_key),
+                created.broadcast_id,
+                mask_stream_key(created.stream_key),
+            )
         self._set_thumbnail(item, created.broadcast_id)
 
     def _attach_stream(self, item: PlannedBroadcast) -> None:

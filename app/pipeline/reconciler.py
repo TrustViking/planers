@@ -12,15 +12,19 @@
 Обложка сверяется по заглушкам канала (_channel_placeholders): картинка эфира совпала с заглушкой —
 своей обложки нет, это расхождение по THUMBNAIL. Память планера главнее картинки: обложку этому же эфиру
 ставил планер (PlannedBroadcast.apply_recorded_thumbnail) — обложка своя, картинка просто ещё не обновилась.
-Известные слоты (slot_ids) — будущие и прошедшие: эфир прошедшего, ещё не начавшегося слота — не сирота.
+Известные слоты (known_slots: slot_id → старт) — будущие и прошедшие: эфир прошедшего, ещё не начавшегося
+слота на своей минуте — не сирота. Эфир с меткой известного слота, стоящий на другой минуте, — «перенесён»
+(OrphanKind.MOVED): время менял владелец, планер его не трогает, но показывает в «Перенесён или отменён?».
+Эфиры, уже показанные в других разделах (опознанные объектами, неоднозначные кандидаты), сиротами не считаются.
 """
 from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Final
 
 from app.config.loader import ChannelConfig
@@ -57,13 +61,21 @@ PLACEHOLDER_DUPLICATE_MIN: Final[int] = 2
 LOG_LIST_JOINER: Final[str] = ","
 
 
+class OrphanKind(str, Enum):
+    """Почему эфир с меткой планера не опознан ни одним объектом."""
+
+    ORPHAN = "orphan"   # слота с такой меткой нет среди известных
+    MOVED = "moved"     # слот известен, а эфир стоит на другой минуте: время менял владелец
+
+
 @dataclass(frozen=True)
 class OrphanBroadcast:
-    """Эфир с маркером планера, чьего слота нет среди будущих слотов (§12 п.4)."""
+    """Эфир с маркером планера без своего объекта: слота нет или эфир стоит не на минуте слота (§12 п.4)."""
 
     channel: ChannelConfig
     broadcast: UpcomingBroadcast
     marker: str
+    kind: OrphanKind = OrphanKind.ORPHAN
 
 
 @dataclass(frozen=True)
@@ -121,6 +133,16 @@ def split_marker(marker: str) -> MarkerParts | None:
     return MarkerParts(date=date_text, time=time_text, language=language)
 
 
+def _orphan_kind(marked: MarkedBroadcast, known_slots: Mapping[str, datetime]) -> OrphanKind | None:
+    """Слота нет — сирота; слот известен, минута другая — перенесён; своя минута — не сирота (5m-E)."""
+    slot_start: datetime | None = known_slots.get(marked.stream.title)
+    if slot_start is None:
+        return OrphanKind.ORPHAN
+    if to_minute(marked.broadcast.start_utc) != to_minute(slot_start):
+        return OrphanKind.MOVED
+    return None
+
+
 def _platform_error(channel: ChannelConfig, error: PlatformError) -> OutcomeError:
     return OutcomeError(origin=channel.platform.value, code=error.code, message=error.message)
 
@@ -162,17 +184,21 @@ class Reconciler:
         self._platform: BroadcastPlatform = platform
         self._progress: RunProgress = progress
         self._streams: dict[tuple[str, str], StreamInfo | None] = {}
+        self._ambiguous_ids: set[str] = set()   # эфиры-кандидаты AMBIGUOUS: уже показаны предупреждением
 
     def reconcile(
         self,
         planned: Sequence[PlannedBroadcast],
-        slot_ids: frozenset[str],
+        known_slots: Mapping[str, datetime],
         channels: Sequence[ChannelConfig] = (),
     ) -> tuple[OrphanBroadcast, ...]:
-        """Решения пишутся в объекты; наружу — только сироты (§12 п.4)."""
+        """Решения пишутся в объекты; наружу — только сироты и перенесённые (§12 п.4).
+
+        known_slots — slot_id → момент старта у всех известных слотов (будущих и прошедших).
+        """
         orphans: list[OrphanBroadcast] = []
         for channel, items in _group_by_channel(planned, channels):
-            orphans.extend(self._reconcile_channel(channel, items, slot_ids))
+            orphans.extend(self._reconcile_channel(channel, items, known_slots))
         return tuple(orphans)
 
     def marked_broadcasts(self, channels: Sequence[ChannelConfig]) -> MarkedScan:
@@ -199,7 +225,7 @@ class Reconciler:
         self,
         channel: ChannelConfig,
         items: list[PlannedBroadcast],
-        slot_ids: frozenset[str],
+        known_slots: Mapping[str, datetime],
     ) -> list[OrphanBroadcast]:
         if _is_channel_not_ready(items):
             LOGGER.info(
@@ -237,7 +263,8 @@ class Reconciler:
                 ",".join(name.value for name in item.changed_fields) or "-",
                 ",".join(name.value for name in item.reported_fields) or "-",
             )
-        return self._orphans(channel, broadcasts, slot_ids)
+        shown: frozenset[str] = frozenset(item.found.broadcast_id for item in items if item.found is not None)
+        return self._orphans(channel, broadcasts, known_slots, shown | self._ambiguous_ids)
 
     def _channel_placeholders(self, channel: ChannelConfig, broadcasts: list[UpcomingBroadcast]) -> frozenset[str]:
         """Заглушки обложки канала: отпечатки из описаний потоков и картинки, повторённые у нескольких эфиров.
@@ -353,6 +380,7 @@ class Reconciler:
     def _warn_ambiguous(self, item: PlannedBroadcast, candidates: tuple[UpcomingBroadcast, ...]) -> None:
         """Планер не выбирает и не удаляет (инвариант 8), но обязан сказать, какие эфиры мешают."""
         item.ambiguous_urls = tuple(broadcast_url_for(item.channel, broadcast.broadcast_id) for broadcast in candidates)
+        self._ambiguous_ids.update(broadcast.broadcast_id for broadcast in candidates)
         LOGGER.warning(
             'broadcast_ambiguous slot_id=%s channel="%s" handle=%s candidates=%s',
             item.slot_id,
@@ -394,13 +422,29 @@ class Reconciler:
         self,
         channel: ChannelConfig,
         broadcasts: list[UpcomingBroadcast],
-        slot_ids: frozenset[str],
+        known_slots: Mapping[str, datetime],
+        shown_ids: frozenset[str],
     ) -> list[OrphanBroadcast]:
-        return [
-            OrphanBroadcast(channel=channel, broadcast=item.broadcast, marker=item.stream.title)
-            for item in self._marked_in_channel(channel, broadcasts)
-            if item.stream.title not in slot_ids
-        ]
+        """Эфиры с меткой планера без своего объекта; уже показанные в других разделах — не повторяются."""
+        orphans: list[OrphanBroadcast] = []
+        for item in self._marked_in_channel(channel, broadcasts):
+            if item.broadcast.broadcast_id in shown_ids:
+                continue
+            kind: OrphanKind | None = _orphan_kind(item, known_slots)
+            if kind is None:
+                continue
+            orphans.append(OrphanBroadcast(channel=channel, broadcast=item.broadcast, marker=item.stream.title, kind=kind))
+            if kind is OrphanKind.MOVED:
+                LOGGER.info(
+                    'broadcast_moved slot_id=%s channel="%s" handle=%s broadcast_id=%s start=%s slot_start=%s',
+                    item.stream.title,
+                    channel.account_name,
+                    channel.handle,
+                    item.broadcast.broadcast_id,
+                    to_minute(item.broadcast.start_utc).isoformat(),
+                    to_minute(known_slots[item.stream.title]).isoformat(),
+                )
+        return orphans
 
     def _marked_in_channel(
         self,

@@ -195,6 +195,11 @@ class FakePlatform:
         """Владелец удалил эфир руками."""
         self._broadcasts.get(fake_key(channel_id), {}).pop(broadcast_id, None)
 
+    def move_broadcast(self, channel_id: str, broadcast_id: str, start_utc: datetime) -> None:
+        """Владелец перенёс эфир в Студии на другое время: поток и метка прежние."""
+        broadcasts: dict[str, UpcomingBroadcast] = self._broadcasts[fake_key(channel_id)]
+        broadcasts[broadcast_id] = replace(broadcasts[broadcast_id], start_utc=start_utc.astimezone(timezone.utc))
+
     @property
     def limits(self) -> PlatformLimits:
         return PlatformLimits(

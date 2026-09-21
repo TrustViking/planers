@@ -21,6 +21,7 @@ from app.output.report import (
     SkippedLine,
     build_package_lines,
     build_platform_note_lines,
+    has_kept_keys,
     build_run_warning_lines,
     build_skipped_lines,
     build_totals,
@@ -293,14 +294,31 @@ def test_platform_notes_are_the_last_section_of_the_report() -> None:
     report: RunReport = RunReport(
         RunMode.FULL,
         "16-03-2027 12:00",
-        warnings=["обложка не поставлена", msg.WARNING_KEPT_KEY, msg.WARNING_LIVE_CHAT],
+        warnings=["обложка не поставлена", msg.WARNING_LIVE_CHAT],
     )
     assert report.run_warnings == ["обложка не поставлена"]
-    assert report.notes == [msg.WARNING_KEPT_KEY, msg.WARNING_LIVE_CHAT]
+    assert report.notes == [msg.WARNING_LIVE_CHAT]
     text: str = render_report(report)
     assert text.index("## Предупреждения") < text.index(msg.REPORT_SECTION_NOTES)
     assert text.rstrip("\n").endswith(f"- {msg.WARNING_LIVE_CHAT}")
-    assert text.count(msg.WARNING_KEPT_KEY) == 1
+
+
+
+def test_kept_key_note_is_a_lead_line_under_the_matched_section() -> None:
+    """5o-A: поведение планера, а не особенность площадки — пояснение сразу под заголовком «совпадает»."""
+    matched: PairOutcome = PairOutcome(
+        OutcomeKind.MATCHED, "Test UA", date="17-03-2027", time="19:00", language="uk",
+        broadcast_url="https://www.youtube.com/watch?v=b1",
+    )
+    lines: list[str] = render_report(
+        RunReport(RunMode.FULL, "16-03-2027 12:00", outcomes=[matched], has_kept_keys=True)
+    ).splitlines()
+    header: int = lines.index(msg.REPORT_SECTION_MATCHED.format(count=1))
+    assert lines[header + 1] == msg.WARNING_KEPT_KEY
+    assert lines[header + 2].startswith("- 17-03-2027 19:00 uk")
+    assert msg.REPORT_SECTION_NOTES not in lines
+    without: str = render_report(RunReport(RunMode.FULL, "16-03-2027 12:00", outcomes=[matched]))
+    assert msg.WARNING_KEPT_KEY not in without
 
 
 def test_totals_are_counted_once_for_report_and_console() -> None:
@@ -403,14 +421,16 @@ def test_kept_key_warning_is_written_once_per_run() -> None:
     kept: list[PlannedBroadcast] = [
         _remembered(_with_found_key(17, Decision.MATCH)), _remembered(_with_found_key(18, Decision.UPDATE))
     ]
-    assert msg.WARNING_KEPT_KEY not in build_warning_lines([_with_found_key(21, Decision.MATCH)])   # памяти нет
+    assert not has_kept_keys([_with_found_key(21, Decision.MATCH)])   # памяти нет
     created: PlannedBroadcast = _with_new_key(19, Decision.CREATE)
-    assert build_warning_lines([*kept, created]).count(msg.WARNING_KEPT_KEY) == 1
-    assert msg.WARNING_KEPT_KEY not in build_warning_lines([created])
+    assert has_kept_keys([*kept, created])
+    assert not has_kept_keys([created])
     attached: PlannedBroadcast = _with_new_key(20, Decision.MATCH)   # поток привязан: ключ новый
-    assert msg.WARNING_KEPT_KEY not in build_warning_lines([attached])
-    assert msg.WARNING_KEPT_KEY not in build_run_warning_lines([*kept, created])   # особенность, а не предупреждение
-    assert build_platform_note_lines([*kept, created]) == [msg.WARNING_KEPT_KEY]
+    assert not has_kept_keys([attached])
+    # 5o-A: ни предупреждением, ни особенностью площадки эта строка больше не идёт
+    assert msg.WARNING_KEPT_KEY not in build_warning_lines([*kept, created])
+    assert msg.WARNING_KEPT_KEY not in build_run_warning_lines([*kept, created])
+    assert build_platform_note_lines([*kept, created]) == []
 
 
 def test_package_and_skipped_lines_from_scan_and_selection(

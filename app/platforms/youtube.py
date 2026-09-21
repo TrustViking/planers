@@ -90,7 +90,10 @@ HTTP_OK: Final[int] = 200
 YOUTUBE_STREAM_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]{4}(-[a-z0-9]{4}){3,4}$")
 
 # Коды ошибок площадки, которые планер называет сам (ответа Google за ними нет).
-ERROR_CHANNEL_NOT_FOUND: Final[str] = "channelNotFound"
+ERROR_CHANNEL_NOT_FOUND: Final[str] = "channelNotFound"   # только channels.list(mine=true): у аккаунта нет канала
+# Площадка не отдала объект по id (videos / liveBroadcasts / liveStreams .list(id=…) с пустым items):
+# после записи чтение того же id иногда отстаёт (прогон 20-09-2026 23:37, ouOV1qoprBI) — повторяется.
+ERROR_NOT_LISTED: Final[str] = "notListed"
 ERROR_AUTH: Final[str] = "authFailed"
 ERROR_LOGIN_REQUIRED: Final[str] = LOGIN_REQUIRED_CODE   # вход нужен, но запрещён (allow_login=False)
 ERROR_TRANSPORT: Final[str] = "transportFailed"
@@ -143,10 +146,14 @@ REASON_BEHAVIORS: Final[dict[str, ErrorBehavior]] = {
     ERROR_BAD_RESPONSE: ErrorBehavior.CALL,
     ERROR_UNEXPECTED_KEY: ErrorBehavior.CALL,
     ERROR_CHANNEL_NOT_FOUND: ErrorBehavior.CALL,   # совпадает с причиной Google channelNotFound
+    ERROR_NOT_LISTED: ErrorBehavior.RETRY,         # пустой ответ чтения по id: задержка площадки после записи
     ERROR_TRANSPORT: ErrorBehavior.RETRY,          # обрыв связи: ответа нет вовсе
 }
 THUMBNAIL_OPERATION: Final[str] = "thumbnails.set"   # операция загрузки обложки: отказ по ней помнится за запуск
 BROADCAST_INSERT_OPERATION: Final[str] = "liveBroadcasts.insert"
+BROADCAST_LIST_OPERATION: Final[str] = "liveBroadcasts.list"
+STREAM_LIST_OPERATION: Final[str] = "liveStreams.list"
+VIDEO_LIST_OPERATION: Final[str] = "videos.list"
 STREAM_INSERT_OPERATION: Final[str] = "liveStreams.insert"
 # Создающие, неидемпотентные вызовы: дошёл запрос, а ответ потерялся — повтор завёл бы второй эфир или поток.
 # Отказ с неизвестным исходом (обрыв связи, 5xx) у них не повторяется (_is_unknown_outcome): объект остаётся
@@ -296,7 +303,7 @@ class YouTubePlatform:
         while True:
             response: dict[str, Any] = self._execute(
                 channel,
-                "liveBroadcasts.list",
+                BROADCAST_LIST_OPERATION,
                 lambda service, token=page_token: service.liveBroadcasts().list(
                     part=BROADCAST_PARTS,
                     broadcastStatus=BROADCAST_STATUS_UPCOMING,
@@ -348,15 +355,14 @@ class YouTubePlatform:
         return taken
 
     def get_stream(self, channel: ChannelConfig, stream_id: str) -> StreamInfo | None:
-        response: dict[str, Any] = self._execute(
+        item: dict[str, Any] | None = self._read_by_id(
             channel,
-            "liveStreams.list",
+            STREAM_LIST_OPERATION,
+            stream_id,
             lambda service: service.liveStreams().list(part=STREAM_PARTS, id=stream_id),
         )
-        items: list[dict[str, Any]] = _items(response)
-        if not items:
+        if item is None:
             return None
-        item: dict[str, Any] = items[0]
         ingestion: dict[str, Any] = _mapping(_mapping(item, "cdn"), "ingestionInfo")
         stream: StreamInfo = StreamInfo(
             stream_id=_text(item, "id"),
@@ -484,15 +490,15 @@ class YouTubePlatform:
 
     def set_stream_marker(self, channel: ChannelConfig, stream_id: str, marker: str) -> None:
         """liveStreams.update(part=snippet): snippet читается целиком, меняются только название и описание."""
-        response: dict[str, Any] = self._execute(
+        item: dict[str, Any] | None = self._read_by_id(
             channel,
-            "liveStreams.list",
+            STREAM_LIST_OPERATION,
+            stream_id,
             lambda service: service.liveStreams().list(part=STREAM_UPDATE_PARTS, id=stream_id),
         )
-        items: list[dict[str, Any]] = _items(response)
-        if not items:
-            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"liveStreams.list is empty for {stream_id}")
-        snippet: dict[str, Any] = dict(_mapping(items[0], "snippet"))
+        if item is None:
+            raise _not_listed_error(STREAM_LIST_OPERATION, stream_id)
+        snippet: dict[str, Any] = dict(_mapping(item, "snippet"))
         # отпечаток заглушки из прежнего описания сохраняется: по нему следующий запуск узнает эфир без обложки
         previous: str = _text(snippet, "description", allow_empty=True)
         snippet["title"] = marker
@@ -511,15 +517,15 @@ class YouTubePlatform:
 
     def read_facts(self, channel: ChannelConfig, broadcast_id: str) -> BroadcastFacts:
         """Что по факту лежит на платформе: язык, аудитория и возраст видны только у videos."""
-        response: dict[str, Any] = self._execute(
+        found: dict[str, Any] | None = self._read_by_id(
             channel,
-            "videos.list",
+            VIDEO_LIST_OPERATION,
+            broadcast_id,
             lambda service: service.videos().list(part=VIDEO_FACTS_PARTS, id=broadcast_id),
         )
-        items: list[dict[str, Any]] = _items(response)
-        if not items:
-            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"videos.list is empty for {broadcast_id}")
-        item: dict[str, Any] = items[0]
+        if found is None:
+            raise _not_listed_error(VIDEO_LIST_OPERATION, broadcast_id)
+        item: dict[str, Any] = found
         snippet: dict[str, Any] = _mapping(item, "snippet")
         status: dict[str, Any] = _mapping(item, "status")
         rating: dict[str, Any] = _mapping(_mapping(item, "contentDetails"), "contentRating")
@@ -550,28 +556,28 @@ class YouTubePlatform:
 
     def _broadcast_of(self, channel: ChannelConfig, broadcast_id: str) -> UpcomingBroadcast | None:
         """Поток и чат: у videos их нет, спрашиваем сам эфир."""
-        response: dict[str, Any] = self._execute(
+        item: dict[str, Any] | None = self._read_by_id(
             channel,
-            "liveBroadcasts.list",
+            BROADCAST_LIST_OPERATION,
+            broadcast_id,
             lambda service: service.liveBroadcasts().list(part=BROADCAST_PARTS, id=broadcast_id),
         )
-        items: list[dict[str, Any]] = _items(response)
-        if not items:
+        if item is None:
             return None
-        parsed: UpcomingBroadcast | PlatformNotice | None = _broadcast_from_item(items[0], channel)
+        parsed: UpcomingBroadcast | PlatformNotice | None = _broadcast_from_item(item, channel)
         return parsed if isinstance(parsed, UpcomingBroadcast) else None
 
     def _video_item(self, channel: ChannelConfig, broadcast_id: str, part: str) -> dict[str, Any]:
         """videos.list по id эфира: read-modify-write без чтения невозможен."""
-        response: dict[str, Any] = self._execute(
+        item: dict[str, Any] | None = self._read_by_id(
             channel,
-            "videos.list",
+            VIDEO_LIST_OPERATION,
+            broadcast_id,
             lambda service: service.videos().list(part=part, id=broadcast_id),
         )
-        items: list[dict[str, Any]] = _items(response)
-        if not items:
-            raise PlatformError(ERROR_CHANNEL_NOT_FOUND, f"videos.list is empty for {broadcast_id}")
-        return items[0]
+        if item is None:
+            raise _not_listed_error(VIDEO_LIST_OPERATION, broadcast_id)
+        return item
 
     def _attach_new_stream(
         self,
@@ -723,6 +729,41 @@ class YouTubePlatform:
                 continue
             raise self._refuse(channel, operation, failure)
 
+    def _read_by_id(
+        self,
+        channel: ChannelConfig,
+        operation: str,
+        object_id: str,
+        request_builder: Any,
+    ) -> dict[str, Any] | None:
+        """Чтение одного объекта по id: первый элемент items или None.
+
+        Пустой items — не «объекта нет», а возможная задержка площадки после записи: повтор по RETRY_POLICY
+        (поведение ERROR_NOT_LISTED в REASON_BEHAVIORS), пауза и строка request_retry — как у отказов.
+        После всех попыток — строка read_not_listed и None; что это значит, решает вызывающий.
+        Списки по статусу (list_upcoming) сюда не ходят: у них пустой ответ нормален.
+        """
+        retry_number: int = 0
+        while True:
+            items: list[dict[str, Any]] = _items(self._execute(channel, operation, request_builder))
+            if items:
+                return items[0]
+            behavior: ErrorBehavior = _error_behavior(operation, None, ERROR_NOT_LISTED)
+            if behavior is not ErrorBehavior.RETRY or not RETRY_POLICY.has_retry_left(retry_number + 1):
+                break
+            retry_number += 1
+            failure: _Failure = _Failure(_not_listed_error(operation, object_id), behavior, None)
+            self._sleep_before_retry(channel, operation, retry_number, failure)
+        LOGGER.warning(
+            'read_not_listed operation=%s channel="%s" handle=%s object_id=%s attempts=%d',
+            operation,
+            channel.account_name,
+            channel.handle,
+            object_id,
+            retry_number + 1,
+        )
+        return None
+
     def _wait_pause(self) -> None:
         """Выждать остаток request_pause_sec от конца предыдущего обращения; паузы повторов входят в него."""
         if self._request_pause_sec <= 0 or self._last_request_at is None:
@@ -811,6 +852,14 @@ class YouTubePlatform:
             failure.error.code,
         )
         time.sleep(delay_sec)   # через модуль time: тесты подменяют
+
+
+def _not_listed_error(operation: str, object_id: str) -> PlatformError:
+    """Площадка не отдала объект по id и после всех повторов."""
+    return PlatformError(
+        ERROR_NOT_LISTED,
+        f"{operation} is empty for {object_id} after {RETRY_POLICY.max_attempts} attempts",
+    )
 
 
 def _largest_thumbnail(thumbnails: dict[str, Any]) -> str | None:

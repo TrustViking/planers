@@ -19,6 +19,7 @@ from app.core.dates import FILE_STAMP_FORMAT
 from app.core.text import normalize_title
 from app.form.base import FORM_CODE_MISSING_OPTION, FORM_CODE_NOT_CONFIRMED, FORM_CODE_REQUIRED_MISSING
 from app.form.key_form import MISSING_VALUE as KEY_FORM_MISSING_VALUE
+from app.observability.logging_setup import mask_stream_key
 from app.package.bcast import AcceptedPackage, BcastScan, PackageProblem
 from app.package.model import PackageErrorReason, Slot, slot_order_key
 from app.package.reader import SCHEMA_VERSION_SUPPORTED
@@ -35,9 +36,10 @@ from app.pipeline.plan import (
     OutcomeError,
     OutcomeWarning,
     PlannedBroadcast,
+    ReplacedBroadcast,
     SpecValue,
 )
-from app.pipeline.reconciler import MarkedBroadcast
+from app.pipeline.reconciler import MarkedBroadcast, OrphanKind
 from app.pipeline.selection import Selection, SkippedSlot, SkipReason
 from app.platforms.base import (
     BroadcastFacts,
@@ -58,7 +60,7 @@ LOG_NO_REASON: Final[str] = "none"    # reason= в строке run_report пр�
 PLANER_ORIGIN: Final[str] = "planer"
 MISMATCH_HEAD_CHARS: Final[int] = 200   # описание в отчёт целиком не выводится
 # Постоянные особенности площадки: не про этот запуск, поэтому только в отчёте, в конце (ТЗ §5.6).
-PLATFORM_NOTE_LINES: Final[tuple[str, ...]] = (msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY)
+PLATFORM_NOTE_LINES: Final[tuple[str, ...]] = (msg.WARNING_LIVE_CHAT,)
 
 
 class RunMode(str, Enum):
@@ -177,6 +179,7 @@ class PairOutcome:
     admission_actions: tuple[str, ...] = ()  # NOT_ADMITTED: что делать владельцу — по той же причине
     is_channel_ready: bool = True          # NOT_ADMITTED: False — канал не подтверждён, эфиры не проверялись
     unfixed_fields: tuple[str, ...] = ()   # значения ChangedField: надо было исправить, не удалось
+    replaced: ReplacedBroadcast | None = None   # прежний эфир слота с подтверждённым ключом: в форме два ключа
 
     @property
     def is_broadcast(self) -> bool:
@@ -204,6 +207,8 @@ class OrphanLine:
     account_name: str
     broadcast_url: str
     handle: str = ""
+    kind: OrphanKind = OrphanKind.ORPHAN
+    actual_start: str = ""   # MOVED: где эфир стоит на площадке, DD-MM-YYYY HH:MM местного времени
 
 
 class ExitReasonKind(str, Enum):
@@ -265,6 +270,7 @@ class RunReport:
     run_exit: RunExit | None = None   # код выхода и причины; None — отчёт собран не запуском (тесты)
     # особенности площадки по каналам (служебный эфир без времени старта) — только в отчёт, к notes
     platform_notes: list[str] = field(default_factory=list)
+    has_kept_keys: bool = False   # пояснение WARNING_KEPT_KEY под заголовком «Уже запланировано, совпадает»
 
     @property
     def run_warnings(self) -> list[str]:
@@ -369,6 +375,7 @@ def outcome_from_planned(item: PlannedBroadcast, *, is_dry_run: bool = False) ->
         admission_actions=admission_actions(item.admission_reasons),
         is_channel_ready=not any(reason.kind is AdmissionKind.CHANNEL for reason in item.admission_reasons),
         unfixed_fields=tuple(name.value for name in item.unfixed_fields) if not is_dry_run else (),
+        replaced=item.replaced,
     )
 
 
@@ -544,9 +551,15 @@ def build_platform_note_lines(planned: Sequence[PlannedBroadcast]) -> list[str]:
     lines: list[str] = []
     if any(item.facts is not None and item.facts.live_chat_id for item in planned):
         lines.append(msg.WARNING_LIVE_CHAT)
-    if any(item.has_kept_key for item in planned):
-        lines.append(msg.WARNING_KEPT_KEY)
     return lines
+
+
+def has_kept_keys(planned: Sequence[PlannedBroadcast]) -> bool:
+    """Ключ хотя бы одного совпавшего эфира форма подтверждала раньше и повторно он не отправлялся.
+
+    Это поведение планера, а не особенность площадки: пояснение — под заголовком «Уже запланировано, совпадает».
+    """
+    return any(item.has_kept_key for item in planned)
 
 
 def _unique(lines: Iterable[SkippedLine]) -> list[SkippedLine]:
@@ -710,6 +723,8 @@ def _append_run_body(lines: list[str], report: RunReport, totals: RunTotals) -> 
     }
     lines.extend(_total_lines(report, totals))
     _append_section(lines, msg.REPORT_SECTION_NOT_DELIVERED, not_delivered_texts(report))
+    two_keys: list[str] = two_keys_texts(report)
+    _append_section(lines, msg.REPORT_SECTION_TWO_KEYS.format(count=len(two_keys)), two_keys)
     _append_section(
         lines, msg.REPORT_SECTION_NOT_ADMITTED.format(count=totals.not_admitted), texts[OutcomeKind.NOT_ADMITTED]
     )
@@ -721,7 +736,12 @@ def _append_run_body(lines: list[str], report: RunReport, totals: RunTotals) -> 
     created: list[str] = texts[OutcomeKind.CREATED] + texts[OutcomeKind.STREAM_ATTACHED]
     _append_section(lines, msg.REPORT_SECTION_CREATED.format(count=totals.created), created)
     _append_section(lines, msg.REPORT_SECTION_FIXED.format(count=totals.fixed), texts[OutcomeKind.FIXED])
-    _append_section(lines, msg.REPORT_SECTION_MATCHED.format(count=totals.matched), texts[OutcomeKind.MATCHED])
+    _append_section(
+        lines,
+        msg.REPORT_SECTION_MATCHED.format(count=totals.matched),
+        texts[OutcomeKind.MATCHED],
+        lead=msg.WARNING_KEPT_KEY if report.has_kept_keys else None,
+    )
     _append_section(
         lines,
         msg.REPORT_SECTION_ORPHANS.format(count=totals.orphans),
@@ -742,6 +762,33 @@ def not_delivered_texts(report: RunReport) -> list[str]:
         for outcome in report.outcomes
         if outcome.form is FormState.FAILED
     ]
+
+
+def replaced_outcomes(report: RunReport) -> list[PairOutcome]:
+    """Слоты, у которых этот запуск заменил эфир с подтверждённым ключом: в форме на дату два ключа."""
+    return [outcome for outcome in report.outcomes if outcome.replaced is not None and outcome.is_broadcast]
+
+
+def two_keys_texts(report: RunReport) -> list[str]:
+    """Раздел «В форме два ключа на один слот»: прежний эфир, новый, действующий и прежний ключ (маской)."""
+    lines: list[str] = []
+    for outcome in replaced_outcomes(report):
+        replaced: ReplacedBroadcast | None = outcome.replaced
+        if replaced is None:
+            continue
+        lines.append(
+            msg.TWO_KEYS_LINE.format(
+                date=outcome.date,
+                time=outcome.time,
+                language=outcome.language,
+                channel=channel_text(outcome.account_name, outcome.handle),
+                old_url=replaced.broadcast_url,
+                new_url=outcome.broadcast_url or MISSING_VALUE,
+                new_key=mask_stream_key(outcome.stream_key),
+                old_key=mask_stream_key(replaced.stream_key),
+            )
+        )
+    return lines
 
 
 def _total_lines(report: RunReport, totals: RunTotals) -> list[str]:
@@ -825,11 +872,16 @@ def _append_status_body(lines: list[str], report: RunReport, totals: RunTotals) 
     _append_section(lines, msg.REPORT_SECTION_NOTES, report.notes)
 
 
-def _append_section(lines: list[str], header: str, body: list[str]) -> None:
-    """Раздел без строк не печатается вовсе: владелец не читает заголовки с нулями."""
+def _append_section(lines: list[str], header: str, body: list[str], *, lead: str | None = None) -> None:
+    """Раздел без строк не печатается вовсе: владелец не читает заголовки с нулями.
+
+    lead — строка-пояснение сразу под заголовком, не пункт списка.
+    """
     if not body:
         return
     lines.append(header)
+    if lead is not None:
+        lines.append(lead)
     lines.extend(msg.REPORT_ITEM.format(text=text) for text in body)
     lines.append("")
 
@@ -978,12 +1030,15 @@ def _error_text(outcome: PairOutcome, prefix: str) -> str:
 
 
 def _orphan_text(orphan: OrphanLine) -> str:
-    return msg.ORPHAN_LINE.format(
+    """Сирота и перенесённый — одним разделом, текст по виду."""
+    template: str = msg.ORPHAN_MOVED_LINE if orphan.kind is OrphanKind.MOVED else msg.ORPHAN_LINE
+    return template.format(
         date=orphan.date,
         time=orphan.time,
         language=orphan.language,
         channel=channel_text(orphan.account_name, orphan.handle),
         url=orphan.broadcast_url,
+        actual=orphan.actual_start,
     )
 
 

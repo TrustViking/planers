@@ -40,6 +40,7 @@ from app.output.report import (
     not_admitted_text,
     outcome_prefix,
     package_problem_texts,
+    replaced_outcomes,
     skip_groups,
     summary_lines,
     unfixed_text,
@@ -261,6 +262,7 @@ def _attention_lines(report: RunReport) -> list[str]:
         for outcome in report.outcomes
         if outcome.form is FormState.FAILED
     )
+    lines.extend(_two_keys_lines(report))
     lines.extend(_not_admitted_lines(report))
     lines.extend(msg.CONSOLE_ATTENTION_PACKAGE.format(text=text) for text in package_problem_texts(report))
     if report.notice:
@@ -268,6 +270,22 @@ def _attention_lines(report: RunReport) -> list[str]:
     lines.extend(_restored_lines(report))
     lines.extend(msg.CONSOLE_ATTENTION_TEXT.format(text=text) for text in report.run_warnings)
     return lines
+
+
+def _two_keys_lines(report: RunReport) -> list[str]:
+    """Эфир слота заменён новым, а прежний ключ форма уже подтверждала: в форме на дату два ключа."""
+    return [
+        msg.CONSOLE_ATTENTION_TWO_KEYS.format(
+            date=outcome.date,
+            time=outcome.time,
+            language=outcome.language,
+            channel=channel_text(outcome.account_name, outcome.handle),
+            new_key=mask_stream_key(outcome.stream_key),
+            old_key=mask_stream_key(outcome.replaced.stream_key),
+        )
+        for outcome in replaced_outcomes(report)
+        if outcome.replaced is not None
+    ]
 
 
 def _not_admitted_lines(report: RunReport) -> list[str]:

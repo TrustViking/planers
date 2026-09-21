@@ -16,7 +16,7 @@ from app.pipeline.plan import (
     Decision,
     PlannedBroadcast,
 )
-from app.pipeline.reconciler import MarkerParts, OrphanBroadcast, Reconciler, split_marker
+from app.pipeline.reconciler import MarkerParts, OrphanBroadcast, OrphanKind, Reconciler, split_marker
 from app.platforms.base import PLACEHOLDER_TOKEN, PlatformError, UpcomingBroadcast
 from app.form.base import FormError
 from app.platforms.channel import Channel, ChannelStatus
@@ -47,10 +47,12 @@ def _reconcile(
     platform: FakePlatform,
     config: PlanerConfig,
     *objects: PlannedBroadcast,
-    slot_ids: frozenset[str] | None = None,
+    known_slots: dict[str, datetime] | None = None,
 ) -> tuple[OrphanBroadcast, ...]:
-    ids: frozenset[str] = slot_ids if slot_ids is not None else frozenset(item.slot_id for item in objects)
-    return Reconciler(platform).reconcile(objects, ids, config.channels)
+    known: dict[str, datetime] = (
+        known_slots if known_slots is not None else {item.slot_id: item.slot.start for item in objects}
+    )
+    return Reconciler(platform).reconcile(objects, known, config.channels)
 
 
 def _seed_like(platform: FakePlatform, channel_id: str, slot: Slot, **overrides: object) -> UpcomingBroadcast:
@@ -434,7 +436,9 @@ def test_progress_brackets_each_channel_read(
     config: PlanerConfig = make_config()
     progress: RecordingProgress = RecordingProgress(fake_platform)
     objects: list[PlannedBroadcast] = _objects(config, uk, ru)
-    Reconciler(fake_platform, progress=progress).reconcile(objects, frozenset({uk.slot_id, ru.slot_id}), config.channels)
+    Reconciler(fake_platform, progress=progress).reconcile(
+        objects, {uk.slot_id: uk.start, ru.slot_id: ru.start}, config.channels
+    )
     assert progress.calls == [
         ("channel_read_started", "yt_ua", 0),
         ("channel_read_done", "yt_ua", 0, 1),
@@ -638,3 +642,59 @@ def test_not_admitted_object_does_not_become_ambiguous(
     item.admit(None, None, FormError("structureUnreadable", "нет скрипта"))
     _reconcile(fake_platform, config, item)
     assert item.decision is Decision.NOT_ADMITTED and item.ambiguous_urls == () and item.stream_key is None
+
+
+def test_marker_of_known_slot_on_another_minute_is_moved(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """5o-A: владелец перенёс эфир планера в Студии — слот известен, минута другая: «перенесён», не трогаем."""
+    slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    moved: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", slot.start + timedelta(days=2), slot.title, slot.description, marker=slot.slot_id
+    )
+    [item] = _objects(make_config(), slot)
+    [orphan] = _reconcile(fake_platform, make_config(), item)
+    assert (orphan.kind, orphan.broadcast, orphan.marker) == (OrphanKind.MOVED, moved, slot.slot_id)
+    assert item.decision is Decision.CREATE
+    assert fake_platform.updated == []
+
+
+def test_past_slot_on_its_minute_is_not_an_orphan_but_moved_one_is(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """Правило 5m-E цело: эфир прошедшего слота на своей минуте — не сирота; на чужой — «перенесён»."""
+    future: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    past: Slot = make_slot_object(now - timedelta(hours=1), "uk")
+    moved_past: Slot = make_slot_object(now - timedelta(hours=2), "uk")
+    _seed_like(fake_platform, "yt_ua", past)
+    moved: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", now + timedelta(days=5), moved_past.title, moved_past.description, marker=moved_past.slot_id
+    )
+    [item] = _objects(make_config(), future)
+    known: dict[str, datetime] = {future.slot_id: future.start, past.slot_id: past.start, moved_past.slot_id: moved_past.start}
+    orphans: tuple[OrphanBroadcast, ...] = _reconcile(fake_platform, make_config(), item, known_slots=known)
+    assert [(orphan.kind, orphan.broadcast) for orphan in orphans] == [(OrphanKind.MOVED, moved)]
+
+
+def test_found_broadcast_is_not_repeated_as_moved(
+    fake_platform: FakePlatform,
+    make_config: ConfigFactory,
+    make_slot_object: SlotFactory,
+    now: datetime,
+) -> None:
+    """Эфир, опознанный объектом, в «Перенесён или отменён?» не повторяется; дубль метки на другой минуте — да."""
+    slot: Slot = make_slot_object(now + timedelta(days=1), "uk")
+    found: UpcomingBroadcast = _seed_like(fake_platform, "yt_ua", slot)
+    duplicate: UpcomingBroadcast = fake_platform.seed_broadcast(
+        "yt_ua", slot.start + timedelta(hours=3), slot.title, slot.description, marker=slot.slot_id
+    )
+    [item] = _objects(make_config(), slot)
+    orphans: tuple[OrphanBroadcast, ...] = _reconcile(fake_platform, make_config(), item)
+    assert item.found == found
+    assert [orphan.broadcast for orphan in orphans] == [duplicate]

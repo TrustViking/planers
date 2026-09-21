@@ -123,7 +123,8 @@ def _sample_report(**overrides: Any) -> RunReport:
             SkippedLine(SkipKind.NO_CHANNEL, "17-03-2027", "19:00", "en", title="Russia's 20-Year Hybrid War"),
             SkippedLine(SkipKind.NO_CHANNEL, "18-03-2027", "20:00", "en", title="The Invisible Side of Air"),
         ],
-        warnings=[RESTORED_WARNING, msg.WARNING_LIVE_CHAT, msg.WARNING_KEPT_KEY],
+        warnings=[RESTORED_WARNING, msg.WARNING_LIVE_CHAT],
+        has_kept_keys=True,   # пояснение — только в отчёте, под «Уже запланировано, совпадает»
         platform_notes=[UNDATED_NOTE],
         keys_file_path="keystreams\\keys.txt",
         run_exit=RunExit(1, (ExitReason(ExitReasonKind.KEY_UNDELIVERED, 1),)),

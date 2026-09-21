@@ -13,8 +13,10 @@ from typing import Any
 
 from app.config.loader import ChannelConfig, PlanerConfig
 from app.core.dates import format_datetime_text
+from app.observability.logging_setup import mask_stream_key
+from app.pipeline.reconciler import OrphanKind
 from app.package.model import FormSpec, PackageError, PackageErrorReason
-from app.output.report import FormState, OutcomeKind, PackageLineStatus, SkipKind, SkippedLine
+from app.output.report import FormState, OutcomeKind, PackageLineStatus, SkipKind, SkippedLine, render_report
 from app.paths import PlanerPaths
 from app.output.console import render_console
 from app.pipeline.plan import ChangedField, Decision, PlannedBroadcast
@@ -26,6 +28,7 @@ from app.platforms.base import (
     PLACEHOLDER_TOKEN,
     BroadcastFacts,
     PlatformError,
+    StreamInfo,
     UpcomingBroadcast,
     VideoFixes,
     picture_sha,
@@ -99,8 +102,11 @@ def _report_text(outcome: RunOutcome) -> str:
 
 
 def _kept_key_lines(outcome: RunOutcome) -> list[str]:
+    """Пояснение о подтверждённом ключе — строкой под заголовком «Уже запланировано, совпадает» (5o-A)."""
     assert outcome.report is not None
-    return [line for line in outcome.report.warnings if line == msg.WARNING_KEPT_KEY]
+    assert msg.WARNING_KEPT_KEY not in outcome.report.warnings
+    # текст — из объекта отчёта: два запуска в одну минуту пишут отчёт в один файл
+    return [line for line in render_report(outcome.report).splitlines() if line == msg.WARNING_KEPT_KEY]
 
 
 def test_full_create_registers_and_confirms_form(
@@ -621,8 +627,16 @@ def test_expected_and_actual_log_lines_share_keys(
     fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Наборы ключей не должны разъезжаться: сравнивать строки иначе бессмысленно."""
+    """Наборы ключей не должны разъезжаться: сравнивать строки иначе бессмысленно.
+
+    Созданный эфир в списке не находился — строки broadcast_found у него нет (5o-A); у совпавшего — есть.
+    """
     make_package(planer_paths.bcast_dir, slots=[make_slot("17-03-2027", "19:00", "uk")])
+    with caplog.at_level("INFO"):
+        _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
+    assert not any(message.startswith("broadcast_found") for message in caplog.messages)
+    assert any(message.startswith("broadcast_expected") for message in caplog.messages)
+    caplog.clear()
     with caplog.at_level("INFO"):
         _run(RunMode.FULL, planer_paths, make_config(), fake_platform, form_sender, now, rng)
     lines: dict[str, str] = {
@@ -2231,3 +2245,89 @@ def test_status_does_not_check_form_dates(
     progress: RecordingProgress = RecordingProgress(fake_platform)
     run(RunMode.STATUS, make_config(), planer_paths, fake_platform, sender, now, rng, progress=progress)
     assert "form_dates_checked" not in progress.names()
+
+
+def _replace_moved_broadcast(
+    paths: PlanerPaths, config: PlanerConfig, platform: FakePlatform, sender: FakeFormSender,
+    now: datetime, rng: random.Random, moved_start: datetime,
+) -> tuple[RunOutcome, str, str]:
+    """Первый запуск ставит эфир A, владелец переносит его в Студии, второй запуск ставит B.
+
+    Возвращает второй исход и ключи A и B.
+    """
+    _run_with_memory(RunMode.FULL, paths, config, platform, sender, now, rng)
+    [first] = platform.created
+    old_key: str = _created_key(platform, config, first.broadcast_id)
+    platform.move_broadcast("yt_ua", first.broadcast_id, moved_start)
+    second: RunOutcome = _run_with_memory(RunMode.FULL, paths, config, platform, sender, now, rng)
+    assert len(platform.created) == 2
+    return second, old_key, _created_key(platform, config, platform.created[1].broadcast_id)
+
+
+def _created_key(platform: FakePlatform, config: PlanerConfig, broadcast_id: str) -> str:
+    """Ключ эфира — как его отдаёт площадка."""
+    channel: ChannelConfig = next(item for item in config.channels if item.key == UK_KEY)
+    [broadcast] = [item for item in platform.list_upcoming(channel) if item.broadcast_id == broadcast_id]
+    stream: StreamInfo | None = platform.get_stream(channel, broadcast.stream_id or "")
+    assert stream is not None
+    return stream.stream_name
+
+
+def test_broadcast_moved_by_owner_gives_two_keys_section_and_moved_line(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, form_sender: FakeFormSender, now: datetime, rng: random.Random,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Прогон 21-09-2026 09:49, Osvald.X 24-09-2026 19:00 ru: A перенесён владельцем, поставлен B, ключ B — в форму."""
+    _uk_package(make_package, make_slot, planer_paths)
+    moved_start: datetime = UK_START + timedelta(days=2)
+    with caplog.at_level("INFO"):
+        outcome, old_key, new_key = _replace_moved_broadcast(
+            planer_paths, make_config(), fake_platform, form_sender, now, rng, moved_start
+        )
+    assert [call.stream_key for call in form_sender.calls] == [old_key, new_key]
+    assert outcome.report is not None
+    text: str = render_report(outcome.report)
+    lines: list[str] = text.splitlines()
+    header: int = lines.index(msg.REPORT_SECTION_TWO_KEYS.format(count=1))
+    two_keys: str = lines[header + 1]
+    assert two_keys.startswith("- 17-03-2027 19:00 uk -> ")
+    assert f"Действующий ключ {mask_stream_key(new_key)}; прежний {mask_stream_key(old_key)}" in two_keys
+    assert fake_platform.created[0].broadcast_id in two_keys and fake_platform.created[1].broadcast_id in two_keys
+    assert new_key not in text and old_key not in text
+    [moved] = outcome.report.orphans
+    assert moved.kind is OrphanKind.MOVED
+    assert moved.actual_start == format_datetime_text(moved_start.astimezone())
+    assert f"стоит на {moved.actual_start}: время эфира менял владелец" in text
+    console: str = render_console(outcome.report, root=planer_paths.root)
+    assert (
+        f"прежний эфир на времени слота не найден — поставлен новый; в форме на эту дату два ключа: "
+        f"действующий {mask_stream_key(new_key)}, прежний {mask_stream_key(old_key)}"
+    ) in console
+    replaced: list[str] = [message for message in caplog.messages if message.startswith("broadcast_replaced")]
+    assert len(replaced) == 1
+    assert f"previous_broadcast_id={fake_platform.created[0].broadcast_id}" in replaced[0]
+    assert f"previous_stream_key={mask_stream_key(old_key)}" in replaced[0]
+    assert f"stream_key={mask_stream_key(new_key)}" in replaced[0]
+    stored: SlotRecord | None = _stored(planer_paths, UK_SLOT)
+    assert stored is not None and stored.results.broadcast_id == fake_platform.created[1].broadcast_id
+
+
+def test_replaced_broadcast_without_confirmed_key_gives_no_two_keys_section(
+    planer_paths: PlanerPaths, make_package: PackageFactory, make_slot: SlotFactory, make_config: ConfigFactory,
+    fake_platform: FakePlatform, now: datetime, rng: random.Random,
+) -> None:
+    """Форма прежний ключ не подтвердила — в форме он один, раздела двух ключей нет; перенесённый эфир виден."""
+    _uk_package(make_package, make_slot, planer_paths)
+    sender: FakeFormSender = FakeFormSender(confirmed=False, error="HTTP 503")
+    _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    [first] = fake_platform.created
+    fake_platform.move_broadcast("yt_ua", first.broadcast_id, UK_START + timedelta(days=2))
+    sender.confirmed = True
+    outcome: RunOutcome = _run_with_memory(RunMode.FULL, planer_paths, make_config(), fake_platform, sender, now, rng)
+    assert outcome.report is not None
+    assert len(fake_platform.created) == 2
+    text: str = render_report(outcome.report)
+    assert "## В форме два ключа" not in text
+    assert "в форме на эту дату два ключа" not in render_console(outcome.report, root=planer_paths.root)
+    assert [orphan.kind for orphan in outcome.report.orphans] == [OrphanKind.MOVED]
