@@ -44,7 +44,7 @@ class ConfigProblem(str, Enum):
 CONFIG_ENCODING: Final[str] = "utf-8"
 FACEBOOK_PLATFORM: Final[str] = "facebook"
 MIN_LEAD_MINUTES_MINIMUM: Final[int] = 0
-YOUTUBE_PAUSE_SECONDS_MINIMUM: Final[int] = 0
+YOUTUBE_PAUSE_SECONDS_MINIMUM: Final[float] = 0.0   # число, можно дробное (0.5)
 KEEP_DAYS_MINIMUM: Final[int] = 1
 CHANNELS_KEY: Final[str] = "channels"
 SETTINGS_KEYS: Final[tuple[str, ...]] = (
@@ -131,7 +131,7 @@ class PlanerSettings:
     auto_start: bool
     set_thumbnail: bool
     category_id: str      # категория эфира на площадке; по справочнику YouTube не проверяется
-    youtube_pause_seconds: int   # наименьший промежуток между любыми двумя обращениями к YouTube
+    youtube_pause_seconds: float   # наименьший промежуток между любыми двумя обращениями к YouTube
 
 
 @dataclass(frozen=True)
@@ -302,7 +302,7 @@ class _ConfigParser:
             auto_start=self._bool(root, "auto_start", prefix=""),
             set_thumbnail=self._bool(root, "set_thumbnail", prefix=""),
             category_id=self._text(root, "category_id", prefix=""),
-            youtube_pause_seconds=self._int(
+            youtube_pause_seconds=self._number(
                 root, "youtube_pause_seconds", prefix="", minimum=YOUTUBE_PAUSE_SECONDS_MINIMUM
             ),
         )
@@ -352,6 +352,13 @@ class _ConfigParser:
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise self._error(f"{prefix}{key}", msg.CONFIG_PROBLEM_INT_MIN.format(minimum=minimum))
         return value
+
+    def _number(self, mapping: dict[str, Any], key: str, *, prefix: str, minimum: float) -> float:
+        """Число, можно дробное: int и float — да; bool, строка и меньше минимума — ошибка."""
+        value: Any = mapping[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum:
+            raise self._error(f"{prefix}{key}", msg.CONFIG_PROBLEM_NUMBER_MIN.format(minimum=minimum))
+        return float(value)
 
     def _bool(self, mapping: dict[str, Any], key: str, *, prefix: str) -> bool:
         value: Any = mapping[key]

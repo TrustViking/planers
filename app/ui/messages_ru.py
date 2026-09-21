@@ -39,7 +39,7 @@ CONFIG_CHANNELS_TEMPLATE: Final[str] = """{
 }"""
 CONFIG_PLANER_TEMPLATE: Final[str] = """{"min_lead_minutes": 60, "keep_days": 30,
  "auto_start": true, "set_thumbnail": true, "category_id": "22",
- "youtube_pause_seconds": 2}"""
+ "youtube_pause_seconds": 0.5}"""
 CONFIG_PROBLEM_FILE_MISSING: Final[str] = "файла нет"
 CONFIG_PROBLEM_JSON: Final[str] = "файл не читается как JSON: {error}"
 CONFIG_PROBLEM_NOT_MAPPING: Final[str] = "нужен объект JSON в фигурных скобках"
@@ -48,6 +48,7 @@ CONFIG_PROBLEM_UNKNOWN_KEY: Final[str] = "неизвестное поле"
 CONFIG_PROBLEM_DUPLICATE_KEY: Final[str] = "поле указано дважды"
 CONFIG_PROBLEM_NON_EMPTY_STRING: Final[str] = "нужна непустая строка в кавычках"
 CONFIG_PROBLEM_INT_MIN: Final[str] = "нужно целое число не меньше {minimum}"
+CONFIG_PROBLEM_NUMBER_MIN: Final[str] = "нужно число не меньше {minimum:g}, можно дробное, например 0.5"
 CONFIG_PROBLEM_BOOL: Final[str] = "нужно true или false"
 CONFIG_PROBLEM_CHANNELS_EMPTY: Final[str] = "нужен непустой список каналов"
 CONFIG_PROBLEM_ACCOUNT_NAME_TOO_LONG: Final[str] = (
@@ -213,6 +214,7 @@ RUN_CRASHED: Final[str] = (
 )
 # Последние строки любого запуска (main._finish_stats): время работы и расход квоты YouTube (RunStats).
 RUN_ELAPSED: Final[str] = "Время работы: {duration}"
+RUN_STATS_CRASHED: Final[str] = "Статистику запуска записать не удалось — подробности в логе {log}"
 DURATION_MINUTES: Final[str] = "{minutes} мин {seconds} сек"
 DURATION_HOURS: Final[str] = "{hours} ч {minutes:02d} мин {seconds:02d} сек"
 RUN_YOUTUBE: Final[str] = (

@@ -4,8 +4,8 @@
 update_broadcast, attach_stream, apply_video_settings, set_stream_marker. Любой сбой наружу — только PlatformError.
 Всё, что уходит в эфир, берётся из BroadcastSpec: отправляемое и сравниваемое совпадают по построению.
 
-Все обращения к YouTube идут через YouTubePlatform._execute: пауза youtube_pause_seconds между
-обращениями, повторы и память отказов. Что делать с отказом, решает одна таблица — REASON_BEHAVIORS
+Все обращения к YouTube API идут через YouTubePlatform._execute: пауза youtube_pause_seconds между
+обращениями (число, можно дробное; картинки i.ytimg.com — без паузы), повторы и память отказов. Что делать с отказом, решает одна таблица — REASON_BEHAVIORS
 (и OPERATION_REASON_BEHAVIORS для пар «операция, причина»), функция _error_behavior.
 """
 from __future__ import annotations
@@ -163,16 +163,21 @@ STREAM_UPDATE_OPERATION: Final[str] = "liveStreams.update"
 VIDEO_UPDATE_OPERATION: Final[str] = "videos.update"
 # Цена операции в единицах квоты YouTube Data API — единственный источник. Начисляется за каждую попытку
 # (Google берёт минимум 1 ед. и за отказ): это оценка сверху, владельцу — со знаком «≈».
+# Цены сверены с Google Cloud Console («Queries per day») за 20-09-2026 и 21-09-2026: 21-09 — 1 025 ед.
+# = 502 чтения по 1 + 23 записи трансляций по 1 + 10 записей по 50; 20-09 — около 3 950 ед.
+# Документация Google даёт 50 за все записи — считаем по факту. Какая из четырёх записей создания эфира
+# (insert эфира, insert потока, bind, thumbnails.set) стоит 50, по этим дням не различить (число вызовов
+# одинаковое) — отнесено к thumbnails.set; уточнить по дню, где обложек больше или меньше, чем созданий.
 QUOTA_UNITS: Final[dict[str, int]] = {
     CHANNEL_LIST_OPERATION: 1,
     BROADCAST_LIST_OPERATION: 1,
     STREAM_LIST_OPERATION: 1,
     VIDEO_LIST_OPERATION: 1,
-    BROADCAST_INSERT_OPERATION: 50,
-    BROADCAST_UPDATE_OPERATION: 50,
-    BROADCAST_BIND_OPERATION: 50,
-    STREAM_INSERT_OPERATION: 50,
-    STREAM_UPDATE_OPERATION: 50,
+    BROADCAST_INSERT_OPERATION: 1,
+    BROADCAST_UPDATE_OPERATION: 1,
+    BROADCAST_BIND_OPERATION: 1,
+    STREAM_INSERT_OPERATION: 1,
+    STREAM_UPDATE_OPERATION: 1,
     VIDEO_UPDATE_OPERATION: 50,
     THUMBNAIL_OPERATION: 50,
 }
@@ -237,7 +242,8 @@ class YouTubePlatform:
     """Клиент строится лениво и кешируется по channel.key: один токен — один канал.
 
     Настройки эфира площадка не хранит: всё, что уходит в эфир, приходит готовой спекой (§7.4).
-    request_pause_sec — youtube_pause_seconds из planer.json: наименьший промежуток между обращениями.
+    request_pause_sec — youtube_pause_seconds из planer.json (число, можно дробное): наименьший промежуток между
+    обращениями к YouTube API (_execute). Картинки i.ytimg.com (_picture_sha) — не API: без паузы и не сдвигают её.
     rng — случайная добавка к паузам повторов (RetryPolicy); в тестах — фиксированный.
     stats — статистика запуска: попытки, повторы, пустые ответы, отказы, секунды запроса и паузы, единицы квоты.
     Браузер открывается только из describe_channel(allow_login=True): все прочие обращения входа не делают.
@@ -249,7 +255,7 @@ class YouTubePlatform:
         client_secret_file: Path,
         secrets_dir: Path,
         *,
-        request_pause_sec: int,
+        request_pause_sec: float,
         rng: random.Random,
         stats: RunStats | None = None,
     ) -> None:
@@ -257,7 +263,7 @@ class YouTubePlatform:
         self._unpriced: set[str] = set()   # операции без цены, о которых уже написано в лог
         self._client_secret_file: Path = client_secret_file
         self._secrets_dir: Path = secrets_dir
-        self._request_pause_sec: int = request_pause_sec
+        self._request_pause_sec: float = request_pause_sec
         self._rng: random.Random = rng
         self._last_request_at: float | None = None   # time.monotonic() конца предыдущего обращения
         self._refusals: dict[RefusalKey, tuple[PlatformError, ErrorBehavior]] = {}
@@ -356,12 +362,14 @@ class YouTubePlatform:
         return broadcast
 
     def _picture_sha(self, thumbnails: dict[str, Any]) -> str | None:
-        """Картинка размера default → отпечаток. Не скачалась — None: это не отказ площадки и не сбой канала."""
+        """Картинка размера default → отпечаток. Не скачалась — None: это не отказ площадки и не сбой канала.
+
+        CDN i.ytimg.com — не YouTube API и квоту не тратит: паузы перед картинкой нет, отсчёт паузы она не сдвигает.
+        """
         size: Any = thumbnails.get(THUMBNAIL_PICTURE_SIZE)
         url: Any = size.get("url") if isinstance(size, dict) else None
         if not isinstance(url, str) or not url:
             return None
-        self._wait_pause()
         started: float = self._stats.now()
         try:
             response: requests.Response = self._session.get(url, timeout=PICTURE_TIMEOUT_SEC)
@@ -370,7 +378,6 @@ class YouTubePlatform:
             return None
         finally:
             self._stats.picture_downloaded(self._stats.now() - started)
-            self._mark_request_done()
         if response.status_code != HTTP_OK or not response.content:
             LOGGER.info("thumbnail_picture_unavailable url=%s status=%s", url, response.status_code)
             return None

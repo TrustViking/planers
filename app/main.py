@@ -211,7 +211,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     _say_title(args, now_utc)
     try:
         exit_code: int = _run_guarded(args, paths, log_path, now_utc, stats)
-        _finish_stats(stats, exit_code, paths, log_path)
+        _finish_stats_guarded(stats, exit_code, paths, log_path)
         LOGGER.info("run_finished exit_code=%d elapsed_sec=%.1f", exit_code, stats.elapsed_sec)
         return exit_code
     finally:
@@ -224,6 +224,17 @@ def _run_kind(args: argparse.Namespace) -> RunKind:
     if args.check:
         return RunKind.CHECK
     return RunKind(_requested_run_mode(args).value)
+
+
+def _finish_stats_guarded(stats: RunStats, exit_code: int, paths: PlanerPaths, log_path: Path) -> None:
+    """Статистика не валит конец запуска: вся работа уже сделана, код выхода и run_finished — прежние."""
+    try:
+        _finish_stats(stats, exit_code, paths, log_path)
+    # Второй допустимый перехват Exception в планере (первый — _run_guarded): сбой замера после всей работы
+    # не должен давать трассировку в окне владельца и лог без run_finished.
+    except Exception:
+        LOGGER.exception("run_stats_crashed log=%s", log_path)
+        _say(msg.RUN_STATS_CRASHED.format(log=log_path))
 
 
 def _finish_stats(stats: RunStats, exit_code: int, paths: PlanerPaths, log_path: Path) -> None:
@@ -294,7 +305,8 @@ def _run_guarded(
     except KeyboardInterrupt:
         LOGGER.warning("run_interrupted")
         _say(msg.RUN_INTERRUPTED)
-    # Единственный перехват Exception в планере: всё, что не обработано ниже, — ошибка программы.
+    # Перехват Exception — один из двух в планере (второй — _finish_stats_guarded): всё, что не обработано ниже, —
+    # ошибка программы.
     # Без него трассировка ушла бы только в окно консоли, которое владелец закроет, а лог остался бы
     # оборванным на последней строке (живой прогон 17-09-2026 00:38 и 00:50).
     except Exception:

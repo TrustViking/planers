@@ -968,3 +968,30 @@ def test_duration_text_switches_to_hours() -> None:
     assert main_module._duration_text(583.4) == "9 мин 43 сек"
     assert main_module._duration_text(3912.0) == "1 ч 05 мин 12 сек"
     assert main_module._number_text(10370) == "10 370"
+
+
+@pytest.mark.parametrize("target", ["save", "to_json"])
+def test_crashed_stats_do_not_change_the_exit_code(
+    planer_root: Path,
+    counted_platform: FakePlatform,
+    make_package: PackageFactory,
+    make_slot: SlotFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    target: str,
+) -> None:
+    """5p: сбой статистики в конце запуска — ERROR run_stats_crashed с трассировкой, строка владельцу, run_finished."""
+    _ready(planer_root)
+    make_package(planer_root / "bcast", slots=[make_slot("01-01-2099", "19:00", "uk")])
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("статистика сломалась")
+
+    owner: Any = main_module.RunStore if target == "save" else RunStats
+    monkeypatch.setattr(owner, target, _boom)
+    assert run_cli([]) == 0
+    [log_file] = list((planer_root / "logs").glob("*_planer.log"))
+    assert capsys.readouterr().out.splitlines()[-1] == msg.RUN_STATS_CRASHED.format(log=log_file)
+    log: str = _log_text(planer_root)
+    assert "| ERROR | planer.main | run_stats_crashed " in log and "RuntimeError: статистика сломалась" in log
+    assert re.search(r"\| run_finished exit_code=0 elapsed_sec=\d+\.\d$", log, re.MULTILINE)

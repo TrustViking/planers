@@ -105,7 +105,9 @@ INVALID_SETTINGS: list[tuple[str, Callable[[dict[str, Any]], object], str]] = [
     ("category_not_string", lambda c: c.update(category_id=22), "category_id"),
     ("category_blank", lambda c: c.update(category_id=" "), "category_id"),
     ("youtube_pause_negative", lambda c: c.update(youtube_pause_seconds=-1), "youtube_pause_seconds"),
+    ("youtube_pause_negative_fraction", lambda c: c.update(youtube_pause_seconds=-0.5), "youtube_pause_seconds"),
     ("youtube_pause_text", lambda c: c.update(youtube_pause_seconds="2"), "youtube_pause_seconds"),
+    ("youtube_pause_fraction_text", lambda c: c.update(youtube_pause_seconds="0.5"), "youtube_pause_seconds"),
     ("youtube_pause_bool", lambda c: c.update(youtube_pause_seconds=True), "youtube_pause_seconds"),
     ("channels_in_settings", lambda c: c.update(channels=[]), "channels"),
 ]
@@ -169,7 +171,7 @@ def test_repo_planer_json_and_channels_example_load_together(
         auto_start=True,
         set_thumbnail=True,
         category_id="22",
-        youtube_pause_seconds=2,
+        youtube_pause_seconds=0.5,
     )
     assert [channel.account_name for channel in config.channels] == ["Канал UA", "Канал RU"]
     assert config.channels[1].languages == ("ru", "en")
@@ -341,6 +343,26 @@ def test_zero_youtube_pause_is_accepted(tmp_path: Path) -> None:
     settings: dict[str, Any] = copy.deepcopy(BASE_SETTINGS)
     settings["youtube_pause_seconds"] = 0
     assert load_settings(_write_settings(tmp_path, settings)).youtube_pause_seconds == 0
+
+
+@pytest.mark.parametrize("value", [0, 0.5, 2])
+def test_youtube_pause_may_be_fractional(tmp_path: Path, value: float) -> None:
+    """5p: пауза — число не меньше 0, можно дробное; в поставке 0.5."""
+    settings: dict[str, Any] = copy.deepcopy(BASE_SETTINGS)
+    settings["youtube_pause_seconds"] = value
+    loaded: float = load_settings(_write_settings(tmp_path, settings)).youtube_pause_seconds
+    assert loaded == value and isinstance(loaded, float)
+
+
+@pytest.mark.parametrize("value", [-0.5, True, "0.5"])
+def test_youtube_pause_rejects_negative_bool_and_text(tmp_path: Path, value: Any) -> None:
+    settings: dict[str, Any] = copy.deepcopy(BASE_SETTINGS)
+    settings["youtube_pause_seconds"] = value
+    with pytest.raises(ConfigError) as raised:
+        load_settings(_write_settings(tmp_path, settings))
+    assert raised.value.key_path == "youtube_pause_seconds"
+    assert msg.CONFIG_PROBLEM_NUMBER_MIN.format(minimum=0.0) in str(raised.value)
+    assert "нужно число не меньше 0, можно дробное, например 0.5" in str(raised.value)
 
 
 def test_missing_youtube_pause_names_the_field(tmp_path: Path) -> None:

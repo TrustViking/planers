@@ -1476,12 +1476,30 @@ def test_facts_do_not_download_pictures(platform: YouTubePlatform, monkeypatch: 
     assert session.calls == []
 
 
-def test_pause_also_separates_picture_downloads(
+class _SlowPictureSession(_FakeSession):
+    """Каждое скачивание картинки занимает PICTURE_SECONDS по часам теста."""
+
+    PICTURE_SECONDS: float = 1.5
+
+    def get(self, url: str, timeout: int) -> _PictureResponse:
+        answer: _PictureResponse = super().get(url, timeout)
+        if self._clock is not None:
+            self._clock.now += self.PICTURE_SECONDS
+        return answer
+
+
+def test_picture_downloads_have_no_pause_and_do_not_shift_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clock: _FakeClock,
 ) -> None:
-    platform: YouTubePlatform = _platform_with_pause(tmp_path, 2)
+    """5p: картинки i.ytimg.com — не API: перед ними не спим и отсчёт паузы до следующего вызова API не сдвигаем."""
+    stats: RunStats = RunStats(clock=clock.monotonic)
+    client_secret: Path = tmp_path / "client_secret.json"
+    client_secret.write_text("{}", encoding="utf-8")
+    platform: YouTubePlatform = YouTubePlatform(
+        client_secret, tmp_path, request_pause_sec=2, rng=random.Random(RNG_SEED), stats=stats
+    )
     items: list[dict[str, Any]] = []
     pictures: dict[str, Any] = {}
     for number in (1, 2):
@@ -1490,12 +1508,37 @@ def test_pause_also_separates_picture_downloads(
         item["snippet"]["thumbnails"] = _thumbnails(url)
         pictures[url] = _PictureResponse(200, PICTURE + bytes([number]))
         items.append(item)
-    service: _FakeService = _install(platform, monkeypatch, _FakeService(clock, liveBroadcasts=[{"items": items}]))
-    session: _FakeSession = _install_pictures(platform, _FakeSession(pictures, clock))
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(clock, liveBroadcasts=[{"items": items}], liveStreams=[_stream_list("S1")])
+    )
+    session: _FakeSession = _install_pictures(platform, _SlowPictureSession(pictures, clock))
     platform.list_upcoming(CHANNEL)
-    moments: list[float] = [service.calls[0]["at"]] + [moment for _, moment in session.calls if moment is not None]
-    assert len(moments) == 3
-    assert all(later - earlier >= 2 for earlier, later in zip(moments, moments[1:]))
+    assert [moment for _, moment in session.calls] == [0.0, 1.5]      # сразу после вызова API, без сна
+    platform.get_stream(CHANNEL, "S1")
+    # от конца вызова API (0.0) прошло 3.0 с картинок — больше паузы 2: второй вызов без сна
+    assert service.calls[1]["at"] == 3.0
+    assert clock.sleeps == [] and stats.pause_sec == 0.0
+    assert stats.pictures.count == 2 and stats.pictures.seconds == pytest.approx(3.0)
+
+
+def test_fractional_pause_sleeps_the_rest_of_half_a_second(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _FakeClock
+) -> None:
+    stats: RunStats = RunStats(clock=clock.monotonic)
+    client_secret: Path = tmp_path / "client_secret.json"
+    client_secret.write_text("{}", encoding="utf-8")
+    platform: YouTubePlatform = YouTubePlatform(
+        client_secret, tmp_path, request_pause_sec=0.5, rng=random.Random(RNG_SEED), stats=stats
+    )
+    service: _FakeService = _install(
+        platform, monkeypatch, _FakeService(clock, liveBroadcasts=[{"items": []}, {"items": []}])
+    )
+    platform.list_upcoming(CHANNEL)
+    clock.now += 0.2                 # между вызовами прошло 0.2 с — остаток паузы 0.3 с
+    platform.list_upcoming(CHANNEL)
+    assert clock.sleeps == [pytest.approx(0.3)]
+    assert stats.pause_sec == pytest.approx(0.3)
+    assert service.calls[1]["at"] == pytest.approx(0.5)
 
 
 def test_refusals_of_channels_with_one_title_do_not_mix(
@@ -1785,7 +1828,9 @@ def test_every_operation_has_a_quota_price() -> None:
     constants: list[str] = [name for name in passed if name.isupper()]   # «operation» — параметр самого _read_by_id
     assert constants and all(name in operations for name in constants)
     assert set(passed) - set(constants) == {"operation"}
-    assert youtube_module.QUOTA_UNITS["videos.list"] == 1 and youtube_module.QUOTA_UNITS["thumbnails.set"] == 50
+    # 5p: цены по факту Google Cloud Console за 20–21-09-2026 — 50 только у videos.update и thumbnails.set
+    assert {name for name, units in youtube_module.QUOTA_UNITS.items() if units == 50} == {"videos.update", "thumbnails.set"}
+    assert all(units in (1, 50) for units in youtube_module.QUOTA_UNITS.values())
 
 
 def test_unpriced_operation_costs_nothing_and_warns_once(
